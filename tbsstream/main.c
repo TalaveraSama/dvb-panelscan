@@ -295,18 +295,38 @@ static void output_packet(const uint8_t *pkt)
     sendto(udp_socks[i], pkt, TS_PKT, 0, (struct sockaddr *)&udp_addr[i], udp_addrlen[i]);
 }
 
-/* Lectura bloqueante de un paquete para un cliente HTTP (seq = siguiente). */
+/* Batch up to seven TS packets without waiting for a full batch. */
 static int ring_read(uint64_t *client_seq, uint8_t *out)
 {
   pthread_mutex_lock(&ring_mutex);
   while (*client_seq >= ring_seq)
     pthread_cond_wait(&ring_cond, &ring_mutex);
-  if (ring_seq > RING_PKTS && *client_seq < ring_seq - RING_PKTS) { /* muy lento */
+  if (ring_seq > RING_PKTS && *client_seq < ring_seq - RING_PKTS) {
+    LOGV("HTTP: slow client, ring overrun\n");
     *client_seq = ring_seq - RING_PKTS;
   }
-  memcpy(out, ring + (size_t)(*client_seq % RING_PKTS) * TS_PKT, TS_PKT);
-  (*client_seq)++;
+  int count = 0;
+  while (*client_seq < ring_seq && count < 7) {
+    memcpy(out + count * TS_PKT,
+           ring + (size_t)(*client_seq % RING_PKTS) * TS_PKT, TS_PKT);
+    (*client_seq)++;
+    count++;
+  }
   pthread_mutex_unlock(&ring_mutex);
+  return count;
+}
+
+/* TCP may accept fewer bytes than requested, even on a blocking socket. */
+static int http_write_all(int fd, const void *data, size_t len)
+{
+  const uint8_t *p = data;
+  while (len) {
+    ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    p += n;
+    len -= (size_t)n;
+  }
   return 0;
 }
 
@@ -408,7 +428,8 @@ static int pid_forward(uint16_t pid)
 {
   for (int i = 0; i < svc.nes; i++)
     if (svc.es[i].pid == pid) return 1;
-  return pid == PID_PAT || pid == svc.pmt_pid;
+  return pid == PID_PAT || pid == svc.pmt_pid ||
+         (svc.pcr_pid != 0x1fff && pid == svc.pcr_pid);
 }
 
 /* Encolar un ECM (no bloquea) */
@@ -637,8 +658,8 @@ static void http_send(int fd, const char *status, const char *ctype, const char 
     "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
     "Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
     status, ctype, bodylen);
-  send(fd, hdr, n, MSG_NOSIGNAL);
-  if (body && bodylen) send(fd, body, bodylen, MSG_NOSIGNAL);
+  if (http_write_all(fd, hdr, (size_t)n) == 0 && body && bodylen)
+    http_write_all(fd, body, (size_t)bodylen);
 }
 
 static char m3u8_body[512];
@@ -661,12 +682,15 @@ static void *http_client(void *arg)
     int n = snprintf(hdr, sizeof(hdr),
       "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n"
       "Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
-    send(fd, hdr, n, MSG_NOSIGNAL);
-    uint64_t seq = 0;
-    uint8_t pkt[TS_PKT];
+    if (http_write_all(fd, hdr, (size_t)n) < 0) { close(fd); return NULL; }
+    /* Join live: replaying the old ring creates a burst of stale PCR/PTS. */
+    pthread_mutex_lock(&ring_mutex);
+    uint64_t seq = ring_seq;
+    pthread_mutex_unlock(&ring_mutex);
+    uint8_t pkt[7 * TS_PKT];
     while (1) {
-      if (ring_read(&seq, pkt) < 0) break;
-      if (send(fd, pkt, TS_PKT, MSG_NOSIGNAL) < 0) break;
+      int count = ring_read(&seq, pkt);
+      if (http_write_all(fd, pkt, (size_t)count * TS_PKT) < 0) break;
     }
   } else {
     const char *idx =
@@ -694,6 +718,9 @@ static void *http_server(void *arg)
   while (1) {
     int c = accept(ls, NULL, NULL);
     if (c < 0) continue;
+    struct timeval tv = { .tv_sec = 5 };
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     pthread_t t;
     pthread_create(&t, NULL, http_client, (void *)(intptr_t)c);
     pthread_detach(t);
@@ -745,14 +772,30 @@ static void process_packet(uint8_t *pkt)
   }
 }
 
-static void process_buffer(uint8_t *buf, int len)
+/* DVR reads need not end at a TS boundary. Keep fragments across reads. */
+static uint8_t ts_pending[3 * TS_PKT];
+static int ts_pending_len = 0, ts_synced = 0;
+
+static void process_buffer(const uint8_t *buf, int len)
 {
-  int off = -1;
-  for (int i = 0; i + 2 * TS_PKT < len && i < TS_PKT; i++)
-    if (buf[i] == 0x47 && buf[i+TS_PKT] == 0x47 && buf[i+2*TS_PKT] == 0x47) { off = i; break; }
-  if (off < 0) return;
-  for (int p = off; p + TS_PKT <= len; p += TS_PKT)
-    process_packet(buf + p);
+  for (int i = 0; i < len; i++) {
+    ts_pending[ts_pending_len++] = buf[i];
+    if (ts_synced && ts_pending_len >= TS_PKT && ts_pending[0] != 0x47)
+      ts_synced = 0;
+    if (!ts_synced && ts_pending_len >= 2 * TS_PKT + 1) {
+      if (ts_pending[0] == 0x47 && ts_pending[TS_PKT] == 0x47 &&
+          ts_pending[2 * TS_PKT] == 0x47) {
+        ts_synced = 1;
+      } else {
+        memmove(ts_pending, ts_pending + 1, --ts_pending_len);
+      }
+    }
+    while (ts_synced && ts_pending_len >= TS_PKT) {
+      process_packet(ts_pending);
+      ts_pending_len -= TS_PKT;
+      memmove(ts_pending, ts_pending + TS_PKT, ts_pending_len);
+    }
+  }
 }
 
 static int parse_fec(const char *s)

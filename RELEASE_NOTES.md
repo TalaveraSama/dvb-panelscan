@@ -1,34 +1,26 @@
-## DVB PanelScan 0.4.0
+## DVB PanelScan 0.4.1 · Continuidad del streaming
 
-### Ubuntu amd64
+Correcciones de transporte para reducir posibles causas de tirones. No se garantiza eliminar todos los cortes: señal DVB, carga, red y cambios de claves requieren validación en el servidor real.
 
-Paquete compilado y probado en Ubuntu 22.04 amd64, con dependencias OpenSSL 3 y libdvbcsa del sistema. Destinado a Ubuntu 22.04/24.04 amd64; instalación automatizada comprobada en 22.04.
+- Conserva fragmentos TS entre lecturas del DVR; ya no exige tres paquetes completos en cada lectura ni descarta el final incompleto.
+- Reenvía el PID de PCR aunque sea distinto de los PID de audio/vídeo.
+- HTTP completa las escrituras TCP, incluso si `send()` acepta solo parte del buffer.
+- Agrupa hasta siete paquetes disponibles por escritura HTTP y conecta clientes al punto en vivo en lugar de repetir el ring antiguo.
+- Limita el tiempo de E/S de clientes HTTP bloqueados.
+- Rechaza IDs de transponder inexistentes antes de iniciar streaming.
+- Pruebas de lecturas fragmentadas, recuperación de sincronía, PCR separado, ring y entrega TCP, además de las regresiones anteriores con ASan/UBSan.
+
+### Actualizar en Ubuntu amd64
 
 ```sh
-sudo apt update
-sudo apt install ./dvb-panelscan_0.4.0_amd64.deb
-sudo systemctl enable --now dvb-panel
+wget https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.4.1/dvb-panelscan_0.4.1_amd64.deb
+sudo systemctl stop dvb-panel
+sudo apt install ./dvb-panelscan_0.4.1_amd64.deb
+sudo systemctl start dvb-panel
 ```
 
-Abrir http://127.0.0.1:8081. Para acceso remoto seguro: `ssh -L 8081:127.0.0.1:8081 usuario@servidor`.
-Comprobar la descarga con `sha256sum -c SHA256SUMS`.
+Se conservan `/var/lib/dvb-panelscan` y los overrides en `/etc/systemd/system/dvb-panel.service.d/`. El servicio base sigue escuchando solo en loopback; el panel no tiene autenticación.
 
-### Cambios
+Compilación, pruebas e instalación/arranque automatizados en Ubuntu 22.04 amd64. Verificar la descarga con `sha256sum -c SHA256SUMS`.
 
-- Dashboard adaptable con navegación lateral, métricas reales, estados vacíos y errores de conexión.
-- Selección de SID para el stream; diagnóstico TCP de la configuración Newcamd guardada.
-- Corrección del filtrado de secciones ECM, envío de la sección completa y selección del PID ECM.
-- Lectura de descriptores CA en programa y ES; solicitud CARD_DATA después del login.
-- Límites de mensajes y validación de longitud de respuestas CW; no se reemplazan claves válidas por mitades nulas.
-- Reconexión de Newcamd con espera progresiva y descarte de ECM pendientes tras errores de transporte.
-- Archivos de configuración privados y escritura atómica; argumentos secretos omitidos en respuestas de streaming.
-- Bloqueo de traversal estático y de POST con Origin ajeno; control del ciclo de vida del proceso.
-- Servicio systemd sin root (grupo video), vinculado únicamente a loopback por seguridad.
-
-### Verificación y límites
-
-GitHub Actions compila las herramientas, ejecuta pruebas Python/HTTP y regresiones C con ASan/UBSan para demux, framing Newcamd y CSA par/impar. Instala el `.deb`, inicia el servicio y comprueba `/api/status`.
-
-**No se ha validado el descifrado end-to-end con hardware DVB ni una tarjeta/servidor autorizados.** El test TCP no verifica login ni autorización, y proceso activo no significa vídeo descifrado. En simulcrypt se elige el primer CA; selección explícita CAID/proveedor y EMM quedan pendientes. El panel no tiene autenticación: no exponerlo directamente a Internet. Consultar README para permisos, logs y limitaciones.
-
-Los archivos «Source code» son fuentes, no instaladores. Descargar el `.deb` para Ubuntu amd64.
+Continúan pendientes el seguimiento preciso del período de claves como Tvheadend, EMM y selección explícita de CAID/proveedor en simulcrypt. No se incluye transcodificación ni se cambian las credenciales del usuario.

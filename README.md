@@ -140,3 +140,17 @@ sh packaging/build-deb.sh 0.4.0
 
 GitHub Actions ejecuta estas pruebas y genera el `.deb`. La descarga del código
 fuente no contiene binarios: usar el `.deb` de Releases para instalar.
+
+## Actualización 0.4.1 · Continuidad de vídeo
+
+La versión 0.4.1 conserva fragmentos TS entre lecturas del DVR, reenvía PCR
+separado, completa escrituras parciales TCP y entrega HTTP en lotes de hasta
+siete paquetes disponibles. Los clientes nuevos se conectan al punto en vivo.
+También rechaza un ID de transponder inexistente antes de iniciar un proceso.
+Estas correcciones eliminan fallos concretos de transporte, pero no garantizan
+resolver cortes por señal, carga, red o cambios de claves. Hay pruebas de
+regresión en `tests/test_transport.c` ejecutadas con ASan/UBSan en Actions.
+
+Para actualizar, descargar el `.deb` 0.4.1 desde Releases, detener `dvb-panel`,
+instalar con `apt install ./dvb-panelscan_0.4.1_amd64.deb` y volver a iniciar el
+servicio. Se conservan la configuración privada y los overrides de systemd.

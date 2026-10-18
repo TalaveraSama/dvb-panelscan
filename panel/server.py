@@ -605,6 +605,8 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(udp, str):
                 udp = [udp]
             tp = _find_tp(body.get("id")) or body.get("transponder") or body
+            if body.get("id") and not _find_tp(body["id"]):
+                return self._send(404, {"ok": False, "error": "Transponder no encontrado"})
             return self._send(200, stream_start(tp, body.get("newcamd"), udp, body.get("http_port"), body.get("sid")))
         if path == "/api/stream/stop":
             return self._send(200, stream_stop())

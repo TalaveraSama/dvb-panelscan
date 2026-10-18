@@ -38,6 +38,7 @@ class PanelTests(unittest.TestCase):
                 ("/static/%2e%2e/server.py", None, {}, 403),
                 ("/api/newcamd", b'{"port":"bad"}', {}, 400),
                 ("/api/newcamd", b'[]', {}, 400),
+                ("/api/stream/start", b'{"id":"missing"}', {}, 404),
                 ("/api/newcamd", b'{}', {"Origin":"https://evil.example"}, 403),
             ]:
                 req = urllib.request.Request(base + path, data=body, headers=headers)
