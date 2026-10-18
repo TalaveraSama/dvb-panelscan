@@ -17,3 +17,6 @@ Thumbs.db
 panel/*.json
 panel/*.log
 dist/
+
+# temporary upstream source reviews
+.cache/

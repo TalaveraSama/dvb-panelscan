@@ -154,3 +154,10 @@ regresión en `tests/test_transport.c` ejecutadas con ASan/UBSan en Actions.
 Para actualizar, descargar el `.deb` 0.4.1 desde Releases, detener `dvb-panel`,
 instalar con `apt install ./dvb-panelscan_0.4.1_amd64.deb` y volver a iniciar el
 servicio. Se conservan la configuración privada y los overrides de systemd.
+
+## Comparación con Tvheadend
+
+Ver [revisión de playlists, MPEG-TS y descrambling](docs/TVHEADEND_STREAMING_REVIEW.md),
+con enlaces a un commit fijo de Tvheadend y diferencias concretas respecto a
+0.4.1. La playlist M3U no es HLS; los principales pendientes son el motor de
+suscripciones compartidas, PSI con descriptores y la gestión temporal de CW.
