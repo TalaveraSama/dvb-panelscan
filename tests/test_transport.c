@@ -82,10 +82,29 @@ static void test_http_writes(void)
   close(pair[0]);
 }
 
+static void test_stdout_ts(void)
+{
+  int pair[2];
+  assert(pipe(pair) == 0);
+  int saved = dup(STDOUT_FILENO);
+  assert(saved >= 0 && dup2(pair[1], STDOUT_FILENO) >= 0);
+  close(pair[1]);
+  uint8_t packet[TS_PKT] = {0x47, 1, 0, 0x10}, received[TS_PKT];
+  opts.stdout_ts = 1;
+  output_packet(packet);
+  opts.stdout_ts = 0;
+  assert(dup2(saved, STDOUT_FILENO) >= 0);
+  close(saved);
+  assert(read(pair[0], received, sizeof(received)) == TS_PKT);
+  assert(!memcmp(packet, received, sizeof(packet)));
+  close(pair[0]);
+}
+
 int main(void)
 {
   test_fragmented_reads();
   test_http_writes();
+  test_stdout_ts();
   puts("TS fragmentation, PCR forwarding, ring batching and TCP tests passed");
   return 0;
 }

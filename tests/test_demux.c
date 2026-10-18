@@ -38,6 +38,7 @@ int main(void) {
   };
   parse_pmt(with_descriptors, sizeof(with_descriptors));
   assert(svc.ecm_pid == 0x124 && svc.caid == 0x1802);
+  assert(strstr(m3u8_body, "Canal 1") != NULL);
   assert(svc.es[0].descriptors_len == 10);
   uint8_t section[1024];
   int size = build_pmt(section);

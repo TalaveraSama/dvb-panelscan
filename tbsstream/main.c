@@ -101,6 +101,8 @@ typedef struct {
 } service_t;
 
 static service_t svc;
+static char m3u8_body[512];
+static pthread_mutex_t playlist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* -------------------------------------------------------------------------
  * Opciones globales
@@ -131,6 +133,20 @@ typedef struct {
 } opts_t;
 
 static opts_t opts;
+
+static void refresh_playlist(unsigned sid)
+{
+  char base[256];
+  if (opts.m3u8_base[0])
+    snprintf(base, sizeof(base), "%s", opts.m3u8_base);
+  else
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", opts.http_port);
+  pthread_mutex_lock(&playlist_mutex);
+  snprintf(m3u8_body, sizeof(m3u8_body),
+           "#EXTM3U\n#EXTINF:-1 tvg-id=\"%u\",Canal %u\n%s/stream.ts\n", sid, sid, base);
+  pthread_mutex_unlock(&playlist_mutex);
+}
+
 
 /* -------------------------------------------------------------------------
  * Sintonización DVB
@@ -665,6 +681,7 @@ static void parse_pmt(const uint8_t *b, int len)
   next.ready = 1;
   if (memcmp(&svc, &next, sizeof(next))) {
     svc = next;
+    refresh_playlist(svc.sid);
     psi_due_ms = 0;
     LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d\n",
          svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes);
@@ -717,8 +734,6 @@ static void http_send(int fd, const char *status, const char *ctype, const char 
     http_write_all(fd, body, (size_t)bodylen);
 }
 
-static char m3u8_body[512];
-
 static void *http_client(void *arg)
 {
   int fd = (int)(intptr_t)arg;
@@ -731,7 +746,11 @@ static void *http_client(void *arg)
   if (sscanf(req, "%15s %255s", method, path) != 2) { close(fd); return NULL; }
 
   if (strcmp(path, "/playlist.m3u8") == 0) {
-    http_send(fd, "200 OK", "application/vnd.apple.mpegurl", m3u8_body, (int)strlen(m3u8_body));
+    char playlist[sizeof(m3u8_body)];
+    pthread_mutex_lock(&playlist_mutex);
+    memcpy(playlist, m3u8_body, sizeof(playlist));
+    pthread_mutex_unlock(&playlist_mutex);
+    http_send(fd, "200 OK", "application/vnd.apple.mpegurl", playlist, (int)strlen(playlist));
   } else if (strcmp(path, "/stream.ts") == 0) {
     char hdr[256];
     int n = snprintf(hdr, sizeof(hdr),
@@ -767,7 +786,8 @@ static void *http_server(void *arg)
                            .sin_port = htons((uint16_t)port) };
   if (bind(ls, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(ls, 8) < 0) {
     fprintf(stderr, "HTTP: %s\n", strerror(errno));
-    return NULL;
+    close(ls);
+    exit(EXIT_FAILURE);
   }
   fprintf(stderr, "HTTP TS en http://0.0.0.0:%d/stream.ts\n", port);
   while (1) {
@@ -1048,11 +1068,7 @@ int main(int argc, char **argv)
   pthread_t ca_tid;
   pthread_create(&ca_tid, NULL, ca_thread, nc);
 
-  /* M3U8 */
-  snprintf(m3u8_body, sizeof(m3u8_body),
-    "#EXTM3U\n#EXTINF:-1 tvg-id=\"%d\",Canal %d\n%s/stream.ts\n",
-    opts.want_sid ? opts.want_sid : 0, opts.want_sid ? opts.want_sid : 0,
-    opts.m3u8_base[0] ? opts.m3u8_base : "http://127.0.0.1:9981");
+  refresh_playlist(opts.want_sid);
 
   /* servidor HTTP */
   pthread_t ht;
