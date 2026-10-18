@@ -503,7 +503,8 @@ static void process_buffer(uint8_t *buf, int len)
 typedef struct {
   int adapter, frontend;
   int delsys;          /* SYS_DVBT / DVBT2 / DVBC_ANNEX_A / DVBS / DVBS2 */
-  uint32_t freq_hz;
+  int64_t freq_hz;     /* frecuencia de satélite; si lnb_lo_hz=0 es la FI */
+  int64_t lnb_lo_hz;   /* LO del LNB (0 = sin conversión, freq ya es FI) */
   uint32_t bandwidth_hz;
   uint32_t symbol_rate;
   int mod, fec, fec_hp, fec_lp, tx_mode, guard, hier, rolloff;
@@ -529,8 +530,12 @@ static int frontend_tune(int fd, const opts_t *o)
 
   dtv(p, &n, DTV_CLEAR, 0);
   dtv(p, &n, DTV_DELIVERY_SYSTEM, (uint32_t)o->delsys);
-  /* El driver TBS (TBSECP3) espera la frecuencia en kHz, no en Hz */
-  dtv(p, &n, DTV_FREQUENCY, o->freq_hz / 1000);
+  /* Conversión frecuencia de satélite -> FI con el LO del LNB (si aplica).
+     El driver TBS (TBSECP3) espera la FI en kHz, no en Hz. */
+  int64_t if_hz = o->freq_hz;
+  if (o->lnb_lo_hz > 0 && o->freq_hz > o->lnb_lo_hz)
+    if_hz = o->freq_hz - o->lnb_lo_hz;
+  dtv(p, &n, DTV_FREQUENCY, (uint32_t)(if_hz / 1000));
   dtv(p, &n, DTV_INVERSION, INVERSION_AUTO);
 
   switch (o->delsys) {
@@ -639,8 +644,8 @@ static void json_str(FILE *out, const char *s)
 
 static void emit_json(const opts_t *o, FILE *out)
 {
-  fprintf(out, "{\n  \"adapter\": %d,\n  \"frequency\": %u,\n",
-          o->adapter, o->freq_hz);
+  fprintf(out, "{\n  \"adapter\": %d,\n  \"frequency\": %lld,\n",
+          o->adapter, (long long)o->freq_hz);
   fputs("  \"network\": ", out); json_str(out, network_name); fputs(",\n", out);
   fputs("  \"services\": [\n", out);
   int first = 1;
@@ -673,7 +678,7 @@ static void emit_m3u8(const opts_t *o, FILE *out)
     if (o->base_url)
       fprintf(out, "%s%u\n", o->base_url, (unsigned)s->sid);
     else
-      fprintf(out, "dvb://adapter%d/%u/%u\n", o->adapter, o->freq_hz, (unsigned)s->sid);
+      fprintf(out, "dvb://adapter%d/%lld/%u\n", o->adapter, (long long)o->freq_hz, (unsigned)s->sid);
   }
 }
 
@@ -688,8 +693,9 @@ static void usage(const char *argv0)
     "  -a, --adapter N      adaptador /dev/dvb/adapterN (def 0)\n"
     "  -F, --frontend N     frontend N (def 0)\n"
     "  -t, --type T         dvbt | dvbt2 | dvbc | dvbs | dvbs2 (def dvbt)\n"
-    "      --freq Hz        frecuencia (obligatoria)\n"
-    "      --freq-mhz MHz   alternativa a --freq (MHz)\n"
+    "      --freq Hz        frecuencia de satélite (o FI si --lnb-lo 0)\n"
+    "      --freq-mhz MHz   frecuencia de satélite en MHz\n"
+    "      --lnb-lo MHz     LO del LNB (def 9750; 0 = la freq ya es FI)\n"
     "\n"
     "  DVB-T/T2:\n"
     "      --bandwidth Hz   ancho de banda (def 8000000)\n"
@@ -736,6 +742,7 @@ int main(int argc, char **argv)
   o.timeout_s = 15;
   o.with_epg = 1;
   o.pol = 'H';
+  o.lnb_lo_hz = 9750000000LL;   /* universal Ku, banda baja (9750 MHz) */
   o.fec = o.fec_hp = o.fec_lp = 0;
 
   char *type = NULL, *fec = NULL, *fec_hp = NULL, *fec_lp = NULL;
@@ -743,7 +750,7 @@ int main(int argc, char **argv)
   double freq_mhz = 0;
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP,
-         OPT_FEC_LP, OPT_POL, OPT_NOEPG, OPT_BASEURL, OPT_JSON };
+         OPT_FEC_LP, OPT_POL, OPT_NOEPG, OPT_BASEURL, OPT_JSON, OPT_LNBLO };
 
   static const struct option longopts[] = {
     {"adapter",    required_argument, 0, 'a'},
@@ -762,6 +769,7 @@ int main(int argc, char **argv)
     {"output",     required_argument, 0, 'o'},
     {"base-url",   required_argument, 0, OPT_BASEURL},
     {"json",       no_argument,       0, OPT_JSON},
+    {"lnb-lo",     required_argument, 0, OPT_LNBLO},
     {"verbose",    no_argument,       0, 'v'},
     {"help",       no_argument,       0, 'h'},
     {0,0,0,0}
@@ -773,7 +781,7 @@ int main(int argc, char **argv)
       case 'a': o.adapter = atoi(optarg); break;
       case 'F': o.frontend = atoi(optarg); break;
       case 't': type = optarg; break;
-      case OPT_FREQ: o.freq_hz = (uint32_t)strtoul(optarg, NULL, 10); break;
+      case OPT_FREQ: o.freq_hz = (int64_t)strtoll(optarg, NULL, 10); break;
       case OPT_FREQ_MHZ: freq_mhz = atof(optarg); break;
       case OPT_BW: o.bandwidth_hz = (uint32_t)strtoul(optarg, NULL, 10); break;
       case OPT_SR: o.symbol_rate = (uint32_t)strtoul(optarg, NULL, 10); break;
@@ -786,13 +794,14 @@ int main(int argc, char **argv)
       case 'o': o.outfile = optarg; break;
       case OPT_BASEURL: o.base_url = optarg; break;
       case OPT_JSON: o.with_json = 1; break;
+      case OPT_LNBLO: o.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'v': verbose = 1; break;
       case 'h': usage(argv[0]); return 0;
       default: usage(argv[0]); return 1;
     }
   }
 
-  if (freq_mhz > 0) o.freq_hz = (uint32_t)(freq_mhz * 1000000.0);
+  if (freq_mhz > 0) o.freq_hz = (int64_t)(freq_mhz * 1000000.0);
 
   if (!type) type = "dvbt";
   if (!strcmp(type, "dvbt"))  o.delsys = SYS_DVBT;
@@ -830,8 +839,8 @@ int main(int argc, char **argv)
   int dvr = open(dvr_path, O_RDONLY | O_NONBLOCK);
   if (dvr < 0) { fprintf(stderr, "open %s: %s\n", dvr_path, strerror(errno)); return 1; }
 
-  LOGV("sintonizando adapter%d frontend%d a %u Hz (%s)\n",
-       o.adapter, o.frontend, o.freq_hz, type);
+  LOGV("sintonizando adapter%d frontend%d a %lld Hz (%s)\n",
+       o.adapter, o.frontend, (long long)o.freq_hz, type);
 
   if (frontend_tune(fe, &o) < 0) return 1;
 

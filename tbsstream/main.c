@@ -100,7 +100,9 @@ static service_t svc;
 typedef struct {
   int adapter, frontend;
   int delsys;
-  uint32_t freq_hz, bandwidth_hz, symbol_rate;
+  int64_t freq_hz;     /* frecuencia de satélite; si lnb_lo_hz=0 es la FI */
+  int64_t lnb_lo_hz;
+  uint32_t bandwidth_hz, symbol_rate;
   int mod, fec, fec_hp, fec_lp, tx_mode, guard, hier, rolloff;
   char pol;
 
@@ -135,8 +137,12 @@ static int frontend_tune(int fd, const opts_t *o)
   int n = 0;
   dtv(p, &n, DTV_CLEAR, 0);
   dtv(p, &n, DTV_DELIVERY_SYSTEM, (uint32_t)o->delsys);
-  /* El driver TBS (TBSECP3) espera la frecuencia en kHz, no en Hz */
-  dtv(p, &n, DTV_FREQUENCY, o->freq_hz / 1000);
+  /* Conversión frecuencia de satélite -> FI con el LO del LNB (si aplica).
+     El driver TBS (TBSECP3) espera la FI en kHz, no en Hz. */
+  int64_t if_hz = o->freq_hz;
+  if (o->lnb_lo_hz > 0 && o->freq_hz > o->lnb_lo_hz)
+    if_hz = o->freq_hz - o->lnb_lo_hz;
+  dtv(p, &n, DTV_FREQUENCY, (uint32_t)(if_hz / 1000));
   dtv(p, &n, DTV_INVERSION, INVERSION_AUTO);
 
   switch (o->delsys) {
@@ -720,6 +726,7 @@ int main(int argc, char **argv)
   opts.adapter = 0; opts.frontend = 0; opts.delsys = SYS_DVBT;
   opts.nc_port = 15050; opts.http_port = 9981;
   opts.pol = 'H';
+  opts.lnb_lo_hz = 9750000000LL;   /* universal Ku, banda baja (9750 MHz) */
   strcpy(opts.nc_host, "127.0.0.1");
   strcpy(opts.nc_user, "user");
 
@@ -729,7 +736,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE };
+         OPT_BASE, OPT_LNBLO };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -751,6 +758,7 @@ int main(int argc, char **argv)
     {"udp", required_argument, 0, OPT_UDP},
     {"http-port", required_argument, 0, OPT_HTTP},
     {"m3u8-base", required_argument, 0, OPT_BASE},
+    {"lnb-lo", required_argument, 0, OPT_LNBLO},
     {"timeout", required_argument, 0, 'T'},
     {"verbose", no_argument, 0, 'v'},
     {"help", no_argument, 0, 'h'},
@@ -764,7 +772,7 @@ int main(int argc, char **argv)
       case 'F': opts.frontend = atoi(optarg); break;
       case 't': type = optarg; break;
       case 's': opts.want_sid = (uint16_t)atoi(optarg); break;
-      case OPT_FREQ: opts.freq_hz = (uint32_t)strtoul(optarg, NULL, 10); break;
+      case OPT_FREQ: opts.freq_hz = (int64_t)strtoll(optarg, NULL, 10); break;
       case OPT_FREQ_MHZ: freq_mhz = atof(optarg); break;
       case OPT_BW: opts.bandwidth_hz = (uint32_t)strtoul(optarg, NULL, 10); break;
       case OPT_SR: opts.symbol_rate = (uint32_t)strtoul(optarg, NULL, 10); break;
@@ -806,6 +814,7 @@ int main(int argc, char **argv)
       }
       case OPT_HTTP: opts.http_port = atoi(optarg); break;
       case OPT_BASE: strncpy(opts.m3u8_base, optarg, sizeof(opts.m3u8_base)-1); break;
+      case OPT_LNBLO: opts.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'T': timeout = atoi(optarg); break;
       case 'v': verbose = 1; break;
       case 'h':
@@ -816,7 +825,7 @@ int main(int argc, char **argv)
     }
   }
 
-  if (freq_mhz > 0) opts.freq_hz = (uint32_t)(freq_mhz * 1000000.0);
+  if (freq_mhz > 0) opts.freq_hz = (int64_t)(freq_mhz * 1000000.0);
 
   if (!type) type = "dvbt";
   if (!strcmp(type, "dvbt")) opts.delsys = SYS_DVBT;

@@ -111,6 +111,11 @@ def _build_cmd(binary, p):
         cmd += ["--freq", str(int(p["freq"]))]
     elif p.get("freq_mhz"):
         cmd += ["--freq-mhz", str(float(p["freq_mhz"]))]
+    # LNB LO: convierte frecuencia de satélite a FI (0 = la freq ya es FI)
+    lnb_lo = p.get("lnb_lo")
+    if lnb_lo is None:
+        lnb_lo = 9750
+    cmd += ["--lnb-lo", str(float(lnb_lo))]
     if p.get("symbol_rate"):
         cmd += ["--symbol-rate", str(int(p["symbol_rate"]))]
     if p.get("pol"):

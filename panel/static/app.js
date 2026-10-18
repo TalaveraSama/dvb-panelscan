@@ -106,6 +106,7 @@ async function onScan(e) {
   const body = {
     type: $("type").value,
     freq_mhz: parseFloat($("freq_mhz").value),
+    lnb_lo: $("lnb_lo").value ? parseFloat($("lnb_lo").value) : 9750,
     symbol_rate: $("symbol_rate").value ? parseInt($("symbol_rate").value, 10) : null,
     pol: $("pol").value,
     adapter: parseInt($("adapter").value, 10),
@@ -128,6 +129,19 @@ async function onScan(e) {
     btn.textContent = "Escanear";
   }
 }
+
+function applyTransponder() {
+  const v = $("transponder").value;
+  if (v === "custom") return;
+  const parts = v.split(",");
+  if (parts.length !== 3) return;
+  $("freq_mhz").value = parts[0];
+  $("symbol_rate").value = parts[1];
+  $("pol").value = parts[2];
+}
+
+$("transponder").addEventListener("change", applyTransponder);
+applyTransponder();
 
 $("scanForm").addEventListener("submit", onScan);
 $("filter").addEventListener("input", () => loadChannels());
