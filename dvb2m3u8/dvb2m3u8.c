@@ -199,7 +199,7 @@ static void decode_text(char *dst, size_t cap, const uint8_t *src, int len)
       continue;
     }
     /* resto de 0xA0..0xFF (muestra razonable, sin tabla completa) */
-    if (c >= 0xA0) { dst[pos++] = (char)c; continue; } /* aprox. Latin-1 */
+    if (c >= 0xA0) { utf8_put(dst, &pos, cap, c); continue; } /* Latin-1 -> UTF-8 */
   }
   dst[pos] = 0;
 }
@@ -570,19 +570,21 @@ static int frontend_tune(int fd, const opts_t *o)
       break;
   }
 
+  /* Polarización LNB por voltaje ANTES de sintonizar: alimenta el LNB y
+     selecciona la polarización. Si se hace DESPUÉS, el tuner no engancha. */
+  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
+    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
+                       ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
+    ioctl(fd, FE_SET_VOLTAGE, v);
+    usleep(300000);   /* dejar estabilizar el LNB */
+  }
+
   dtv(p, &n, DTV_TUNE, 0);
 
   struct dtv_properties cmd = { .num = (unsigned)n, .props = p };
   if (ioctl(fd, FE_SET_PROPERTY, &cmd) < 0) {
     fprintf(stderr, "FE_SET_PROPERTY: %s\n", strerror(errno));
     return -1;
-  }
-
-  /* Polarización LNB por voltaje (13V vertical/izq, 18V horizontal/der) */
-  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
-    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
-                       ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
-    ioctl(fd, FE_SET_VOLTAGE, v);
   }
   return 0;
 }
@@ -851,6 +853,23 @@ int main(int argc, char **argv)
   }
   LOGV("bloqueado (lock) OK\n");
   print_signal(fe);
+
+  /* El driver TBSECP3 solo entrega TS al dvr si el demux tiene un filtro
+     "full TS" (todos los PIDs -> DMX_OUT_TS_TAP). Sin esto, dvr0 no da datos. */
+  char dmx_path[128];
+  snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", o.adapter, o.frontend);
+  int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
+  if (dmx >= 0) {
+    struct dmx_pes_filter_params pes;
+    memset(&pes, 0, sizeof(pes));
+    pes.pid = 0x2000;               /* todos los PIDs */
+    pes.input = DMX_IN_FRONTEND;
+    pes.output = DMX_OUT_TS_TAP;    /* volcar al dvr */
+    pes.pes_type = DMX_PES_OTHER;
+    pes.flags = 0;
+    ioctl(dmx, DMX_SET_PES_FILTER, &pes);
+    ioctl(dmx, DMX_START);
+  }
 
   /* PIDs de interés iniciales */
   track_pid(PID_PAT);

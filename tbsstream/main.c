@@ -39,6 +39,7 @@
 
 #include <linux/dvb/frontend.h>
 #include <linux/dvb/version.h>
+#include <linux/dvb/dmx.h>
 
 #include "newcamd.h"
 #include "csa.h"
@@ -174,17 +175,21 @@ static int frontend_tune(int fd, const opts_t *o)
       dtv(p, &n, DTV_PILOT, PILOT_AUTO);
       break;
   }
+  /* Polarización LNB por voltaje ANTES de sintonizar: alimenta el LNB y
+     selecciona la polarización. Si se hace DESPUÉS, el tuner no engancha. */
+  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
+    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
+                         ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
+    ioctl(fd, FE_SET_VOLTAGE, v);
+    usleep(300000);   /* dejar estabilizar el LNB */
+  }
+
   dtv(p, &n, DTV_TUNE, 0);
 
   struct dtv_properties cmd = { .num = (unsigned)n, .props = p };
   if (ioctl(fd, FE_SET_PROPERTY, &cmd) < 0) {
     fprintf(stderr, "FE_SET_PROPERTY: %s\n", strerror(errno));
     return -1;
-  }
-  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
-    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
-                         ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
-    ioctl(fd, FE_SET_VOLTAGE, v);
   }
   return 0;
 }
@@ -869,6 +874,23 @@ int main(int argc, char **argv)
   if (frontend_tune(fe, &opts) < 0) return 1;
   if (wait_lock(fe, timeout) < 0) { fprintf(stderr, "sin lock\n"); return 1; }
   LOGV("lock OK\n");
+
+  /* El driver TBSECP3 solo entrega TS al dvr si el demux tiene un filtro
+     "full TS" (todos los PIDs -> DMX_OUT_TS_TAP). */
+  char dmx_path[128];
+  snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", opts.adapter, opts.frontend);
+  int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
+  if (dmx >= 0) {
+    struct dmx_pes_filter_params pes;
+    memset(&pes, 0, sizeof(pes));
+    pes.pid = 0x2000;
+    pes.input = DMX_IN_FRONTEND;
+    pes.output = DMX_OUT_TS_TAP;
+    pes.pes_type = DMX_PES_OTHER;
+    pes.flags = 0;
+    ioctl(dmx, DMX_SET_PES_FILTER, &pes);
+    ioctl(dmx, DMX_START);
+  }
 
   /* newcamd + CSA */
   csae = csa_create();

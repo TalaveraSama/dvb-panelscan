@@ -142,6 +142,7 @@ def _run_real_scan(binary, p):
     cmd = _build_cmd(binary, p)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
                               timeout=int(p.get("timeout") or 15) + 10)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout del escaneo"}

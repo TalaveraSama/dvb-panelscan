@@ -134,10 +134,11 @@ function applyTransponder() {
   const v = $("transponder").value;
   if (v === "custom") return;
   const parts = v.split(",");
-  if (parts.length !== 3) return;
-  $("freq_mhz").value = parts[0];
-  $("symbol_rate").value = parts[1];
-  $("pol").value = parts[2];
+  if (parts.length !== 4) return;
+  $("type").value = parts[0];
+  $("freq_mhz").value = parts[1];
+  $("symbol_rate").value = parts[2];
+  $("pol").value = parts[3];
 }
 
 $("transponder").addEventListener("change", applyTransponder);
