@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -421,7 +422,8 @@ class Handler(BaseHTTPRequestHandler):
                "--deskey", nc.get("deskey", ""),
                "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
                "--udp", "127.0.0.1:%d" % port]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
         self.send_header("Connection", "close")
@@ -440,7 +442,14 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             sock.close()
             try:
-                proc.terminate()
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=2)
             except Exception:
                 pass
 
