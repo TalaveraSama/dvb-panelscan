@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -179,6 +180,19 @@ def run_scan(tp):
 
 def _find_tp(tp_id):
     return next((t for t in STATE["transponders"] if t.get("id") == tp_id), None)
+
+
+def _find_tp_by_sid(sid):
+    try:
+        sid = int(sid)
+    except ValueError:
+        return None
+    with _lock:
+        for t in STATE["transponders"]:
+            scan = t.get("scan")
+            if scan and any(s.get("sid") == sid for s in scan.get("services", [])):
+                return t
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +394,55 @@ class Handler(BaseHTTPRequestHandler):
                 host = self.headers.get("Host", "127.0.0.1:8081")
                 base = "http://%s/stream/channelid/{sid}" % host
             return self._send(200, build_m3u8(base, tid, profile), "application/vnd.apple.mpegurl")
+        if path.startswith("/stream/channelid/"):
+            return self._stream_channel(path[len("/stream/channelid/"):])
         return self._send(404, {"error": "not found"})
+
+    def _stream_channel(self, sid):
+        """Sirve el TS de un canal: arranca tbsstream (-s SID) -> UDP local -> HTTP."""
+        tp = _find_tp_by_sid(sid)
+        if not tp:
+            return self._send(404, {"error": "SID %s no encontrado" % sid})
+        tbs = find_tbsstream(_cfg["tbsstream"])
+        if not tbs:
+            return self._send(500, {"error": "tbsstream no disponible"})
+        nc = STATE["newcamd"]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        cmd = [tbs, "-t", tp.get("type", "dvbs2"),
+               "--freq-mhz", str(tp.get("freq_mhz")),
+               "--lnb-lo", str(tp.get("lnb_lo", 9750)),
+               "--pol", tp.get("pol", "V"),
+               "-a", str(tp.get("adapter", 0)),
+               "-s", sid,
+               "--symbol-rate", str(tp.get("symbol_rate", 0)),
+               "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
+               "--deskey", nc.get("deskey", ""),
+               "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
+               "--udp", "127.0.0.1:%d" % port]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        sock.settimeout(1)
+        deadline = time.time() + 3600
+        try:
+            while time.time() < deadline:
+                try:
+                    data, _ = sock.recvfrom(1316)
+                    self.wfile.write(data)
+                except socket.timeout:
+                    continue
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        finally:
+            sock.close()
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
