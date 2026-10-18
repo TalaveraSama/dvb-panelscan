@@ -510,7 +510,16 @@ class Handler(BaseHTTPRequestHandler):
         session = None
         try:
             tp, sid = resolve_channel(identity)
-            session = _session_start(tp, STATE["newcamd"], sid=sid)
+            # A player may open the next channel just before the old TCP
+            # handler observes its disconnect. Allow cleanup, never evict it.
+            for attempt in range(6):
+                try:
+                    session = _session_start(tp, STATE["newcamd"], sid=sid)
+                    break
+                except StreamError as e:
+                    if e.status != 409 or attempt == 5:
+                        raise
+                    time.sleep(0.1)
             cursor = session.cursor()
         except StreamError as e:
             return self._send(e.status, {"error": str(e)})
