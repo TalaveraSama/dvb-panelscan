@@ -3,13 +3,18 @@ on:
   push:
     branches: [arena/6e165552-dvb-panelscan]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish verified v0.4.0 release
+        type: boolean
+        default: false
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev libdvbcsa-dev
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: |
@@ -25,9 +30,17 @@ jobs:
       - run: |
           sudo apt-get install -y ./dist/*.deb
           sudo systemctl start dvb-panel
-          curl --fail http://127.0.0.1:8081/api/status
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/api/status
           sudo systemctl stop dvb-panel
       - uses: actions/upload-artifact@v4
         with:
           name: ubuntu-22.04-amd64
           path: dist/*.deb
+      - name: Publish release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum *.deb > SHA256SUMS
+          gh release create v0.4.0 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.4.0 · Dashboard y Newcamd · Ubuntu" --notes-file ../RELEASE_NOTES.md
