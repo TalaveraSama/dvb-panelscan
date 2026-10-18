@@ -403,6 +403,7 @@ int newcamd_send_ecm(newcamd_t *nc, uint16_t sid, uint16_t caid, uint32_t provid
       if (rseq != seq) continue;   /* respuesta a otro ECM */
       uint8_t *m = buf + 12;       /* m[0]=tipo, m[1..2]=reservado */
       int mlen = ((m[1] & 0x0f) << 8) | m[2];
+      if (mlen == 0) return -2; /* explicit negative ECM response */
       if (mlen != 16 || r < 31) return -1;
       mlen += 3;
       if (mlen < 19) return -1;    /* 1 + 2 + 8 + 8 como mínimo */

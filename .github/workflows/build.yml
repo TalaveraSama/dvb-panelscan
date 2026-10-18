@@ -17,7 +17,16 @@ jobs:
           make -C tbsstream
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-demux tests/test_demux.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
           /tmp/test-demux
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-newcamd tests/test_newcamd.c -lcrypto
+          /tmp/test-newcamd
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-csa tests/test_csa.c tbsstream/csa.c -ldvbcsa
+          /tmp/test-csa
       - run: sh packaging/build-deb.sh 0.4.0
+      - run: |
+          sudo apt-get install -y ./dist/*.deb
+          sudo systemctl start dvb-panel
+          curl --fail http://127.0.0.1:8081/api/status
+          sudo systemctl stop dvb-panel
       - uses: actions/upload-artifact@v4
         with:
           name: ubuntu-22.04-amd64

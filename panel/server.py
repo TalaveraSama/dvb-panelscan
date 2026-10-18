@@ -44,6 +44,7 @@ STATE = {
 }
 
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
+_stream_process = None
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +298,8 @@ def build_xmltv(tid=None):
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
 def stream_start(tp, newcamd, udp, http_port, sid=None):
+    global _stream_process
+    stream_status()
     binary = find_tbsstream(_cfg["tbsstream"])
     if not (is_linux() and binary):
         return {"ok": False, "error": "tbsstream no disponible"}
@@ -328,7 +331,11 @@ def stream_start(tp, newcamd, udp, http_port, sid=None):
 
     try:
         log = open(os.path.join(DATA_DIR, "stream.log"), "w")
-        p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        finally:
+            log.close()
+        _stream_process = p
     except OSError as e:
         return {"ok": False, "error": str(e)}
 
@@ -338,32 +345,25 @@ def stream_start(tp, newcamd, udp, http_port, sid=None):
 
 
 def stream_stop():
-    st = STATE["stream"]
-    if st.get("running") and st.get("pid"):
+    global _stream_process
+    p = _stream_process
+    if p is not None and p.poll() is None:
+        p.terminate()
         try:
-            os.kill(int(st["pid"]), 15)
-            time.sleep(0.5)
-            try:
-                os.kill(int(st["pid"]), 9)
-            except OSError:
-                pass
-        except OSError:
-            pass
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+    _stream_process = None
     STATE["stream"] = {"running": False}
     return {"ok": True}
 
 
 def stream_status():
-    st = STATE["stream"]
-    alive = False
-    if st.get("running") and st.get("pid"):
-        try:
-            os.kill(int(st["pid"]), 0)
-            alive = True
-        except OSError:
-            alive = False
-    if st.get("running") and not alive:
-        STATE["stream"] = {"running": False}
+    if _stream_process is not None:
+        code = _stream_process.poll()
+        if code is not None:
+            STATE["stream"] = {"running": False, "exit_code": code}
     return STATE["stream"]
 
 
@@ -621,6 +621,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        stream_stop()
         srv.server_close()
 
 

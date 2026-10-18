@@ -459,6 +459,7 @@ static void flush_scrambled(void)
 static void *ca_thread(void *arg)
 {
   newcamd_t *cam = arg;
+  unsigned retry_delay = 1;
   while (ca_running) {
     ecm_req_t r;
     pthread_mutex_lock(&ecm_q_mutex);
@@ -470,9 +471,23 @@ static void *ca_thread(void *arg)
     ecm_q_count--;
     pthread_mutex_unlock(&ecm_q_mutex);
 
+    if (!cam) {
+      char error[256];
+      cam = newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
+                            opts.nc_user, opts.nc_pass, error, sizeof(error));
+      if (!cam) {
+        fprintf(stderr, "newcamd: %s; retry in %u s\n", error, retry_delay);
+        sleep(retry_delay);
+        if (retry_delay < 30) retry_delay = retry_delay > 15 ? 30 : retry_delay * 2;
+        continue;
+      }
+      retry_delay = 1;
+      fprintf(stderr, "newcamd: connected (login + card data)\n");
+    }
     uint8_t even[8], odd[8];
-    if (cam && newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
-                                r.sec, r.len, even, odd, 1500) == 0) {
+    int result = newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
+                                 r.sec, r.len, even, odd, 1500);
+    if (result == 0) {
       pthread_mutex_lock(&csa_mutex);
       /* A zero half means unavailable; do not replace a valid CW with it. */
       const uint8_t zero[8] = {0};
@@ -487,7 +502,17 @@ static void *ca_thread(void *arg)
       pthread_mutex_unlock(&csa_mutex);
       LOGV("CW actualizada (par/impar)\n");
     } else {
-      LOGV("ECM sin respuesta\n");
+      LOGV("ECM sin CW (resultado %d)\n", result);
+      if (result == -1) {
+        newcamd_close(cam);
+        cam = NULL;
+        pthread_mutex_lock(&csa_mutex);
+        have_cw_even = have_cw_odd = 0;
+        pthread_mutex_unlock(&csa_mutex);
+        pthread_mutex_lock(&ecm_q_mutex);
+        ecm_q_count = ecm_q_head = ecm_q_tail = 0;
+        pthread_mutex_unlock(&ecm_q_mutex);
+      }
     }
   }
   return NULL;
@@ -919,8 +944,7 @@ int main(int argc, char **argv)
 
   /* hilo CA asíncrono: envía ECMs y actualiza las CW sin bloquear el principal */
   pthread_t ca_tid;
-  if (nc)
-    pthread_create(&ca_tid, NULL, ca_thread, nc);
+  pthread_create(&ca_tid, NULL, ca_thread, nc);
 
   /* M3U8 */
   snprintf(m3u8_body, sizeof(m3u8_body),
