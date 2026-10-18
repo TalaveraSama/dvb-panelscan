@@ -464,6 +464,9 @@ class Handler(BaseHTTPRequestHandler):
             tp["name"] = body.get("name") or ("%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"]))
             tp["scan"] = None
             with _lock:
+                # cada adapter = un transponder: reemplaza el del mismo adapter
+                STATE["transponders"] = [t for t in STATE["transponders"]
+                                         if t.get("adapter") != tp["adapter"]]
                 STATE["transponders"].append(tp)
                 _save("transponders")
             return self._send(200, {"ok": True, "transponder": tp})

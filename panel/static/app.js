@@ -42,16 +42,22 @@ async function loadStatus() {
     ? s.adapters.map((a) => `<div class="adapter"><div class="path">${esc(a.path)}</div><div class="fe">${esc((a.frontends || []).join(", "))}</div></div>`).join("")
     : "No hay adaptadores DVB.";
   $("bins").textContent = `dvb2m3u8: ${s.dvb2m3u8 || "no"} · tbsstream: ${s.tbsstream || "no"}`;
+  adapters = s.adapters || [];
   $("footer").textContent = `Plataforma: ${s.platform}`;
 }
 
 /* ------------------------- Transponders (dashboard) ------------------------- */
 let transponders = [];
+let adapters = [];
 
 async function loadTransponders() {
   transponders = await getJSON("/api/transponders");
   renderTransponders();
   renderSelects();
+  // el formulario "Agregar" apunta por defecto al primer adapter libre
+  const used = new Set(transponders.map((t) => t.adapter));
+  const free = (adapters.find((a) => !used.has(a.adapter)) || { adapter: 0 }).adapter;
+  $("tp_adapter").value = free;
 }
 
 function channelsTable(services, showTpCol) {
@@ -67,23 +73,31 @@ function channelsTable(services, showTpCol) {
 
 function renderTransponders() {
   const list = $("tpList");
-  if (!transponders.length) {
-    list.innerHTML = '<div class="muted">Sin transponders. Agrega uno arriba.</div>';
-    return;
-  }
-  list.innerHTML = transponders.map((t) => {
-    const scan = t.scan;
+  // cada adapter = un transponder; se muestra adapter -> transponder -> canales
+  const ads = adapters.length ? adapters : transponders.map((t) => ({ adapter: t.adapter, path: "/dev/dvb/adapter" + t.adapter }));
+  list.innerHTML = ads.map((a) => {
+    const tp = transponders.find((t) => t.adapter === a.adapter);
+    if (!tp) {
+      return `<div class="card tp-card">
+        <div class="card-head">
+          <h2>📡 Adapter ${esc(a.adapter)}</h2>
+          <span class="muted small">${esc(a.path || "")} · sin transponder</span>
+        </div>
+        <div class="muted small">Agrega un transponder con Adaptador=${esc(a.adapter)} (formulario de arriba).</div>
+      </div>`;
+    }
+    const scan = tp.scan;
     const n = (scan && scan.services) ? scan.services.length : 0;
     const info = scan
       ? `Red: <b>${esc(scan.network || "—")}</b> · ${n} canales` + (scan.signal !== undefined ? ` · señal ${esc(scan.signal)}` : "") + (scan.time ? ` · ${new Date(scan.time * 1000).toLocaleString()}` : "")
       : "No escaneado";
     return `<div class="card tp-card">
       <div class="card-head">
-        <h2>📡 ${esc(t.name)}</h2>
+        <h2>📡 Adapter ${esc(a.adapter)} · ${esc(tp.name)}</h2>
         <div class="actions">
-          <span class="muted small">${esc(tpInfo(t))}</span>
-          <button class="btn small primary" data-scan="${esc(t.id)}">Escanear</button>
-          <button class="btn small danger" data-del="${esc(t.id)}">Borrar</button>
+          <span class="muted small">${esc(tpInfo(tp))}</span>
+          <button class="btn small primary" data-scan="${esc(tp.id)}">Escanear</button>
+          <button class="btn small danger" data-del="${esc(tp.id)}">Borrar</button>
         </div>
       </div>
       <div class="muted small">${info}</div>
@@ -219,9 +233,11 @@ $("toggleTpForm").addEventListener("click", () => {
   $("toggleTpForm").textContent = f.style.display === "none" ? "mostrar" : "ocultar";
 });
 
-loadStatus();
-loadTransponders();
-loadEpg();
-loadNewcamd();
-loadStream();
+(async () => {
+  await loadStatus();
+  await loadTransponders();
+  await loadEpg();
+  await loadNewcamd();
+  await loadStream();
+})();
 setInterval(loadStream, 5000);
