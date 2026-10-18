@@ -408,7 +408,7 @@ static void handle_section(uint16_t pid, const uint8_t *s)
 
   switch (pid) {
     case PID_PAT: if (tid == TID_PAT) parse_pat(body, blen); break;
-    case PID_SDT: if (tid == TID_SDT_ACTUAL || tid == TID_SDT_OTHER) parse_sdt(body, blen); break;
+    case PID_SDT: if (tid == TID_SDT_ACTUAL) parse_sdt(body, blen); break;  /* solo este transponder */
     case PID_NIT: if (tid == TID_NIT_ACTUAL || tid == TID_NIT_OTHER) parse_nit(body, blen); break;
     case PID_EIT:
       parse_eit(tid, body, blen);
