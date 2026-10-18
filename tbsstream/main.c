@@ -368,11 +368,30 @@ static void make_psi_packet(uint16_t pid, uint8_t *cc, const uint8_t *sec, int s
 }
 
 /* -------------------------------------------------------------------------
- * Parseo PAT/PMT y envío ECM
+ * Descrambling asíncrono: cola de ECM + hilo CA + buffer de paquetes scrambled
  * ------------------------------------------------------------------------- */
 static newcamd_t *nc = NULL;
 static csa_t *csae = NULL;
-static int have_cw = 0;
+
+/* Estado de claves (protegido por csa_mutex) */
+static pthread_mutex_t csa_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int have_cw_even = 0, have_cw_odd = 0;
+
+/* Cola de ECM (hilo principal -> hilo CA) */
+#define ECMQ_MAX 64
+typedef struct { uint8_t sec[1024]; int len; uint16_t sid, caid; uint32_t provid; } ecm_req_t;
+static ecm_req_t ecm_q[ECMQ_MAX];
+static int ecm_q_head = 0, ecm_q_tail = 0, ecm_q_count = 0;
+static pthread_mutex_t ecm_q_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ecm_q_cond = PTHREAD_COND_INITIALIZER;
+
+/* Buffer de paquetes scrambled sin CW (solo se toca desde el hilo principal) */
+#define SCRAM_MAX 4096
+static uint8_t scram_buf[SCRAM_MAX * TS_PKT];
+static uint8_t scram_odd[SCRAM_MAX];
+static int scram_count = 0;
+
+static volatile int ca_running = 1;
 
 static int pid_forward(uint16_t pid)
 {
@@ -381,25 +400,80 @@ static int pid_forward(uint16_t pid)
   return pid == PID_PAT || pid == svc.pmt_pid;
 }
 
-static void set_cw(const uint8_t even[8], const uint8_t odd[8])
+/* Encolar un ECM (no bloquea) */
+static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
+                        const uint8_t *sec, int len)
 {
-  csa_set_key_even(csae, even);
-  csa_set_key_odd(csae, odd);
-  have_cw = 1;
-  LOGV("CW actualizada (par/impar)\n");
+  if (len <= 0 || len > (int)sizeof(ecm_q[0].sec)) return;
+  pthread_mutex_lock(&ecm_q_mutex);
+  if (ecm_q_count < ECMQ_MAX) {
+    ecm_req_t *r = &ecm_q[ecm_q_tail];
+    memcpy(r->sec, sec, len);
+    r->len = len; r->sid = sid; r->caid = caid; r->provid = provid;
+    ecm_q_tail = (ecm_q_tail + 1) % ECMQ_MAX;
+    ecm_q_count++;
+    pthread_cond_signal(&ecm_q_cond);
+  }
+  pthread_mutex_unlock(&ecm_q_mutex);
 }
 
-static void send_ecm(const uint8_t *s, int slen)
+/* Guardar un paquete scrambled sin CW (hilo principal) */
+static void buffer_scrambled(const uint8_t *pkt, int odd)
 {
-  if (!nc) return;
-  uint8_t even[8], odd[8];
-  /* ECM = sección sin los 4 bytes de CRC */
-  if (newcamd_send_ecm(nc, svc.sid, svc.caid, svc.provid, s, slen - 1,
-                       even, odd, 1500) == 0) {
-    set_cw(even, odd);
-  } else {
-    LOGV("ECM sin respuesta\n");
+  if (scram_count < SCRAM_MAX) {
+    memcpy(scram_buf + (size_t)scram_count * TS_PKT, pkt, TS_PKT);
+    scram_odd[scram_count] = (uint8_t)odd;
+    scram_count++;
   }
+}
+
+/* Descifrar los paquetes bufferizados cuya CW ya esté disponible (hilo principal) */
+static void flush_scrambled(void)
+{
+  for (int i = 0; i < scram_count; i++) {
+    uint8_t *pkt = scram_buf + (size_t)i * TS_PKT;
+    int ok = 0;
+    pthread_mutex_lock(&csa_mutex);
+    if (scram_odd[i] ? have_cw_odd : have_cw_even) {
+      csa_descramble(csae, pkt, 1);
+      ok = 1;
+    }
+    pthread_mutex_unlock(&csa_mutex);
+    if (ok) output_packet(pkt);   /* sin CW: se descarta */
+  }
+  scram_count = 0;
+}
+
+/* Hilo CA: envía ECMs y actualiza las CW (el bloqueo de red ocurre aquí) */
+static void *ca_thread(void *arg)
+{
+  newcamd_t *cam = arg;
+  while (ca_running) {
+    ecm_req_t r;
+    pthread_mutex_lock(&ecm_q_mutex);
+    while (ecm_q_count == 0 && ca_running)
+      pthread_cond_wait(&ecm_q_cond, &ecm_q_mutex);
+    if (!ca_running) { pthread_mutex_unlock(&ecm_q_mutex); break; }
+    r = ecm_q[ecm_q_head];
+    ecm_q_head = (ecm_q_head + 1) % ECMQ_MAX;
+    ecm_q_count--;
+    pthread_mutex_unlock(&ecm_q_mutex);
+
+    uint8_t even[8], odd[8];
+    if (cam && newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
+                                r.sec, r.len, even, odd, 1500) == 0) {
+      pthread_mutex_lock(&csa_mutex);
+      csa_set_key_even(csae, even);
+      csa_set_key_odd(csae, odd);
+      have_cw_even = 1;
+      have_cw_odd = 1;
+      pthread_mutex_unlock(&csa_mutex);
+      LOGV("CW actualizada (par/impar)\n");
+    } else {
+      LOGV("ECM sin respuesta\n");
+    }
+  }
+  return NULL;
 }
 
 static int is_video(uint8_t t)
@@ -494,7 +568,8 @@ static void handle_section(uint16_t pid, const uint8_t *s, int slen)
     parse_pmt(body, blen);
   } else if (svc.ecm_pid > 0 && pid == (uint16_t)svc.ecm_pid &&
              (tid == 0x80 || tid == 0x81)) {
-    send_ecm(s, slen);
+    /* ECM = sección sin los 4 bytes de CRC */
+    enqueue_ecm(svc.sid, svc.caid, svc.provid, s, slen - 1);
   }
 }
 
@@ -595,11 +670,24 @@ static void process_packet(uint8_t *pkt)
 
   /* Reenvío de ES: descifrar + reenviar */
   if (svc.ready && pid_forward(pid)) {
-    if ((pkt[3] & 0x80) && have_cw)   /* scrambled + tenemos CW */
-      csa_descramble(csae, pkt, 1);
-    else if (pkt[3] & 0x80)           /* scrambled sin CW: no reenviar basura */
+    if (pkt[3] & 0x80) {                       /* scrambled */
+      int odd = (pkt[3] & 0x40) != 0;          /* 0=clave par, 1=clave impar */
+      int ok = 0;
+      pthread_mutex_lock(&csa_mutex);
+      if (odd ? have_cw_odd : have_cw_even) {
+        csa_descramble(csae, pkt, 1);
+        ok = 1;
+      }
+      pthread_mutex_unlock(&csa_mutex);
+      if (ok) {
+        flush_scrambled();   /* primero lo que estaba en espera (en orden) */
+        output_packet(pkt);
+      } else {
+        buffer_scrambled(pkt, odd);   /* aún sin CW: guardar en cola */
+      }
       return;
-    output_packet(pkt);
+    }
+    output_packet(pkt);                        /* paquete claro */
   }
 }
 
@@ -779,6 +867,11 @@ int main(int argc, char **argv)
   nc = newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
                        opts.nc_user, opts.nc_pass, err, sizeof(err));
   if (!nc) fprintf(stderr, "newcamd: %s\n", err);
+
+  /* hilo CA asíncrono: envía ECMs y actualiza las CW sin bloquear el principal */
+  pthread_t ca_tid;
+  if (nc)
+    pthread_create(&ca_tid, NULL, ca_thread, nc);
 
   /* M3U8 */
   snprintf(m3u8_body, sizeof(m3u8_body),

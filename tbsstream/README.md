@@ -84,10 +84,13 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
 2. **Lee el TS** de `dvr0` y realinea paquetes de 188 bytes.
 3. **Demux** PAT → PID de la PMT; PMT → PIDs de vídeo/audio/PCR y el
    **ECM PID + CAID** (descriptor CA `0x09`).
-4. **newcamd**: conexión + login (DES) → envía cada ECM (sección `0x80/0x81`)
-   → recibe la CW (par/impar). Protocolo portado de `cwc.c`.
+4. **newcamd** (asíncrono): un hilo CA dedicado con cola de ECM. Hace el login
+   (DES) y envía cada ECM (sección `0x80/0x81`) → recibe la CW (par/impar).
+   Protocolo portado de `cwc.c`. El hilo principal **no se bloquea**.
 5. **CSA**: descifra los paquetes con bit de scrambling usando libdvbcsa
-   (port de `tvhcsa.c`).
+   (port de `tvhcsa.c`). Los paquetes scrambled que llegan **antes** de tener la
+   CW se **guardan en una cola** y se descifran en orden cuando llega la clave
+   (evita cortes al inicio y en el cambio de clave).
 6. **Remux**: genera PAT y PMT **limpios** (sin descriptores CA) y los inyecta
    periódicamente; reenvía los ES descifrados y descarta los ECM.
 7. **Salida**: UDP (con `sendto`) y HTTP (ring buffer + servidor mínimo).
@@ -96,11 +99,16 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
 
 - ⚠️ **Sin probar en este entorno** (no hay Linux ni hardware DVB ni servidor
   newcamd aquí). Compílalo en Linux y pruébalo con hardware real.
-- La conexión newcamd es **síncrona** (el envío de ECM bloquea ~1s el hilo
-  principal); una versión más avanzada movería el CA a un hilo propio.
+- La conexión newcamd es **asíncrona** (hilo CA + cola de ECM), así que el hilo
+  principal no se detiene esperando la CW. Si falla el servidor newcamd, se
+  sigue reenviando el TS pero sin descifrar (paquetes scrambled en cola).
+- El **cambio de clave** (crypto period, cada ~10 s en CSA) se amortigua con la
+  cola de paquetes scrambled, pero no llega a la precisión de TVHeadend
+  (que predice el cambio y hace switchover exacto). Para un headend es
+  suficiente; para una precisión total haría falta rastrear el crypto period.
 - El **formato del ECM enviado** (sección sin los 4 bytes de CRC) es la
   convención más común, pero puede variar entre servidores newcamd; si un
-  servidor no responde CW, es el primer punto a ajustar en `send_ecm()`.
+  servidor no responde CW, es el primer punto a ajustar en `enqueue_ecm()`.
 - DVB-S: la frecuencia se pasa ya convertida por el LNB (sin DiSEqC/rotor).
 - Para multicast fuera de la LAN hay que ajustar el TTL del socket
   (`IP_MULTICAST_TTL`) — aquí se deja el valor por defecto (1).
