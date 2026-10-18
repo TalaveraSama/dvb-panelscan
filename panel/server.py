@@ -420,7 +420,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(STATIC_DIR, "index.html"))
         if path.startswith("/static/"):
-            return self._send_file(os.path.join(STATIC_DIR, path[len("/static/"):]))
+            target = os.path.realpath(os.path.join(STATIC_DIR, urllib.parse.unquote(path[len("/static/"):])) )
+            if os.path.commonpath((os.path.realpath(STATIC_DIR), target)) != os.path.realpath(STATIC_DIR):
+                return self._send(403, {"error": "Ruta no permitida"})
+            return self._send_file(target)
 
         if path == "/api/status":
             return self._send(200, {
@@ -508,9 +511,19 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def do_POST(self):
+        origin = self.headers.get("Origin")
+        if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
+            return self._send(403, {"ok": False, "error": "Origen no permitido"})
+        try:
+            if not 0 <= int(self.headers.get("Content-Length", "0")) <= 65536:
+                return self._send(413, {"ok": False, "error": "Solicitud demasiado grande"})
+        except ValueError:
+            return self._send(400, {"ok": False, "error": "Longitud inválida"})
         u = urllib.parse.urlparse(self.path)
         path = u.path
         body = self._read_body()
+        if not isinstance(body, dict):
+            return self._send(400, {"ok": False, "error": "Se requiere un objeto JSON"})
 
         if path == "/api/transponders":
             tp = _norm_tp(body)

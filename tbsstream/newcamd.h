@@ -27,9 +27,10 @@ newcamd_t *newcamd_connect(const char *host, int port,
                            char *err, size_t errlen);
 
 /* Envía un ECM (sección 0x80/0x81) y espera la CW.
- *   ecm/ecm_len: sección ECM completa (con table_id y section_length, sin CRC).
+ *   ecm/ecm_len: sección ECM privada completa, sin truncar bytes.
  *   even/odd: 8 bytes cada una (claves de control par/impar).
- * Devuelve 0 si se obtuvo la CW; -1 en caso de error.
+ * Devuelve 0 si se obtuvo la CW; -1 en error de transporte/protocolo,
+ * -2 si el servidor responde sin CW (sin autorización/lector disponible).
  */
 int newcamd_send_ecm(newcamd_t *nc, uint16_t sid, uint16_t caid, uint32_t provid,
                      const uint8_t *ecm, int ecm_len,

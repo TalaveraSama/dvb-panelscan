@@ -115,8 +115,8 @@ no devuelve estos argumentos en el estado del streaming.
    completa login + solicitud de datos de tarjeta; `CW actualizada` indica una
    respuesta ECM válida, no una comprobación visual del vídeo.
 4. Confirmar CAID, lector activo y autorización de la cuenta. En simulcrypt se
-   selecciona el primer descriptor CA: la selección por CAID/proveedor y la
-   selección por proveedor siguen pendientes. La reconexión TCP/login usa espera
+   selecciona el primer descriptor CA: la selección explícita por CAID/proveedor
+   sigue pendiente. La reconexión TCP/login usa espera
    progresiva (1–30 s) y descarta ECM en cola después de un fallo de transporte. No se implementan EMM ni renovación de derechos de tarjeta.
 
 Corregido en esta versión: ECM cortas descartadas por exigir CRC de sección
