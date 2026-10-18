@@ -28,7 +28,7 @@
           <h2 id="pageTitle">Vista general</h2>
           <p>Administra tu señal. Conecta, escanea y distribuye.</p>
         </div>
-        <span class="version">v0.4.1 <span>● Sistema local</span></span>
+        <span class="version">v0.5.0 <span>● Sistema local</span></span>
       </div>
       <div
         id="notice"
@@ -208,24 +208,27 @@
               </select>
             </label>
             <label
-              >Base URL (usa {sid})
+              >Base URL ({channel_id}, {sid}, {transponder})
               <input
                 id="m3u_base"
-                placeholder="http://IP:9981/stream/channelid/{sid}"
-                title="Vacio = auto http://<este host>/stream/channelid/{sid}"
+                placeholder="http://IP:8081/stream/channel/{channel_id}"
+                title="Vacío = URL automática de canal con identidad TP:SID"
               />
             </label>
             <button type="submit" class="btn primary">Descargar M3U8</button>
           </form>
           <div class="muted small">
-            El TS lo sirve <b>tbsstream</b> en <code>/stream.ts</code> (HTTP) y
-            por UDP. La URL de cada canal apunta a un stream TS con
+            Perfil <b>pass</b>: MPEG-TS sin transcodificar. No es HLS. El TS lo
+            sirve <b>tbsstream</b> en <code>/stream.ts</code> (HTTP) y por UDP.
+            La URL de cada canal apunta a un stream TS con
             <code>?profile=pass</code> (estilo TVHeadend).
           </div>
         </section>
 
         <section class="card">
-          <div class="card-head"><h2>Streaming (descifrado + UDP)</h2></div>
+          <div class="card-head">
+            <h2>Sesiones compartidas · perfil pass</h2>
+          </div>
           <form id="stForm" class="grid-form">
             <label
               >Transponder
@@ -245,7 +248,8 @@
               <input id="st_udp" placeholder="239.1.1.1:1234"
             /></label>
             <label
-              >HTTP puerto <input id="st_http" type="number" value="9981"
+              >HTTP puerto (0 = solo panel)
+              <input id="st_http" type="number" value="9981"
             /></label>
             <button type="submit" class="btn primary" id="stStart">
               Iniciar
@@ -254,7 +258,14 @@
               Detener
             </button>
           </form>
-          <div class="muted small" id="stInfo"></div>
+          <div class="callout">
+            Varios reproductores del mismo canal comparten proceso. Un canal por
+            adaptador: otro SID o un escaneo se rechaza mientras esté ocupado.
+            Las sesiones manuales permanecen hasta detenerlas; las del M3U
+            cierran al salir el último cliente. Los bytes TS no certifican
+            descifrado.
+          </div>
+          <div class="adapters" id="stInfo" aria-live="polite"></div>
         </section>
       </section>
     </main>

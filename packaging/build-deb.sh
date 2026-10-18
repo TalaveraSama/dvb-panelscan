@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-VERSION=${1:-0.4.1}
+VERSION=${1:-0.5.0}
 ARCH=$(dpkg --print-architecture)
 ROOT=$(pwd)
 DEST="$ROOT/dist/dvb-panelscan_${VERSION}_${ARCH}"
@@ -8,10 +8,10 @@ make -C dvb2m3u8
 make -C tbsstream
 mkdir -p "$DEST/DEBIAN" "$DEST/usr/bin" "$DEST/usr/lib/dvb-panelscan/static" "$DEST/lib/systemd/system" "$DEST/usr/share/doc/dvb-panelscan"
 install -m755 dvb2m3u8/dvb2m3u8 tbsstream/tbsstream "$DEST/usr/bin/"
-install -m644 panel/server.py "$DEST/usr/lib/dvb-panelscan/"
+install -m644 panel/server.py panel/streaming.py "$DEST/usr/lib/dvb-panelscan/"
 install -m644 panel/static/* "$DEST/usr/lib/dvb-panelscan/static/"
 install -m644 packaging/dvb-panel.service "$DEST/lib/systemd/system/"
-install -m644 README.md "$DEST/usr/share/doc/dvb-panelscan/"
+install -m644 README.md RELEASE_NOTES.md "$DEST/usr/share/doc/dvb-panelscan/"
 cat > "$DEST/DEBIAN/control" <<CONTROL
 Package: dvb-panelscan
 Version: $VERSION

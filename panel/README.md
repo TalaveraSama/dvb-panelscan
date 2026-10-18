@@ -69,3 +69,15 @@ http://<host>:<puerto>/stream/channelid/<sid>?profile=pass
 GPLv3.
 
 Para instalar en Ubuntu y consultar limitaciones de acceso condicional, ver [README principal](../README.md#release-040--ubuntu). El test TCP no valida login ni descifrado.
+
+## Desde 0.5.0
+
+Las URLs automáticas son `/stream/channel/<transponder_id>:<SID>?profile=pass`.
+Reexportar M3U y XMLTV después de actualizar. Varias reproducciones del mismo
+canal comparten proceso; otro canal en el mismo tuner o escaneo concurrente se
+rechaza. Modo manual y M3U usan el mismo gestor. Registros por servicio
+`stream-<adapter>-<SID>.log` visibles en Streaming. El endpoint de estado incluye
+`sessions`; **Detener todas** las cierra y desconecta reproductores.
+`--stdout` entrega TS del binario al panel sin UDP local. Ver README principal
+y notas de versión para límites y migración; los ejemplos SID-only anteriores
+siguen disponibles solo si el SID no es ambiguo.

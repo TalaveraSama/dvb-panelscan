@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish verified v0.4.1 release
+        description: Publish verified v0.5.0 release
         type: boolean
         default: false
 permissions:
@@ -28,7 +28,7 @@ jobs:
           /tmp/test-newcamd
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-csa tests/test_csa.c tbsstream/csa.c -ldvbcsa
           /tmp/test-csa
-      - run: sh packaging/build-deb.sh 0.4.1
+      - run: sh packaging/build-deb.sh 0.5.0
       - run: |
           sudo apt-get install -y ./dist/*.deb
           sudo systemctl start dvb-panel
@@ -39,10 +39,10 @@ jobs:
           name: ubuntu-22.04-amd64
           path: dist/*.deb
       - name: Publish release
-        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.4.1'))
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.5.0'))
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
           sha256sum *.deb > SHA256SUMS
-          gh release create v0.4.1 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.4.1 · Continuidad del streaming · Ubuntu" --notes-file ../RELEASE_NOTES.md
+          gh release create v0.5.0 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.5.0 · Continuidad del streaming · Ubuntu" --notes-file ../RELEASE_NOTES.md

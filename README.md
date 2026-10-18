@@ -161,3 +161,35 @@ Ver [revisión de playlists, MPEG-TS y descrambling](docs/TVHEADEND_STREAMING_RE
 con enlaces a un commit fijo de Tvheadend y diferencias concretas respecto a
 0.4.1. La playlist M3U no es HLS; los principales pendientes son el motor de
 suscripciones compartidas, PSI con descriptores y la gestión temporal de CW.
+
+## Versión 0.5.0 · Mejoras aplicadas de la revisión Tvheadend
+
+- Gestor compartido por adaptador para M3U y modo manual; se elimina el puente
+  UDP local del panel. Un canal por tuner, varios reproductores del mismo canal.
+- Reserva de adaptador y protección frente a escaneos simultáneos.
+- M3U/XMLTV con identidad `transponder_id:SID`; reexportar ambas listas después
+  de actualizar. Las rutas antiguas SID-only se aceptan si son inequívocas.
+- PMT con descriptores no CA, validación atómica, tablas PSI multipaquete y
+  emisión monotónica de 100 ms durante recepción TS, antes del payload inicial.
+- Colas acotadas y diagnóstico por sesión desde Streaming: clientes, bytes,
+  cola y desbordamientos de clientes lentos. Registros `stream-<adapter>-<SID>.log`.
+- El único perfil implementado es `pass` (TS sin transcodificación, no HLS).
+
+El inicio bajo demanda espera datos TS y devuelve errores de arranque/conflicto
+antes de HTTP 200. Una cola lenta se desconecta, no bloquea a los demás.
+Las sesiones bajo demanda cierran al salir el último cliente; las manuales
+permanecen hasta **Detener todas**. El botón desconecta todas las sesiones.
+
+Para usar el puerto directo 9981, iniciar manualmente primero. Si el canal ya
+se inició desde el M3U sin ese puerto, utilizar la URL del panel o detener y
+volver a iniciar; no se alteran las salidas del proceso activo.
+
+La actualización conserva datos y overrides systemd. Instalar el `.deb` 0.5.0
+con el servicio detenido, reiniciarlo y recargar el navegador. Ver
+[notas de versión](RELEASE_NOTES.md). Los programas C y el servidor Python deben
+actualizarse juntos: el gestor necesita la opción `tbsstream --stdout`.
+
+**Alcance:** no es el motor completo de Tvheadend. No implementa varios SID por
+adaptador ni el seguimiento temporal de generaciones de CW, y no garantiza
+eliminar tirones por cambio de claves, señal o red. La revisión histórica de
+0.4.1 sigue en `docs/`; las diferencias aplicadas se resumen aquí.

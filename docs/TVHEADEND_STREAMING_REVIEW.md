@@ -206,3 +206,12 @@ No conviene copiar archivos de Tvheadend al Makefile: dependen de su motor de
 servicios, colas, tipos y planificador. Hay que portar unidades delimitadas o
 usar Tvheadend como backend. Esta revisión no modifica el runtime ni publica
 una nueva versión; documenta diferencias verificadas y el plan de trabajo.
+
+### Seguimiento: implementación 0.5.0
+
+Esta comparación describe 0.4.1. La 0.5.0 aplica identidades de canal, gestor
+compartido con reserva de tuner, colas acotadas sin UDP local, errores de
+arranque visibles, conservación de descriptores no CA y PSI multipaquete con
+emisión monotónica. La gestión temporal de CW, CSA por lotes, varios SID por
+tuner y métricas completas de continuidad siguen pendientes. Ver las notas
+de versión y el README principal para el comportamiento actual.

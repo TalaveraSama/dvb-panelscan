@@ -319,20 +319,35 @@ async function downloadM3u8(e) {
 async function loadStream() {
   const st = await getJSON("/api/stream/status");
   $("metricStream").textContent = st.running ? "Activo" : "Detenido";
-  $("stStart").disabled = !!st.running;
+  $("stStart").disabled = false;
   $("stStop").disabled = !st.running;
-  $("stInfo").innerHTML = st.running
-    ? `<span class="ok">● STREAMING</span> pid ${esc(st.pid)} · UDP ${esc(st.udp || "—")} · HTTP ${esc(st.http_port || "—")}`
-    : "Detenido.";
+  const sessions = st.sessions || [];
+  $("stInfo").innerHTML = sessions.length
+    ? sessions
+        .map(
+          (session) => `
+    <div class="adapter">
+      <strong>${esc(session.channel_id)}</strong> · adaptador ${esc(session.adapter)}
+      <span class="${session.running ? "ok" : "err"}">${session.running ? "● Activo" : "○ Finalizado"}</span><br>
+      ${esc(session.clients)} clientes · ${session.pinned ? "Inicio manual" : "Bajo demanda"} ·
+      TS recibido: ${(session.bytes_received / 1048576).toFixed(2)} MiB ·
+      Cola: ${Math.round(session.queue_bytes / 1024)} KiB · Clientes lentos: ${esc(session.slow_clients)}<br>
+      <a class="btn small" href="/stream/channel/${encodeURIComponent(session.channel_id)}?profile=pass" target="_blank">URL TS</a>
+      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}" target="_blank">Ver registro</a>
+    </div>`,
+        )
+        .join("")
+    : "Sin sesiones. Abrir un canal del M3U inicia una sesión compartida.";
 }
 async function startStream(e) {
   e.preventDefault();
-  if (!confirm("¿Iniciar stream (descifrado newcamd + UDP)?")) return;
+  if (!confirm("¿Iniciar sesión manual? Se reserva un canal por adaptador."))
+    return;
   const r = await postJSON("/api/stream/start", {
     sid: $("st_sid").value ? Number($("st_sid").value) : null,
     id: $("st_tp").value,
     udp: [$("st_udp").value].filter(Boolean),
-    http_port: parseInt($("st_http").value, 10) || 9981,
+    http_port: Number($("st_http").value),
   });
   if (!r.ok) {
     alert("Error: " + r.error);
@@ -341,6 +356,8 @@ async function startStream(e) {
   loadStream();
 }
 async function stopStream() {
+  if (!confirm("¿Detener todas las sesiones y desconectar sus reproductores?"))
+    return;
   await postJSON("/api/stream/stop", {});
   loadStream();
 }

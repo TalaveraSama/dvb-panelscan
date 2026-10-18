@@ -12,6 +12,7 @@ Sin dependencias externas (solo stdlib de Python).
 """
 
 import argparse
+import copy
 import glob
 import json
 import os
@@ -29,6 +30,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+from streaming import StreamManager, StreamError
+
 DATA_DIR = os.environ.get("DVB_PANEL_DATA_DIR", BASE_DIR)
 os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
 
@@ -44,7 +49,7 @@ STATE = {
 }
 
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
-_stream_process = None
+_streams = StreamManager()
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +150,7 @@ def _scan_cmd(binary, tp):
     return cmd
 
 
-def run_scan(tp):
+def _run_scan(tp):
     """Escanea un transponder y guarda el resultado dentro del propio transponder."""
     tp = _norm_tp(tp)
     binary = find_dvb2m3u8(_cfg["dvb2m3u8"])
@@ -182,21 +187,45 @@ def run_scan(tp):
     return data
 
 
+def run_scan(tp):
+    try:
+        adapter = _norm_tp(tp)["adapter"]
+        _streams.reserve_scan(adapter)
+    except (StreamError, ValueError, TypeError) as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        return _run_scan(tp)
+    finally:
+        _streams.release_scan(adapter)
+
+
 def _find_tp(tp_id):
     return next((t for t in STATE["transponders"] if t.get("id") == tp_id), None)
 
 
-def _find_tp_by_sid(sid):
+def channel_id(tp, sid):
+    return "%s:%d" % (tp["id"], int(sid))
+
+
+def resolve_channel(identity):
+    """Canonical TP:SID; retain SID-only URLs only when unambiguous."""
+    tid, sep, sid = str(identity).rpartition(":")
     try:
         sid = int(sid)
-    except ValueError:
-        return None
+        if not 1 <= sid <= 65535:
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise StreamError("Identidad de canal inválida", 400)
     with _lock:
-        for t in STATE["transponders"]:
-            scan = t.get("scan")
-            if scan and any(s.get("sid") == sid for s in scan.get("services", [])):
-                return t
-    return None
+        candidates = [(t, sid) for t in STATE["transponders"]
+                      if (not sep or t.get("id") == tid) and
+                      any(int(c.get("sid", 0)) == sid
+                          for c in (t.get("scan") or {}).get("services", []))]
+    if not candidates:
+        raise StreamError("Canal no encontrado; escanea el transponder", 404)
+    if len(candidates) != 1:
+        raise StreamError("SID ambiguo; descarga la nueva lista con identidad TP:SID", 409)
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -225,13 +254,17 @@ def epg_aggregate():
 # ---------------------------------------------------------------------------
 # M3U8 (todos los transponders)
 # ---------------------------------------------------------------------------
+def _m3u_text(value):
+    return str(value).replace("\r", " ").replace("\n", " ").replace('"', "'")
+
+
 def build_m3u8(base_url=None, tid=None, profile="pass"):
     """Genera M3U8 estilo TVHeadend: cada canal -> URL de stream TS.
     base_url acepta el placeholder {sid} (p. ej. http://host:9981/stream/channelid/{sid}).
     Si no se da base_url, se usa el host del request (self.headers Host)."""
     lines = ["#EXTM3U"]
     with _lock:
-        tps = STATE["transponders"]
+        tps = copy.deepcopy(STATE["transponders"])
     for t in tps:
         if tid and t.get("id") != tid:
             continue
@@ -240,15 +273,20 @@ def build_m3u8(base_url=None, tid=None, profile="pass"):
             continue
         adapter = t.get("adapter", 0)
         for s in scan.get("services", []):
-            name = s.get("name") or "Service %s" % s.get("sid")
-            group = s.get("provider") or scan.get("network") or t.get("name") or "DVB"
+            name = _m3u_text(s.get("name") or "Service %s" % s.get("sid"))
+            group = _m3u_text(s.get("provider") or scan.get("network") or t.get("name") or "DVB")
+            identity = channel_id(t, s["sid"])
             radio = ' radio="true"' if s.get("type") in (2, 0x0A) else ""
             lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s" group-title="%s"%s,%s'
-                         % (s.get("sid"), name, group, radio, name))
+                         % (identity, name, group, radio, name))
             if base_url:
-                url = base_url.replace("{sid}", str(s.get("sid")))
-                sep = "&" if "?" in url else "?"
-                lines.append("%s%sprofile=%s" % (url, sep, profile))
+                url = (base_url.replace("{sid}", str(s.get("sid")))
+                       .replace("{channel_id}", urllib.parse.quote(identity, safe=":"))
+                       .replace("{transponder}", str(t["id"])))
+                parsed = urllib.parse.urlsplit(url)
+                query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                query = [(k, v) for k, v in query if k != "profile"] + [("profile", "pass")]
+                lines.append(urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query))))
             else:
                 lines.append("dvb://adapter%s/%s/%s" % (adapter, t.get("freq_mhz", 0), s.get("sid")))
     return "\n".join(lines) + "\n"
@@ -270,7 +308,7 @@ def build_xmltv(tid=None):
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<tv generator-info-name="Mini DVB-Scan">']
     with _lock:
-        tps = STATE["transponders"]
+        tps = copy.deepcopy(STATE["transponders"])
     for t in tps:
         if tid and t.get("id") != tid:
             continue
@@ -278,7 +316,7 @@ def build_xmltv(tid=None):
         if not scan:
             continue
         for s in scan.get("services", []):
-            sid = s.get("sid")
+            sid = channel_id(t, s["sid"])
             name = _xml_esc(s.get("name") or "Service %s" % sid)
             lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (sid, name))
             if s.get("now"):
@@ -297,74 +335,68 @@ def build_xmltv(tid=None):
 # ---------------------------------------------------------------------------
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
-def stream_start(tp, newcamd, udp, http_port, sid=None):
-    global _stream_process
-    stream_status()
+def _session_start(tp, nc, udp=(), http_port=0, sid=None, pinned=False):
     binary = find_tbsstream(_cfg["tbsstream"])
     if not (is_linux() and binary):
-        return {"ok": False, "error": "tbsstream no disponible"}
-    if STATE["stream"]["running"]:
-        return {"ok": False, "error": "ya hay un stream corriendo"}
-
-    tp = _norm_tp(tp)
-    nc = newcamd or STATE["newcamd"]
-    cmd = [binary, "-t", tp["type"], "--freq-mhz", str(tp["freq_mhz"]),
-           "--lnb-lo", str(tp["lnb_lo"]), "--pol", tp["pol"],
-           "-a", str(tp["adapter"]), "-T", str(tp["timeout"]),
-           "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
-           "--deskey", nc.get("deskey", ""),
-           "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
-           "--http-port", str(int(http_port or 9981))]
-    if sid is not None:
-        try:
-            sid = int(sid)
-            if not 1 <= sid <= 65535:
-                raise ValueError()
-        except (ValueError, TypeError):
-            return {"ok": False, "error": "SID inválido (1–65535)"}
-        cmd += ["--sid", str(sid)]
-    if tp["symbol_rate"]:
-        cmd += ["--symbol-rate", str(tp["symbol_rate"])]
-    cmd += ["--verbose"]
-    for u in (udp or []):
-        cmd += ["--udp", u]
-
+        raise StreamError("tbsstream no disponible")
+    normalized = _norm_tp(tp)
+    if normalized["freq_mhz"] <= 0:
+        raise StreamError("Frecuencia inválida", 400)
+    if sid is None:
+        channels = (tp.get("scan") or {}).get("services", [])
+        if not channels:
+            raise StreamError("Selecciona un SID o escanea primero", 400)
+        sid = channels[0]["sid"]
     try:
-        log = open(os.path.join(DATA_DIR, "stream.log"), "w")
-        try:
-            p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        finally:
-            log.close()
-        _stream_process = p
-    except OSError as e:
-        return {"ok": False, "error": str(e)}
+        sid, http_port = int(sid), int(http_port)
+        if not 1 <= sid <= 65535 or not 0 <= http_port <= 65535:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise StreamError("SID o puerto HTTP inválido", 400)
+    key = channel_id(tp, sid)
+    cmd = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
+           "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
+           "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"]),
+           "--sid", str(sid), "--stdout", "--verbose",
+           "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
+           "--deskey", nc.get("deskey", ""), "--user", nc.get("user", ""),
+           "--pass", nc.get("pass", ""), "--http-port", str(http_port)]
+    if normalized["symbol_rate"]:
+        cmd += ["--symbol-rate", str(normalized["symbol_rate"])]
+    if not isinstance(udp, (list, tuple)) or any(not isinstance(u, str) for u in udp):
+        raise StreamError("Destinos UDP inválidos", 400)
+    for destination in udp:
+        cmd += ["--udp", destination]
+    # Name depends only on validated adapter/SID, never a path from the request.
+    log = os.path.join(DATA_DIR, "stream-%d-%d.log" % (normalized["adapter"], sid))
+    return _streams.acquire(key, normalized["adapter"], cmd, log,
+                            timeout=normalized["timeout"] + 20, pinned=pinned,
+                            http_port=http_port, udp=udp)
 
-    STATE["stream"] = {"running": True, "pid": p.pid, "udp": ", ".join(udp or []),
-                       "http_port": int(http_port or 9981), "cmd": "tbsstream (credenciales ocultas)"}
-    return {"ok": True, "pid": p.pid, "cmd": "tbsstream (credenciales ocultas)"}
+
+def stream_start(tp, newcamd, udp, http_port, sid=None):
+    try:
+        session = _session_start(tp, newcamd or STATE["newcamd"], udp,
+                                 9981 if http_port is None else http_port, sid, True)
+        result = {"ok": True, **session.status(),
+                  "url": "/stream/channel/" + session.key + "?profile=pass"}
+        _streams.release(session)
+        return result
+    except (StreamError, ValueError, TypeError, KeyError) as e:
+        return {"ok": False, "error": str(e)}
 
 
 def stream_stop():
-    global _stream_process
-    p = _stream_process
-    if p is not None and p.poll() is None:
-        p.terminate()
-        try:
-            p.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.wait()
-    _stream_process = None
-    STATE["stream"] = {"running": False}
+    _streams.stop_all()
     return {"ok": True}
 
 
 def stream_status():
-    if _stream_process is not None:
-        code = _stream_process.poll()
-        if code is not None:
-            STATE["stream"] = {"running": False, "exit_code": code}
-    return STATE["stream"]
+    sessions = _streams.status()
+    active = [s for s in sessions if s["running"]]
+    first = active[0] if active else {}
+    return {**first, "running": bool(active), "sessions": sessions,
+            "clients": sum(s["clients"] for s in active)}
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +474,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, build_xmltv(tid), "application/xml; charset=utf-8")
         if path == "/api/newcamd":
             return self._send(200, STATE["newcamd"])
+        if path == "/api/stream/log":
+            identity = qs.get("channel", [""])[0]
+            session = next((s for s in _streams.status() if s["channel_id"] == identity), None)
+            if not session:
+                return self._send(404, {"error": "Sesión no encontrada"})
+            try:
+                with open(os.path.join(DATA_DIR, session["log"]), "rb") as log:
+                    log.seek(0, os.SEEK_END)
+                    log.seek(max(0, log.tell() - 32768))
+                    text = log.read().decode("utf-8", errors="replace")
+                return self._send(200, text, "text/plain; charset=utf-8")
+            except OSError:
+                return self._send(404, {"error": "Registro no disponible"})
         if path == "/api/stream/status":
             return self._send(200, stream_status())
         if path == "/api/playlist.m3u8":
@@ -450,65 +495,46 @@ class Handler(BaseHTTPRequestHandler):
             profile = qs.get("profile", ["pass"])[0]
             if not base:
                 host = self.headers.get("Host", "127.0.0.1:8081")
-                base = "http://%s/stream/channelid/{sid}" % host
+                base = "http://%s/stream/channel/{channel_id}" % host
+            if profile != "pass":
+                return self._send(400, {"error": "Solo se admite el perfil pass (TS sin transcodificar)"})
             return self._send(200, build_m3u8(base, tid, profile), "application/vnd.apple.mpegurl")
-        if path.startswith("/stream/channelid/"):
-            return self._stream_channel(path[len("/stream/channelid/"):])
+        for prefix in ("/stream/channel/", "/stream/channelid/"):
+            if path.startswith(prefix):
+                if qs.get("profile", ["pass"])[0] != "pass":
+                    return self._send(400, {"error": "Solo se admite profile=pass"})
+                return self._stream_channel(urllib.parse.unquote(path[len(prefix):]))
         return self._send(404, {"error": "not found"})
 
-    def _stream_channel(self, sid):
-        """Sirve el TS de un canal: arranca tbsstream (-s SID) -> UDP local -> HTTP."""
-        tp = _find_tp_by_sid(sid)
-        if not tp:
-            return self._send(404, {"error": "SID %s no encontrado" % sid})
-        tbs = find_tbsstream(_cfg["tbsstream"])
-        if not tbs:
-            return self._send(500, {"error": "tbsstream no disponible"})
-        nc = STATE["newcamd"]
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        cmd = [tbs, "-t", tp.get("type", "dvbs2"),
-               "--freq-mhz", str(tp.get("freq_mhz")),
-               "--lnb-lo", str(tp.get("lnb_lo", 9750)),
-               "--pol", tp.get("pol", "V"),
-               "-a", str(tp.get("adapter", 0)),
-               "-s", sid,
-               "--symbol-rate", str(tp.get("symbol_rate", 0)),
-               "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
-               "--deskey", nc.get("deskey", ""),
-               "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
-               "--udp", "127.0.0.1:%d" % port]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+    def _stream_channel(self, identity):
+        session = None
+        try:
+            tp, sid = resolve_channel(identity)
+            session = _session_start(tp, STATE["newcamd"], sid=sid)
+            cursor = session.cursor()
+        except StreamError as e:
+            return self._send(e.status, {"error": str(e)})
+        except (ValueError, TypeError, KeyError):
+            return self._send(400, {"error": "Configuración del canal inválida"})
+        try:
+            self._relay_session(session, cursor)
+        finally:
+            _streams.release(session)
+
+    def _relay_session(self, session, cursor):
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        sock.settimeout(1)
-        deadline = time.time() + 3600
+        self.close_connection = True
+        self.connection.settimeout(5)
         try:
-            while time.time() < deadline:
-                try:
-                    data, _ = sock.recvfrom(1316)
-                    self.wfile.write(data)
-                except socket.timeout:
-                    continue
-                except (BrokenPipeError, ConnectionResetError):
-                    break
-        finally:
-            sock.close()
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                pass
+            while True:
+                cursor, data = session.read(cursor)
+                self.wfile.write(data)
+        except (OSError, StreamError):
+            pass
 
     def do_POST(self):
         origin = self.headers.get("Origin")
@@ -531,9 +557,6 @@ class Handler(BaseHTTPRequestHandler):
             tp["name"] = body.get("name") or ("%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"]))
             tp["scan"] = None
             with _lock:
-                # cada adapter = un transponder: reemplaza el del mismo adapter
-                STATE["transponders"] = [t for t in STATE["transponders"]
-                                         if t.get("adapter") != tp["adapter"]]
                 STATE["transponders"].append(tp)
                 _save("transponders")
             return self._send(200, {"ok": True, "transponder": tp})
@@ -560,6 +583,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/scan":
             tid = body.get("id")
+            if tid and not _find_tp(tid):
+                return self._send(404, {"ok": False, "error": "Transponder no encontrado"})
             tp = _find_tp(tid) or _norm_tp(body)
             result = run_scan(tp)
             if result.get("ok") and tid:

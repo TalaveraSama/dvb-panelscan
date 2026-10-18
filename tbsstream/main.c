@@ -89,7 +89,14 @@ typedef struct {
   uint16_t caid;
   uint32_t provid;
 
-  struct { uint8_t type; uint16_t pid; int descramble; } es[MAX_ES];
+  uint8_t program_descriptors[1024];
+  int program_descriptors_len;
+  struct {
+    uint8_t type;
+    uint16_t pid;
+    int descramble, descriptors_len;
+    uint8_t descriptors[1024];
+  } es[MAX_ES];
   int nes;
 } service_t;
 
@@ -119,6 +126,7 @@ typedef struct {
   struct { char host[128]; int port; int multicast; } udp[8];
   int nudp;
   int http_port;
+  int stdout_ts;
   char m3u8_base[256];
 } opts_t;
 
@@ -285,6 +293,17 @@ static int nudp_global;
 
 static void output_packet(const uint8_t *pkt)
 {
+  if (opts.stdout_ts) {
+    size_t left = TS_PKT;
+    const uint8_t *p = pkt;
+    while (left) {
+      ssize_t n = write(STDOUT_FILENO, p, left);
+      if (n < 0 && errno == EINTR) continue;
+      if (n <= 0) exit(EXIT_FAILURE);
+      p += n;
+      left -= (size_t)n;
+    }
+  }
   pthread_mutex_lock(&ring_mutex);
   memcpy(ring + (size_t)(ring_seq % RING_PKTS) * TS_PKT, pkt, TS_PKT);
   ring_seq++;
@@ -368,12 +387,19 @@ static int build_pmt(uint8_t *sec)
   sec[i++] = 0; sec[i++] = 0;
   sec[i++] = (uint8_t)(0xE0 | (svc.pcr_pid >> 8));
   sec[i++] = (uint8_t)(svc.pcr_pid & 0xff);
-  sec[i++] = 0xF0; sec[i++] = 0x00;      /* program_info_length = 0 */
+  int pil = svc.program_descriptors_len;
+  sec[i++] = (uint8_t)(0xf0 | (pil >> 8)); sec[i++] = (uint8_t)pil;
+  memcpy(sec + i, svc.program_descriptors, pil);
+  i += pil;
   for (int e = 0; e < svc.nes; e++) {
+    int dl = svc.es[e].descriptors_len;
+    if (i + 5 + dl + 4 > 1024) return 0;
     sec[i++] = svc.es[e].type;
     sec[i++] = (uint8_t)(0xE0 | (svc.es[e].pid >> 8));
     sec[i++] = (uint8_t)(svc.es[e].pid & 0xff);
-    sec[i++] = 0xF0; sec[i++] = 0x00;    /* ES_info_length = 0 (sin CA) */
+    sec[i++] = (uint8_t)(0xf0 | (dl >> 8)); sec[i++] = (uint8_t)dl;
+    memcpy(sec + i, svc.es[e].descriptors, dl);
+    i += dl;
   }
   int slen = i - 3 + 4;
   sec[1] = (uint8_t)(0xB0 | (slen >> 8));
@@ -386,16 +412,49 @@ static int build_pmt(uint8_t *sec)
   return i;
 }
 
-static void make_psi_packet(uint16_t pid, uint8_t *cc, const uint8_t *sec, int slen, uint8_t *out)
+/* A PSI section can span multiple TS packets. Only the first has a pointer. */
+static void output_psi(uint16_t pid, uint8_t *cc, const uint8_t *sec, int len)
 {
-  memset(out, 0xFF, TS_PKT);
-  out[0] = 0x47;
-  out[1] = (uint8_t)(0x40 | (pid >> 8));
-  out[2] = (uint8_t)(pid & 0xff);
-  out[3] = (uint8_t)(0x10 | ((*cc) & 0x0F));   /* payload only + CC */
-  (*cc) = ((*cc) + 1) & 0x0F;
-  out[4] = 0;                                  /* pointer_field = 0 */
-  memcpy(out + 5, sec, slen);
+  int first = 1;
+  while (len > 0) {
+    uint8_t out[TS_PKT];
+    memset(out, 0xff, sizeof(out));
+    out[0] = 0x47;
+    out[1] = (uint8_t)((first ? 0x40 : 0) | (pid >> 8));
+    out[2] = (uint8_t)pid;
+    out[3] = (uint8_t)(0x10 | (*cc & 15));
+    *cc = (*cc + 1) & 15;
+    int offset = 4;
+    if (first) out[offset++] = 0;
+    int size = len < TS_PKT - offset ? len : TS_PKT - offset;
+    memcpy(out + offset, sec, size);
+    output_packet(out);
+    sec += size;
+    len -= size;
+    first = 0;
+  }
+}
+
+static uint64_t psi_due_ms;
+static uint64_t monotonic_ms(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static void emit_psi(void)
+{
+  static uint8_t pat_cc, pmt_cc;
+  if (!svc.ready || !svc.pmt_pid) return;
+  uint64_t now = monotonic_ms();
+  if (now < psi_due_ms) return;
+  uint8_t pat[64], pmt[1024];
+  int plen = build_pat(pat), mlen = build_pmt(pmt);
+  if (mlen <= 0) return;
+  output_psi(PID_PAT, &pat_cc, pat, plen);
+  output_psi(svc.pmt_pid, &pmt_cc, pmt, mlen);
+  psi_due_ms = now + 100;
 }
 
 /* -------------------------------------------------------------------------
@@ -549,71 +608,67 @@ static int is_audio(uint8_t t)
          t == 0x81 || t == 0x82 || t == 0x87;
 }
 
+/* Preserve non-CA descriptors; reject malformed tables without partial updates. */
+static int copy_descriptors(uint8_t *out, const uint8_t *in, int len,
+                            service_t *service)
+{
+  int used = 0;
+  for (int j = 0; j < len; ) {
+    if (j + 2 > len) return -1;
+    int size = 2 + in[j+1];
+    if (j + size > len) return -1;
+    if (in[j] == DESC_CA) {
+      if (size < 6) return -1;
+      if (service->ecm_pid < 0) {
+        service->caid = ((uint16_t)in[j+2] << 8) | in[j+3];
+        service->ecm_pid = ((in[j+4] & 0x1f) << 8) | in[j+5];
+      }
+    } else {
+      memcpy(out + used, in + j, size);
+      used += size;
+    }
+    j += size;
+  }
+  return used;
+}
+
 static void parse_pmt(const uint8_t *b, int len)
 {
-  if (len < 9) return;
+  if (len < 9 || len > 1017) return;
   uint16_t sid = ((uint16_t)b[0] << 8) | b[1];
-  if (opts.want_sid && sid != opts.want_sid) return;
-  if (!svc.ready || svc.sid != sid) {   /* (re)inicializar servicio */
-    uint16_t pmt_pid = svc.pmt_pid, tsid = svc.tsid;
-    memset(&svc, 0, sizeof(svc));
-    svc.sid = sid;
-    svc.pmt_pid = pmt_pid;
-    svc.tsid = tsid;
-    svc.video_pid = svc.audio_pid = svc.ecm_pid = -1;
-  }
-  svc.pmt_version = (b[2] >> 1) & 0x1F;
-  svc.pcr_pid = ((uint16_t)(b[5] & 0x1F) << 8) | b[6];
-  int pil = ((b[7] & 0x0F) << 8) | b[8];
+  if ((opts.want_sid && sid != opts.want_sid) || !(b[2] & 1)) return;
+  service_t next = {0};
+  next.sid = sid;
+  next.pmt_pid = svc.pmt_pid;
+  next.tsid = svc.tsid;
+  next.video_pid = next.audio_pid = next.ecm_pid = -1;
+  next.pmt_version = (b[2] >> 1) & 31;
+  next.pcr_pid = ((b[5] & 0x1f) << 8) | b[6];
+  int pil = ((b[7] & 15) << 8) | b[8];
   if (9 + pil > len) return;
-  /* CA may be attached to the program, not only to an elementary stream. */
-  for (int j = 9; j + 2 <= 9 + pil; ) {
-    int dl = b[j+1];
-    if (j + 2 + dl > 9 + pil) break;
-    if (b[j] == DESC_CA && dl >= 4 && svc.ecm_pid < 0) {
-      svc.caid = ((uint16_t)b[j+2] << 8) | b[j+3];
-      svc.ecm_pid = ((b[j+4] & 0x1f) << 8) | b[j+5];
-    }
-    j += 2 + dl;
+  next.program_descriptors_len = copy_descriptors(next.program_descriptors, b + 9, pil, &next);
+  if (next.program_descriptors_len < 0) return;
+  for (int off = 9 + pil; off < len; ) {
+    if (off + 5 > len || next.nes >= MAX_ES) return;
+    int dl = ((b[off+3] & 15) << 8) | b[off+4];
+    if (off + 5 + dl > len) return;
+    int e = next.nes++;
+    next.es[e].type = b[off];
+    next.es[e].pid = ((b[off+1] & 31) << 8) | b[off+2];
+    next.es[e].descramble = 1;
+    next.es[e].descriptors_len = copy_descriptors(next.es[e].descriptors, b + off + 5, dl, &next);
+    if (next.es[e].descriptors_len < 0) return;
+    if (is_video(b[off]) && next.video_pid < 0) next.video_pid = next.es[e].pid;
+    if (is_audio(b[off]) && next.audio_pid < 0) next.audio_pid = next.es[e].pid;
+    off += 5 + dl;
   }
-  int off = 9 + pil;
-
-  svc.nes = 0;
-  while (off + 5 <= len) {
-    uint8_t stype = b[off];
-    uint16_t es_pid = ((uint16_t)(b[off+1] & 0x1F) << 8) | b[off+2];
-    int esil = ((b[off+3] & 0x0F) << 8) | b[off+4];
-    const uint8_t *d = b + off + 5;
-    int dlen = esil;
-    if (off + 5 + esil > len) break;
-
-    /* ¿descriptor CA (0x09) en este ES? */
-    uint16_t caid = 0, ecm_pid = 0;
-    for (int j = 0; j + 2 <= dlen; ) {
-      uint8_t tag = d[j], dl = d[j+1];
-      if (j + 2 + dl > dlen) break;
-      if (tag == DESC_CA && dl >= 4) {
-        caid = ((uint16_t)d[j+2] << 8) | d[j+3];
-        ecm_pid = ((uint16_t)(d[j+4] & 0x1F) << 8) | d[j+5];
-      }
-      j += 2 + dl;
-    }
-
-    if (svc.nes < MAX_ES) {
-      svc.es[svc.nes].type = stype;
-      svc.es[svc.nes].pid = es_pid;
-      svc.es[svc.nes].descramble = 1;
-      svc.nes++;
-    }
-    if (is_video(stype) && svc.video_pid < 0) svc.video_pid = es_pid;
-    if (is_audio(stype) && svc.audio_pid < 0) svc.audio_pid = es_pid;
-    if (caid && ecm_pid && svc.ecm_pid < 0) { svc.ecm_pid = (int)ecm_pid; svc.caid = caid; svc.provid = 0; }
-
-    off += 5 + esil;
+  next.ready = 1;
+  if (memcmp(&svc, &next, sizeof(next))) {
+    svc = next;
+    psi_due_ms = 0;
+    LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d\n",
+         svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes);
   }
-  svc.ready = 1;
-  LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d\n",
-       svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes);
 }
 
 static void parse_pat(const uint8_t *b, int len)
@@ -734,6 +789,7 @@ static void *http_server(void *arg)
 static void process_packet(uint8_t *pkt)
 {
   if (pkt[0] != 0x47) return;
+  emit_psi();
   int pusi = (pkt[1] & 0x40) != 0;
   uint16_t pid = ((uint16_t)(pkt[1] & 0x1F) << 8) | pkt[2];
   int afc = (pkt[3] >> 4) & 0x03;
@@ -813,6 +869,7 @@ static int parse_fec(const char *s)
 
 int main(int argc, char **argv)
 {
+  signal(SIGPIPE, SIG_IGN);
   memset(&opts, 0, sizeof(opts));
   opts.adapter = 0; opts.frontend = 0; opts.delsys = SYS_DVBT;
   opts.nc_port = 15050; opts.http_port = 9981;
@@ -827,7 +884,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE, OPT_LNBLO };
+         OPT_BASE, OPT_LNBLO, OPT_STDOUT };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -848,6 +905,7 @@ int main(int argc, char **argv)
     {"pass", required_argument, 0, OPT_PASS},
     {"udp", required_argument, 0, OPT_UDP},
     {"http-port", required_argument, 0, OPT_HTTP},
+    {"stdout", no_argument, 0, OPT_STDOUT},
     {"m3u8-base", required_argument, 0, OPT_BASE},
     {"lnb-lo", required_argument, 0, OPT_LNBLO},
     {"timeout", required_argument, 0, 'T'},
@@ -903,6 +961,7 @@ int main(int argc, char **argv)
         }
         break;
       }
+      case OPT_STDOUT: opts.stdout_ts = 1; break;
       case OPT_HTTP: opts.http_port = atoi(optarg); break;
       case OPT_BASE: strncpy(opts.m3u8_base, optarg, sizeof(opts.m3u8_base)-1); break;
       case OPT_LNBLO: opts.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
@@ -1000,12 +1059,6 @@ int main(int argc, char **argv)
   if (opts.http_port > 0)
     pthread_create(&ht, NULL, http_server, &opts.http_port);
 
-  /* PAT/PMT periódicos */
-  uint8_t pat_cc = 0, pmt_cc = 0;
-  uint64_t packets = 0;
-  uint8_t pat_sec[64], pmt_sec[256];
-  int pat_len = 0, pmt_len = 0;
-
   /* bucle */
   uint8_t buf[TS_PKT * 32];
   struct pollfd pfd = { .fd = dvr, .events = POLLIN };
@@ -1016,23 +1069,6 @@ int main(int argc, char **argv)
     if (n <= 0) continue;
     process_buffer(buf, (int)n);
 
-    /* inyectar PAT/PMT cada ~100 ms */
-    packets += (uint64_t)n / TS_PKT;
-    if (svc.ready && packets >= 2000) {
-      packets = 0;
-      /* reconstruir M3U8 con el SID real */
-      snprintf(m3u8_body, sizeof(m3u8_body),
-        "#EXTM3U\n#EXTINF:-1 tvg-id=\"%d\",Canal %d\n%s/stream.ts\n",
-        svc.sid, svc.sid,
-        opts.m3u8_base[0] ? opts.m3u8_base : "http://127.0.0.1:9981");
-      uint8_t out[TS_PKT];
-      pat_len = build_pat(pat_sec);
-      pmt_len = build_pmt(pmt_sec);
-      make_psi_packet(PID_PAT, &pat_cc, pat_sec, pat_len, out);
-      output_packet(out);
-      make_psi_packet(svc.pmt_pid, &pmt_cc, pmt_sec, pmt_len, out);
-      output_packet(out);
-    }
   }
 
   return 0;
