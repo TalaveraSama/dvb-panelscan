@@ -49,6 +49,21 @@ Abrir **http://<ip>:8081**.
   demux "full TS" que el driver TBSECP3 necesita).
 - El descifrado real necesita el **lector de smartcard** conectado y OSCam estable.
 
+## M3U8 / stream TS (cómo se genera la URL)
+
+La lista M3U8 sigue el formato de TVHeadend (`src/webui/webui.c`). Cada canal genera:
+
+```
+#EXTINF:-1 tvg-id="<sid>" tvg-name="<nombre>" group-title="<red>",<nombre>
+http://<host>:<puerto>/stream/channelid/<sid>?profile=pass
+```
+
+- `<host>:<puerto>` se toma del header `Host` del navegador (o se pasa `?base_url=`).
+- `base_url` acepta el placeholder `{sid}`: `http://IP:9981/stream/channelid/{sid}`.
+- `?profile=pass` es el perfil "passthrough" (TVHeadend); aquí es decorativo.
+- El **TS real** lo sirve `tbsstream` en `/stream.ts` (HTTP) y por UDP
+  (`udp://@239.x.x.x:puerto`), que es lo que alimenta el modulador IP→analógico.
+
 ## Licencia
 
 GPLv3.

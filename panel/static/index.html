@@ -12,98 +12,114 @@
       <span class="logo">📡</span>
       <h1>Mini DVB-Scan</h1>
     </div>
+    <nav class="menu" id="menu">
+      <a href="#" data-tab="dashboard" class="active">Dashboard</a>
+      <a href="#" data-tab="epg">EPG</a>
+      <a href="#" data-tab="newcamd">Newcamd</a>
+      <a href="#" data-tab="m3u8">M3U8 / Stream</a>
+    </nav>
     <div class="status-badge" id="statusBadge">cargando…</div>
   </header>
 
   <main>
-    <!-- Adaptadores / estado -->
-    <section class="card">
-      <h2>Adaptadores DVB</h2>
-      <div id="adapters" class="adapters">—</div>
-      <div class="muted small" id="bins"></div>
-    </section>
+    <!-- ===================== DASHBOARD ===================== -->
+    <section id="tab-dashboard">
+      <section class="card">
+        <div class="card-head"><h2>Adaptadores</h2></div>
+        <div id="adapters" class="adapters">—</div>
+        <div class="muted small" id="bins"></div>
+      </section>
 
-    <!-- Transponders -->
-    <section class="card">
-      <div class="card-head">
-        <h2>Transponders</h2>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Nombre</th><th>Tipo</th><th>Freq</th><th>SR</th><th>Pol</th><th>LNB</th><th>Adap.</th><th></th></tr></thead>
-          <tbody id="tpBody"><tr><td colspan="8" class="muted">Sin transponders guardados</td></tr></tbody>
-        </table>
-      </div>
-
-      <h3 class="sub">Agregar transponder</h3>
-      <form id="tpForm" class="grid-form">
-        <label>Nombre <input id="tp_name" placeholder="70W AMX"></label>
-        <label>Tipo
-          <select id="tp_type">
-            <option value="dvbs2" selected>DVB-S2</option>
-            <option value="dvbs">DVB-S</option>
-            <option value="dvbt">DVB-T</option>
-            <option value="dvbt2">DVB-T2</option>
-            <option value="dvbc">DVB-C</option>
-          </select>
-        </label>
-        <label>Frecuencia (MHz) <input id="tp_freq" type="number" step="any" value="10970"></label>
-        <label>LNB LO (MHz) <input id="tp_lnb" type="number" step="any" value="9750"></label>
-        <label>Symbol rate <input id="tp_sr" type="number" value="27900000"></label>
-        <label>Polarización
-          <select id="tp_pol"><option>V</option><option>H</option><option>L</option><option>R</option></select>
-        </label>
-        <label>Adaptador <input id="tp_adapter" type="number" value="0" min="0"></label>
-        <label>Tiempo (s) <input id="tp_timeout" type="number" value="15" min="1"></label>
-        <button type="submit" class="btn primary">Agregar transponder</button>
-      </form>
-    </section>
-
-    <!-- Canales / EPG -->
-    <section class="card">
-      <div class="card-head">
-        <h2>Canales y EPG <span id="channelCount" class="muted"></span></h2>
-        <div class="actions">
-          <input id="filter" type="search" placeholder="Filtrar…">
-          <a class="btn" id="exportBtn" href="/api/playlist.m3u8" target="_blank">Exportar M3U8</a>
+      <section class="card">
+        <div class="card-head">
+          <h2>Agregar transponder</h2>
+          <button class="btn small" id="toggleTpForm">ocultar</button>
         </div>
-      </div>
-      <div class="muted small" id="scanInfo"></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>SID</th><th>Nombre</th><th>Proveedor</th><th>Tipo</th><th>Ahora</th><th>Después</th></tr></thead>
-          <tbody id="channelBody"><tr><td colspan="6" class="muted">Sin canales (escanea un transponder)</td></tr></tbody>
-        </table>
-      </div>
+        <form id="tpForm" class="grid-form">
+          <label>Nombre <input id="tp_name" placeholder="70W AMX"></label>
+          <label>Tipo
+            <select id="tp_type">
+              <option value="dvbs2" selected>DVB-S2</option>
+              <option value="dvbs">DVB-S</option>
+              <option value="dvbt">DVB-T</option>
+              <option value="dvbt2">DVB-T2</option>
+              <option value="dvbc">DVB-C</option>
+            </select>
+          </label>
+          <label>Frecuencia satélite (MHz) <input id="tp_freq" type="number" step="any" value="10970"></label>
+          <label>LNB LO (MHz) <input id="tp_lnb" type="number" step="any" value="9750"></label>
+          <label>Symbol rate <input id="tp_sr" type="number" value="27900000"></label>
+          <label>Polarización
+            <select id="tp_pol"><option>V</option><option>H</option><option>L</option><option>R</option></select>
+          </label>
+          <label>Adaptador <input id="tp_adapter" type="number" value="0" min="0"></label>
+          <label>Tiempo (s) <input id="tp_timeout" type="number" value="15" min="1"></label>
+          <button type="submit" class="btn primary">Agregar</button>
+        </form>
+      </section>
+
+      <div id="tpList"></div>
     </section>
 
-    <!-- Newcamd -->
-    <section class="card">
-      <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
-      <form id="ncForm" class="grid-form">
-        <label>Servidor <input id="nc_host" value="127.0.0.1"></label>
-        <label>Puerto <input id="nc_port" type="number" value="5000"></label>
-        <label>Usuario <input id="nc_user" value="astra"></label>
-        <label>Contraseña <input id="nc_pass" type="password" value="astra"></label>
-        <label>DES key (14 bytes hex) <input id="nc_deskey" value="0102030405060708091011121314" size="30"></label>
-        <button type="submit" class="btn primary">Guardar newcamd</button>
-      </form>
-      <div class="muted small" id="ncInfo"></div>
+    <!-- ===================== EPG ===================== -->
+    <section id="tab-epg" class="hidden">
+      <section class="card">
+        <div class="card-head">
+          <h2>EPG <span id="epgCount" class="muted"></span></h2>
+          <input id="epgFilter" type="search" placeholder="Filtrar…">
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Transponder</th><th>SID</th><th>Canal</th><th>Proveedor</th><th>Tipo</th><th>Ahora</th><th>Después</th></tr></thead>
+            <tbody id="epgBody"><tr><td colspan="7" class="muted">Sin EPG (escanea transponders)</td></tr></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
-    <!-- Streaming -->
-    <section class="card">
-      <div class="card-head"><h2>Streaming (descifrado + UDP)</h2></div>
-      <form id="stForm" class="grid-form">
-        <label>Transponder
-          <select id="st_tp"></select>
-        </label>
-        <label>UDP destino (ip:puerto) <input id="st_udp" placeholder="239.1.1.1:1234"></label>
-        <label>HTTP puerto <input id="st_http" type="number" value="9981"></label>
-        <button type="submit" class="btn primary" id="stStart">Iniciar stream</button>
-        <button type="button" class="btn" id="stStop">Detener</button>
-      </form>
-      <div class="muted small" id="stInfo"></div>
+    <!-- ===================== NEWCAMD ===================== -->
+    <section id="tab-newcamd" class="hidden">
+      <section class="card">
+        <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
+        <form id="ncForm" class="grid-form">
+          <label>Servidor <input id="nc_host" value="127.0.0.1"></label>
+          <label>Puerto <input id="nc_port" type="number" value="5000"></label>
+          <label>Usuario <input id="nc_user" value="astra"></label>
+          <label>Contraseña <input id="nc_pass" type="password" value="astra"></label>
+          <label>DES key (14 bytes hex) <input id="nc_deskey" value="0102030405060708091011121314" size="30"></label>
+          <button type="submit" class="btn primary">Guardar newcamd</button>
+        </form>
+        <div class="muted small" id="ncInfo"></div>
+      </section>
+    </section>
+
+    <!-- ===================== M3U8 / STREAM ===================== -->
+    <section id="tab-m3u8" class="hidden">
+      <section class="card">
+        <div class="card-head"><h2>Lista M3U8</h2></div>
+        <form id="m3uForm" class="grid-form">
+          <label>Transponder
+            <select id="m3u_tp"><option value="">— todos —</option></select>
+          </label>
+          <label>Base URL (usa {sid})
+            <input id="m3u_base" placeholder="http://IP:9981/stream/channelid/{sid}" title="Vacio = auto http://<este host>/stream/channelid/{sid}">
+          </label>
+          <button type="submit" class="btn primary">Descargar M3U8</button>
+        </form>
+        <div class="muted small">El TS lo sirve <b>tbsstream</b> en <code>/stream.ts</code> (HTTP) y por UDP. La URL de cada canal apunta a un stream TS con <code>?profile=pass</code> (estilo TVHeadend).</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Streaming (descifrado + UDP)</h2></div>
+        <form id="stForm" class="grid-form">
+          <label>Transponder <select id="st_tp"></select></label>
+          <label>UDP destino (ip:puerto) <input id="st_udp" placeholder="239.1.1.1:1234"></label>
+          <label>HTTP puerto <input id="st_http" type="number" value="9981"></label>
+          <button type="submit" class="btn primary" id="stStart">Iniciar</button>
+          <button type="button" class="btn danger" id="stStop">Detener</button>
+        </form>
+        <div class="muted small" id="stInfo"></div>
+      </section>
     </section>
   </main>
 

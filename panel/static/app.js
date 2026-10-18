@@ -6,17 +6,9 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-
-async function getJSON(url) {
-  const r = await fetch(url);
-  return r.json();
-}
-async function postJSON(url, body) {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body || {}),
-  });
+async function getJSON(u) { return (await fetch(u)).json(); }
+async function postJSON(u, b) {
+  const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) });
   return r.json();
 }
 
@@ -24,80 +16,94 @@ function typeTag(t) {
   const radio = t === 2 || t === 10;
   return `<span class="tag ${radio ? "radio" : "tv"}">${radio ? "Radio" : "TV"}</span>`;
 }
-
-function fmtMHz(mhz) {
-  if (!mhz) return "—";
-  return (Number(mhz) / 1e6).toFixed(3) + " GHz";
+function tpInfo(t) {
+  return `${(t.type || "").toUpperCase()} · ${t.freq_mhz} MHz · SR ${t.symbol_rate} · ${t.pol} · LNB ${t.lnb_lo} · adap ${t.adapter}`;
 }
 
-/* ------------------------- Estado / adaptadores ------------------------- */
+/* ------------------------------ Tabs ------------------------------ */
+function switchTab(tab) {
+  document.querySelectorAll("#menu a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
+  ["dashboard", "epg", "newcamd", "m3u8"].forEach((t) => {
+    $("tab-" + t).classList.toggle("hidden", t !== tab);
+  });
+}
+document.querySelectorAll("#menu a").forEach((a) =>
+  a.addEventListener("click", (e) => { e.preventDefault(); switchTab(a.dataset.tab); }));
+
+/* ---------------------------- Estado ---------------------------- */
 async function loadStatus() {
   const s = await getJSON("/api/status");
-  const badge = $("statusBadge");
   const live = s.linux && s.dvb2m3u8;
+  const badge = $("statusBadge");
   badge.textContent = live ? "EN VIVO · " + s.platform : "DEMO · " + s.platform;
   badge.className = "status-badge " + (live ? "live" : "demo");
-
   const el = $("adapters");
-  if (!s.adapters || !s.adapters.length) {
-    el.textContent = "No hay adaptadores DVB detectados.";
-  } else {
-    el.innerHTML = s.adapters.map((a) => `
-      <div class="adapter">
-        <div class="path">${esc(a.path)}</div>
-        <div class="fe">${esc((a.frontends || []).join(", ") || "—")}</div>
-      </div>`).join("");
-  }
-  $("bins").textContent = `dvb2m3u8: ${s.dvb2m3u8 || "no encontrado"} · tbsstream: ${s.tbsstream || "no encontrado"}`;
+  el.innerHTML = (s.adapters && s.adapters.length)
+    ? s.adapters.map((a) => `<div class="adapter"><div class="path">${esc(a.path)}</div><div class="fe">${esc((a.frontends || []).join(", "))}</div></div>`).join("")
+    : "No hay adaptadores DVB.";
+  $("bins").textContent = `dvb2m3u8: ${s.dvb2m3u8 || "no"} · tbsstream: ${s.tbsstream || "no"}`;
   $("footer").textContent = `Plataforma: ${s.platform}`;
 }
 
-/* ------------------------------ Transponders ---------------------------- */
+/* ------------------------- Transponders (dashboard) ------------------------- */
 let transponders = [];
 
 async function loadTransponders() {
   transponders = await getJSON("/api/transponders");
   renderTransponders();
-  renderStreamSelect();
+  renderSelects();
+}
+
+function channelsTable(services, showTpCol) {
+  if (!services || !services.length) return "";
+  return `<div class="table-wrap"><table>
+    <thead><tr>${showTpCol ? "<th>TP</th>" : ""}<th>SID</th><th>Canal</th><th>Prov.</th><th>Tipo</th><th>Ahora</th><th>Después</th></tr></thead>
+    <tbody>${services.map((s) => `<tr>
+      ${showTpCol ? `<td>${esc(s._tp || "")}</td>` : ""}
+      <td>${esc(s.sid)}</td><td>${esc(s.name)}</td><td>${esc(s.provider || "—")}</td>
+      <td>${typeTag(s.type)}</td><td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td>
+    </tr>`).join("")}</tbody></table></div>`;
 }
 
 function renderTransponders() {
-  const body = $("tpBody");
+  const list = $("tpList");
   if (!transponders.length) {
-    body.innerHTML = '<tr><td colspan="8" class="muted">Sin transponders guardados</td></tr>';
+    list.innerHTML = '<div class="muted">Sin transponders. Agrega uno arriba.</div>';
     return;
   }
-  body.innerHTML = transponders.map((t) => `
-    <tr>
-      <td>${esc(t.name)}</td>
-      <td>${esc(t.type.toUpperCase())}</td>
-      <td>${esc(t.freq_mhz)} MHz</td>
-      <td>${esc(t.symbol_rate)}</td>
-      <td>${esc(t.pol)}</td>
-      <td>${esc(t.lnb_lo)}</td>
-      <td>${esc(t.adapter)}</td>
-      <td class="actions-cell">
-        <button class="btn small" data-scan="${esc(t.id)}">Escanear</button>
-        <button class="btn small danger" data-del="${esc(t.id)}">Borrar</button>
-      </td>
-    </tr>`).join("");
-  body.querySelectorAll("[data-scan]").forEach((b) =>
-    b.addEventListener("click", () => scanTransponder(b.dataset.scan)));
-  body.querySelectorAll("[data-del]").forEach((b) =>
+  list.innerHTML = transponders.map((t) => {
+    const scan = t.scan;
+    const n = (scan && scan.services) ? scan.services.length : 0;
+    const info = scan
+      ? `Red: <b>${esc(scan.network || "—")}</b> · ${n} canales` + (scan.signal !== undefined ? ` · señal ${esc(scan.signal)}` : "") + (scan.time ? ` · ${new Date(scan.time * 1000).toLocaleString()}` : "")
+      : "No escaneado";
+    return `<div class="card tp-card">
+      <div class="card-head">
+        <h2>📡 ${esc(t.name)}</h2>
+        <div class="actions">
+          <span class="muted small">${esc(tpInfo(t))}</span>
+          <button class="btn small primary" data-scan="${esc(t.id)}">Escanear</button>
+          <button class="btn small danger" data-del="${esc(t.id)}">Borrar</button>
+        </div>
+      </div>
+      <div class="muted small">${info}</div>
+      ${scan ? channelsTable(scan.services, false) : '<div class="muted small">Pulsa "Escanear" para listar los canales de este transponder.</div>'}
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll("[data-scan]").forEach((b) =>
+    b.addEventListener("click", () => scanTransponder(b.dataset.scan, b)));
+  list.querySelectorAll("[data-del]").forEach((b) =>
     b.addEventListener("click", () => deleteTransponder(b.dataset.del)));
 }
 
 async function addTransponder(e) {
   e.preventDefault();
   const tp = {
-    name: $("tp_name").value || null,
-    type: $("tp_type").value,
-    freq_mhz: parseFloat($("tp_freq").value),
-    lnb_lo: parseFloat($("tp_lnb").value),
-    symbol_rate: parseInt($("tp_sr").value, 10) || 0,
-    pol: $("tp_pol").value,
-    adapter: parseInt($("tp_adapter").value, 10) || 0,
-    timeout: parseInt($("tp_timeout").value, 10) || 15,
+    name: $("tp_name").value || null, type: $("tp_type").value,
+    freq_mhz: parseFloat($("tp_freq").value), lnb_lo: parseFloat($("tp_lnb").value),
+    symbol_rate: parseInt($("tp_sr").value, 10) || 0, pol: $("tp_pol").value,
+    adapter: parseInt($("tp_adapter").value, 10) || 0, timeout: parseInt($("tp_timeout").value, 10) || 15,
   };
   const r = await postJSON("/api/transponders", tp);
   if (!r.ok) { alert("Error: " + r.error); return; }
@@ -106,137 +112,116 @@ async function addTransponder(e) {
 }
 
 async function deleteTransponder(id) {
-  if (!confirm("¿Borrar este transponder?")) return;
+  if (!confirm("¿Borrar este transponder y sus canales?")) return;
   await postJSON("/api/transponders/" + id + "/delete", {});
   loadTransponders();
 }
 
-async function scanTransponder(id) {
-  const info = $("scanInfo");
-  info.textContent = "Escaneando transponder… (puede tardar unos segundos)";
+async function scanTransponder(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Escaneando…"; }
   const r = await postJSON("/api/scan", { id });
-  if (!r.ok) {
-    info.innerHTML = `<span class="err">Error: ${esc(r.error)}</span>`;
-    return;
+  if (btn) { btn.disabled = false; btn.textContent = "Escanear"; }
+  if (!r.ok) { alert("Error: " + r.error); return; }
+  loadTransponders();
+  loadEpg();
+}
+
+/* ------------------------------ EPG ------------------------------ */
+let epg = [];
+
+async function loadEpg() {
+  epg = await getJSON("/api/epg");
+  renderEpg();
+}
+
+function renderEpg() {
+  const body = $("epgBody");
+  const filter = ($("epgFilter").value || "").toLowerCase();
+  let rows = [];
+  for (const tp of epg) {
+    for (const s of tp.services || []) {
+      if (filter && !((s.name || "") + " " + (s.provider || "")).toLowerCase().includes(filter)) continue;
+      rows.push(`<tr>
+        <td>${esc(tp.transponder)}</td><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>
+        <td>${esc(s.provider || "—")}</td><td>${typeTag(s.type)}</td>
+        <td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td></tr>`);
+    }
   }
-  renderScan(r);
+  $("epgCount").textContent = rows.length ? `(${rows.length})` : "";
+  body.innerHTML = rows.join("") || '<tr><td colspan="7" class="muted">Sin EPG</td></tr>';
 }
 
-/* ------------------------------ Canales / EPG --------------------------- */
-function renderScan(scan) {
-  const services = scan.services || [];
-  $("channelCount").textContent = `(${services.length})`;
-  const info = $("scanInfo");
-  if (scan.network || scan.signal !== undefined) {
-    info.innerHTML = `Red: <b>${esc(scan.network || "—")}</b> · Canales: ${services.length}` +
-      (scan.signal !== undefined ? ` · Señal: ${esc(scan.signal)}` : "");
-  } else {
-    info.textContent = "";
-  }
-  renderChannels(scan);
-}
-
-function renderChannels(scan) {
-  const services = (scan && scan.services) || [];
-  const body = $("channelBody");
-  if (!services.length) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">Sin canales (escanea un transponder)</td></tr>';
-    return;
-  }
-  const filter = ($("filter").value || "").toLowerCase();
-  const rows = services
-    .filter((s) => !filter ||
-      (s.name || "").toLowerCase().includes(filter) ||
-      (s.provider || "").toLowerCase().includes(filter))
-    .map((s) => `
-      <tr>
-        <td>${esc(s.sid)}</td>
-        <td>${esc(s.name)}</td>
-        <td>${esc(s.provider || "—")}</td>
-        <td>${typeTag(s.type)}</td>
-        <td>${esc(s.now || "—")}</td>
-        <td>${esc(s.next || "—")}</td>
-      </tr>`).join("");
-  body.innerHTML = rows;
-}
-
-async function loadChannels() {
-  const scan = await getJSON("/api/channels");
-  renderScan(scan);
-}
-
-/* ------------------------------- Newcamd -------------------------------- */
+/* ----------------------------- Newcamd ----------------------------- */
 async function loadNewcamd() {
   const nc = await getJSON("/api/newcamd");
-  $("nc_host").value = nc.host || "";
-  $("nc_port").value = nc.port || 5000;
-  $("nc_user").value = nc.user || "";
-  $("nc_pass").value = nc.pass || "";
+  $("nc_host").value = nc.host || ""; $("nc_port").value = nc.port || 5000;
+  $("nc_user").value = nc.user || ""; $("nc_pass").value = nc.pass || "";
   $("nc_deskey").value = nc.deskey || "";
-  $("ncInfo").textContent = "Guardado: " + (nc.host || "—") + ":" + (nc.port || "—") +
-    " · usuario " + (nc.user || "—");
+  $("ncInfo").textContent = `Guardado: ${nc.host}:${nc.port} · ${nc.user}`;
 }
-
 async function saveNewcamd(e) {
   e.preventDefault();
-  const nc = {
-    host: $("nc_host").value,
-    port: parseInt($("nc_port").value, 10) || 5000,
-    user: $("nc_user").value,
-    pass: $("nc_pass").value,
+  const r = await postJSON("/api/newcamd", {
+    host: $("nc_host").value, port: parseInt($("nc_port").value, 10) || 5000,
+    user: $("nc_user").value, pass: $("nc_pass").value,
     deskey: $("nc_deskey").value.replace(/[^0-9a-fA-F]/g, ""),
-  };
-  const r = await postJSON("/api/newcamd", nc);
+  });
   if (!r.ok) { alert("Error: " + r.error); return; }
   loadNewcamd();
 }
 
-/* ------------------------------- Streaming ------------------------------ */
-function renderStreamSelect() {
-  const sel = $("st_tp");
-  sel.innerHTML = transponders.map((t) =>
-    `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")
-    || '<option value="">— sin transponders —</option>';
+/* --------------------------- M3U8 / Stream --------------------------- */
+function renderSelects() {
+  const opts = transponders.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
+  $("st_tp").innerHTML = opts || '<option value="">— sin transponders —</option>';
+  $("m3u_tp").innerHTML = '<option value="">— todos —</option>' + opts;
+}
+
+async function downloadM3u8(e) {
+  e.preventDefault();
+  const tid = $("m3u_tp").value;
+  const base = $("m3u_base").value.trim();
+  const url = "/api/playlist.m3u8?transponder=" + tid + "&base_url=" + encodeURIComponent(base);
+  window.open(url, "_blank");
 }
 
 async function loadStream() {
   const st = await getJSON("/api/stream/status");
   $("stInfo").innerHTML = st.running
-    ? `<span class="ok">● STREAMING</span> (pid ${esc(st.pid)}) · UDP: ${esc(st.udp || "—")} · HTTP: ${esc(st.http_port || "—")}`
-    : "Streaming detenido.";
+    ? `<span class="ok">● STREAMING</span> pid ${esc(st.pid)} · UDP ${esc(st.udp || "—")} · HTTP ${esc(st.http_port || "—")}`
+    : "Detenido.";
 }
-
 async function startStream(e) {
   e.preventDefault();
-  const tp = transponders.find((t) => t.id === $("st_tp").value);
-  if (!tp) { alert("Agrega un transponder primero"); return; }
-  if (!confirm("¿Iniciar el stream (descifrar + salida UDP)?")) return;
+  if (!confirm("¿Iniciar stream (descifrado newcamd + UDP)?")) return;
   const r = await postJSON("/api/stream/start", {
-    transponder: tp,
-    newcamd: null,
-    udp: [$("st_udp").value].filter(Boolean),
+    id: $("st_tp").value, udp: [$("st_udp").value].filter(Boolean),
     http_port: parseInt($("st_http").value, 10) || 9981,
   });
   if (!r.ok) { alert("Error: " + r.error); return; }
   loadStream();
 }
-
 async function stopStream() {
-  const r = await postJSON("/api/stream/stop", {});
-  if (!r.ok) { alert("Error: " + r.error); return; }
+  await postJSON("/api/stream/stop", {});
   loadStream();
 }
 
-/* -------------------------------- Init ---------------------------------- */
+/* ------------------------------ Init ------------------------------ */
 $("tpForm").addEventListener("submit", addTransponder);
 $("ncForm").addEventListener("submit", saveNewcamd);
+$("m3uForm").addEventListener("submit", downloadM3u8);
 $("stForm").addEventListener("submit", startStream);
 $("stStop").addEventListener("click", stopStream);
-$("filter").addEventListener("input", loadChannels);
+$("epgFilter").addEventListener("input", renderEpg);
+$("toggleTpForm").addEventListener("click", () => {
+  const f = $("tpForm");
+  f.style.display = f.style.display === "none" ? "grid" : "none";
+  $("toggleTpForm").textContent = f.style.display === "none" ? "mostrar" : "ocultar";
+});
 
 loadStatus();
 loadTransponders();
-loadChannels();
+loadEpg();
 loadNewcamd();
 loadStream();
 setInterval(loadStream, 5000);
