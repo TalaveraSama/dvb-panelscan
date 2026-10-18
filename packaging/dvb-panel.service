@@ -1,0 +1,21 @@
+[Unit]
+Description=DVB Panel control dashboard
+After=network.target
+
+[Service]
+User=dvb-panel
+Group=dvb-panel
+SupplementaryGroups=video
+Environment=DVB_PANEL_DATA_DIR=/var/lib/dvb-panelscan
+ExecStart=/usr/bin/python3 /usr/lib/dvb-panelscan/server.py --host 127.0.0.1 --port 8081
+Restart=on-failure
+StateDirectory=dvb-panelscan
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

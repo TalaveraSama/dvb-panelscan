@@ -3,25 +3,33 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mini DVB-Scan · Panel</title>
+  <title>DVB Panel · Centro de control</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">📡</span>
-      <h1>Mini DVB-Scan</h1>
+      <span class="logo">◈</span>
+      <h1>DVB<span>Panel / Scan</span></h1>
     </div>
     <nav class="menu" id="menu">
-      <a href="#" data-tab="dashboard" class="active">Dashboard</a>
-      <a href="#" data-tab="epg">EPG</a>
-      <a href="#" data-tab="newcamd">Newcamd</a>
-      <a href="#" data-tab="m3u8">M3U8 / Stream</a>
+      <a href="#" data-tab="dashboard" class="active">◫ &nbsp; Dashboard</a>
+      <a href="#" data-tab="epg">▤ &nbsp; Canales y EPG</a>
+      <a href="#" data-tab="newcamd">◇ &nbsp; Acceso condicional</a>
+      <a href="#" data-tab="m3u8">▷ &nbsp; Streaming</a>
     </nav>
     <div class="status-badge" id="statusBadge">cargando…</div>
   </header>
 
   <main>
+    <div class="page-heading"><div><div class="eyebrow">HEADEND / CENTRO DE CONTROL</div><h2 id="pageTitle">Vista general</h2><p>Administra tu señal. Conecta, escanea y distribuye.</p></div><span class="version">v0.4.0 <span>● Sistema local</span></span></div>
+    <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+    <div class="metrics">
+      <div class="metric"><span>Adaptadores DVB</span><strong id="metricAdapters">—</strong><small>Hardware detectado</small></div>
+      <div class="metric"><span>Transponders</span><strong id="metricTp">—</strong><small>Configurados en el sistema</small></div>
+      <div class="metric"><span>Canales encontrados</span><strong id="metricChannels">—</strong><small>Últimos escaneos guardados</small></div>
+      <div class="metric"><span>Salida de streaming</span><strong id="metricStream">—</strong><small>Estado del proceso, no del descifrado</small></div>
+    </div>
     <!-- ===================== DASHBOARD ===================== -->
     <section id="tab-dashboard">
       <section class="card">
@@ -87,13 +95,14 @@
         <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
         <form id="ncForm" class="grid-form">
           <label>Servidor <input id="nc_host" value="127.0.0.1"></label>
-          <label>Puerto <input id="nc_port" type="number" value="5000"></label>
-          <label>Usuario <input id="nc_user" value="astra"></label>
-          <label>Contraseña <input id="nc_pass" type="password" value="astra"></label>
-          <label>DES key (14 bytes hex) <input id="nc_deskey" value="0102030405060708091011121314" size="30"></label>
+          <label>Puerto <input id="nc_port" min="1" max="65535" required type="number" value="5000"></label>
+          <label>Usuario <input id="nc_user" value=""></label>
+          <label>Contraseña <input id="nc_pass" autocomplete="current-password" type="password" value=""></label>
+          <label>DES key (14 bytes hex) <input id="nc_deskey" value="" autocomplete="off" size="30"></label>
           <button type="submit" class="btn primary">Guardar newcamd</button>
         </form>
-        <div class="muted small" id="ncInfo"></div>
+        <div class="connection-tools"><button class="btn" type="button" id="ncTest">↗ Comprobar conexión TCP</button><span class="muted small" id="ncInfo" role="status"></span></div>
+        <div class="callout">Solo acceso autorizado. Una conexión TCP correcta no confirma el login ni la recepción de CW. Verifica CAID, permisos de la tarjeta y los registros de OSCam.</div>
       </section>
     </section>
 
@@ -117,6 +126,7 @@
         <div class="card-head"><h2>Streaming (descifrado + UDP)</h2></div>
         <form id="stForm" class="grid-form">
           <label>Transponder <select id="st_tp"></select></label>
+          <label>Service ID (SID) <input id="st_sid" type="number" min="1" max="65535" placeholder="Automático: primer servicio"></label>
           <label>UDP destino (ip:puerto) <input id="st_udp" placeholder="239.1.1.1:1234"></label>
           <label>HTTP puerto <input id="st_http" type="number" value="9981"></label>
           <button type="submit" class="btn primary" id="stStart">Iniciar</button>

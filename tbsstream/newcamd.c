@@ -242,7 +242,7 @@ static int nc_send_msg(newcamd_t *nc, const uint8_t *msg, int len,
                        uint16_t sid, uint16_t caid, uint32_t provid,
                        uint16_t *_seq)
 {
-  if (len < 3) return -1;
+  if (len < 3 || len > CWS_NETMSGSIZE - 32) return -1;
   uint8_t buf[CWS_NETMSGSIZE];
   uint16_t seq = ++nc->seq;
 
@@ -302,6 +302,9 @@ static int nc_connect_tcp(const char *host, int port, char *err, size_t errlen)
   for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd < 0) continue;
+    struct timeval tv = { .tv_sec = 5 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
     close(fd); fd = -1;
   }
@@ -352,7 +355,7 @@ newcamd_t *newcamd_connect(const char *host, int port, const uint8_t deskey[14],
   /* 4) esperar login ACK */
   uint8_t buf[CWS_NETMSGSIZE];
   int r = nc_read_msg(nc, buf, sizeof(buf), 5000);
-  if (r < 12 || buf[12] != MSG_CLIENT_2_SERVER_LOGIN_ACK) {
+  if (r < 15 || buf[12] != MSG_CLIENT_2_SERVER_LOGIN_ACK) {
     set_err(err, errlen, "login rechazado", NULL); goto fail;
   }
 
@@ -363,6 +366,14 @@ newcamd_t *newcamd_connect(const char *host, int port, const uint8_t deskey[14],
   des_key_spread(des14, spread);
   des_set_keys(nc, spread);
 
+  /* Complete the handshake before submitting ECMs (as in Tvheadend). */
+  const uint8_t request[3] = {MSG_CARD_DATA_REQ, 0, 0};
+  if (nc_send_msg(nc, request, 3, 0, 0, 0, NULL) < 0 ||
+      (r = nc_read_msg(nc, buf, sizeof(buf), 5000)) < 15 ||
+      buf[12] != MSG_CARD_DATA_REQ + 1) {
+    set_err(err, errlen, "no se recibieron datos de tarjeta", NULL);
+    goto fail;
+  }
   return nc;
 
 fail:
@@ -385,13 +396,15 @@ int newcamd_send_ecm(newcamd_t *nc, uint16_t sid, uint16_t caid, uint32_t provid
   uint8_t buf[CWS_NETMSGSIZE];
   for (;;) {
     int r = nc_read_msg(nc, buf, sizeof(buf), timeout_ms);
-    if (r < 12) return -1;
+    if (r < 15) return -1;
     uint8_t type = buf[12];
     if (type == 0x80 || type == 0x81) {
       uint16_t rseq = ((uint16_t)buf[2] << 8) | buf[3];
       if (rseq != seq) continue;   /* respuesta a otro ECM */
       uint8_t *m = buf + 12;       /* m[0]=tipo, m[1..2]=reservado */
-      int mlen = r - 12;
+      int mlen = ((m[1] & 0x0f) << 8) | m[2];
+      if (mlen != 16 || r < 31) return -1;
+      mlen += 3;
       if (mlen < 19) return -1;    /* 1 + 2 + 8 + 8 como mínimo */
       memcpy(even, m + 3, 8);      /* buf[15..22] */
       memcpy(odd,  m + 11, 8);     /* buf[23..30] */

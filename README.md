@@ -70,3 +70,73 @@ smartcard (ver `tvh-dvb-kit/README.md` para el detalle de los módulos).
 ## Licencia
 
 GPLv3 (reutiliza código de TVHeadend: `cwc.c`, `tvhcsa.c`, `crypt_md5`).
+
+## Release 0.4.0 · Ubuntu
+
+El paquete `dvb-panelscan_0.4.0_amd64.deb` se compila en **Ubuntu 22.04 amd64**
+y usa OpenSSL 3/libdvbcsa del sistema. En Ubuntu 22.04/24.04 amd64:
+
+```sh
+sudo apt update
+sudo apt install ./dvb-panelscan_0.4.0_amd64.deb
+sudo systemctl enable --now dvb-panel
+# Acceder localmente a http://127.0.0.1:8081
+```
+
+Para un servidor remoto, usar un túnel SSH desde tu equipo:
+
+```sh
+ssh -L 8081:127.0.0.1:8081 usuario@servidor
+```
+
+El servicio no requiere root: usa `dvb-panel` y el grupo `video`. Verificar que
+los dispositivos `/dev/dvb` concedan acceso al grupo `video`. Los datos y logs
+están en `/var/lib/dvb-panelscan` (directorio privado; configuración modo 0600).
+No se inicia automáticamente al instalar. Para actualizar, detener el servicio,
+instalar el nuevo paquete y arrancarlo de nuevo. No se eliminan los datos al
+quitar el paquete.
+
+**Seguridad:** el panel todavía no tiene autenticación. No publicarlo directamente
+en Internet ni en una LAN no confiable. El paquete escucha solo en loopback.
+El modo manual `--host 0.0.0.0` es únicamente para redes controladas o detrás de
+un proxy con autenticación/TLS. Newcamd utiliza criptografía heredada por
+compatibilidad; usar una red privada/VPN. Las credenciales se pasan al proceso
+`tbsstream` por argumentos: el administrador del host puede verlas. La API ya
+no devuelve estos argumentos en el estado del streaming.
+
+### Diagnóstico del acceso condicional (solo suscripciones autorizadas)
+
+1. Guardar servidor, puerto, usuario, contraseña y DES key reales. No hay cuenta
+   predeterminada. Usar **Comprobar conexión TCP**: solo valida conectividad,
+   no autenticación ni permisos de tarjeta.
+2. Elegir transponder y **SID** del canal en Streaming; vacío selecciona el primer
+   servicio de PAT. La salida es **un servicio**, no todos los canales del mux.
+3. Revisar `/var/lib/dvb-panelscan/stream.log` y los logs de OSCam. El cliente
+   completa login + solicitud de datos de tarjeta; `CW actualizada` indica una
+   respuesta ECM válida, no una comprobación visual del vídeo.
+4. Confirmar CAID, lector activo y autorización de la cuenta. En simulcrypt se
+   selecciona el primer descriptor CA: la selección por CAID/proveedor y la
+   reconexión automática siguen pendientes. Tras un corte, detener e iniciar el
+   stream. No se implementan EMM ni renovación de derechos de tarjeta.
+
+Corregido en esta versión: ECM cortas descartadas por exigir CRC de sección
+larga; envío ECM truncado; PID ECM inicializado a -1 pero comparado con cero;
+CA a nivel de programa ignorado; ausencia de solicitud CARD_DATA; sustitución
+de CW válidas por mitades vacías. También se validan los límites del framing y
+la longitud declarada de respuestas CW. No se afirma validación de descifrado
+end-to-end sin hardware, tarjeta y servidor autorizados.
+
+### Compilación reproducible y pruebas
+
+```sh
+sudo apt install build-essential libssl-dev libdvbcsa-dev python3
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+make -C dvb2m3u8 && make -C tbsstream
+gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-demux \
+  tests/test_demux.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
+/tmp/test-demux
+sh packaging/build-deb.sh 0.4.0
+```
+
+GitHub Actions ejecuta estas pruebas y genera el `.deb`. La descarga del código
+fuente no contiene binarios: usar el `.deb` de Releases para instalar.

@@ -29,15 +29,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DATA_DIR = BASE_DIR
+DATA_DIR = os.environ.get("DVB_PANEL_DATA_DIR", BASE_DIR)
+os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
 
 _lock = threading.Lock()
 
 STATE = {
     "transponders": [],   # cada uno puede tener "scan" (canales escaneados)
     "newcamd": {
-        "host": "127.0.0.1", "port": 5000, "user": "astra",
-        "pass": "astra", "deskey": "0102030405060708091011121314",
+        "host": "127.0.0.1", "port": 5000, "user": "",
+        "pass": "", "deskey": "",
     },
     "stream": {"running": False, "pid": None, "udp": "", "http_port": 0},
 }
@@ -61,11 +62,12 @@ def _load():
 
 def _save(name):
     path = os.path.join(DATA_DIR, name + ".json")
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(STATE[name], f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    temporary = path + ".tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(STATE[name], f, ensure_ascii=False, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
 
 
 def _save_transponder(tp):
@@ -294,7 +296,7 @@ def build_xmltv(tid=None):
 # ---------------------------------------------------------------------------
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
-def stream_start(tp, newcamd, udp, http_port):
+def stream_start(tp, newcamd, udp, http_port, sid=None):
     binary = find_tbsstream(_cfg["tbsstream"])
     if not (is_linux() and binary):
         return {"ok": False, "error": "tbsstream no disponible"}
@@ -310,8 +312,17 @@ def stream_start(tp, newcamd, udp, http_port):
            "--deskey", nc.get("deskey", ""),
            "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
            "--http-port", str(int(http_port or 9981))]
+    if sid is not None:
+        try:
+            sid = int(sid)
+            if not 1 <= sid <= 65535:
+                raise ValueError()
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "SID inválido (1–65535)"}
+        cmd += ["--sid", str(sid)]
     if tp["symbol_rate"]:
         cmd += ["--symbol-rate", str(tp["symbol_rate"])]
+    cmd += ["--verbose"]
     for u in (udp or []):
         cmd += ["--udp", u]
 
@@ -322,8 +333,8 @@ def stream_start(tp, newcamd, udp, http_port):
         return {"ok": False, "error": str(e)}
 
     STATE["stream"] = {"running": True, "pid": p.pid, "udp": ", ".join(udp or []),
-                       "http_port": int(http_port or 9981), "cmd": " ".join(cmd)}
-    return {"ok": True, "pid": p.pid, "cmd": " ".join(cmd)}
+                       "http_port": int(http_port or 9981), "cmd": "tbsstream (credenciales ocultas)"}
+    return {"ok": True, "pid": p.pid, "cmd": "tbsstream (credenciales ocultas)"}
 
 
 def stream_stop():
@@ -546,13 +557,32 @@ class Handler(BaseHTTPRequestHandler):
                         _save_transponder(t)
             return self._send(200, result)
 
+        if path == "/api/newcamd/test":
+            nc = STATE["newcamd"]
+            try:
+                with socket.create_connection((nc["host"], int(nc["port"])), timeout=3):
+                    pass
+                return self._send(200, {"ok": True, "message": "TCP accesible. No valida login, tarjeta ni descifrado."})
+            except (OSError, ValueError) as e:
+                return self._send(200, {"ok": False, "error": "Conexión TCP: " + str(e)})
+
         if path == "/api/newcamd":
             nc = dict(STATE["newcamd"])
             for k in ("host", "user", "pass", "deskey"):
                 if k in body:
                     nc[k] = str(body[k])
             if "port" in body:
-                nc["port"] = int(body["port"] or 0)
+                nc["port"] = body["port"]
+            try:
+                nc["port"] = int(nc["port"])
+                key = nc["deskey"].replace(":", "").replace(" ", "")
+                if not nc["host"].strip() or not 1 <= nc["port"] <= 65535:
+                    raise ValueError("Servidor o puerto inválidos")
+                if len(key) != 28 or len(bytes.fromhex(key)) != 14:
+                    raise ValueError("DES key debe contener 14 bytes (28 caracteres hex)")
+                nc["deskey"] = key
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"ok": False, "error": str(e)})
             STATE["newcamd"] = nc
             _save("newcamd")
             return self._send(200, {"ok": True, "newcamd": nc})
@@ -562,7 +592,7 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(udp, str):
                 udp = [udp]
             tp = _find_tp(body.get("id")) or body.get("transponder") or body
-            return self._send(200, stream_start(tp, body.get("newcamd"), udp, body.get("http_port")))
+            return self._send(200, stream_start(tp, body.get("newcamd"), udp, body.get("http_port"), body.get("sid")))
         if path == "/api/stream/stop":
             return self._send(200, stream_stop())
 

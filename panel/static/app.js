@@ -22,6 +22,7 @@ function tpInfo(t) {
 
 /* ------------------------------ Tabs ------------------------------ */
 function switchTab(tab) {
+  $("pageTitle").textContent = ({dashboard:"Vista general",epg:"Canales y programación",newcamd:"Acceso condicional",m3u8:"Distribución de señal"})[tab];
   document.querySelectorAll("#menu a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   ["dashboard", "epg", "newcamd", "m3u8"].forEach((t) => {
     $("tab-" + t).classList.toggle("hidden", t !== tab);
@@ -33,9 +34,9 @@ document.querySelectorAll("#menu a").forEach((a) =>
 /* ---------------------------- Estado ---------------------------- */
 async function loadStatus() {
   const s = await getJSON("/api/status");
-  const live = s.linux && s.dvb2m3u8;
+  const live = s.linux && s.dvb2m3u8 && s.adapters?.length;
   const badge = $("statusBadge");
-  badge.textContent = live ? "EN VIVO · " + s.platform : "DEMO · " + s.platform;
+  badge.textContent = live ? "● HARDWARE DISPONIBLE · " + s.platform : "○ SIN HARDWARE / BINARIOS · " + s.platform;
   badge.className = "status-badge " + (live ? "live" : "demo");
   const el = $("adapters");
   el.innerHTML = (s.adapters && s.adapters.length)
@@ -43,6 +44,7 @@ async function loadStatus() {
     : "No hay adaptadores DVB.";
   $("bins").textContent = `dvb2m3u8: ${s.dvb2m3u8 || "no"} · tbsstream: ${s.tbsstream || "no"}`;
   adapters = s.adapters || [];
+  $("metricAdapters").textContent = adapters.length;
   $("footer").textContent = `Plataforma: ${s.platform}`;
 }
 
@@ -52,6 +54,8 @@ let adapters = [];
 
 async function loadTransponders() {
   transponders = await getJSON("/api/transponders");
+  $("metricTp").textContent = transponders.length;
+  $("metricChannels").textContent = transponders.reduce((n,t) => n + (t.scan?.services?.length || 0), 0);
   renderTransponders();
   renderSelects();
   // el formulario "Agregar" apunta por defecto al primer adapter libre
@@ -74,9 +78,11 @@ function channelsTable(services, showTpCol) {
 function renderTransponders() {
   const list = $("tpList");
   // cada adapter = un transponder; se muestra adapter -> transponder -> canales
-  const ads = adapters.length ? adapters : transponders.map((t) => ({ adapter: t.adapter, path: "/dev/dvb/adapter" + t.adapter }));
+  const ads = [...transponders.map((t) => ({adapter:t.adapter, path:"/dev/dvb/adapter"+t.adapter, tp:t})),
+    ...adapters.filter(a => !transponders.some(t => t.adapter === a.adapter))];
+  if (!ads.length) { list.innerHTML = '<div class="card muted">Aún no hay transponders. Agrega uno para comenzar el escaneo.</div>'; return; }
   list.innerHTML = ads.map((a) => {
-    const tp = transponders.find((t) => t.adapter === a.adapter);
+    const tp = a.tp;
     if (!tp) {
       return `<div class="card tp-card">
         <div class="card-head">
@@ -188,7 +194,7 @@ async function saveNewcamd(e) {
   const r = await postJSON("/api/newcamd", {
     host: $("nc_host").value, port: parseInt($("nc_port").value, 10) || 5000,
     user: $("nc_user").value, pass: $("nc_pass").value,
-    deskey: $("nc_deskey").value.replace(/[^0-9a-fA-F]/g, ""),
+    deskey: $("nc_deskey").value.trim(),
   });
   if (!r.ok) { alert("Error: " + r.error); return; }
   loadNewcamd();
@@ -211,6 +217,9 @@ async function downloadM3u8(e) {
 
 async function loadStream() {
   const st = await getJSON("/api/stream/status");
+  $("metricStream").textContent = st.running ? "Activo" : "Detenido";
+  $("stStart").disabled = !!st.running;
+  $("stStop").disabled = !st.running;
   $("stInfo").innerHTML = st.running
     ? `<span class="ok">● STREAMING</span> pid ${esc(st.pid)} · UDP ${esc(st.udp || "—")} · HTTP ${esc(st.http_port || "—")}`
     : "Detenido.";
@@ -219,6 +228,7 @@ async function startStream(e) {
   e.preventDefault();
   if (!confirm("¿Iniciar stream (descifrado newcamd + UDP)?")) return;
   const r = await postJSON("/api/stream/start", {
+    sid: $("st_sid").value ? Number($("st_sid").value) : null,
     id: $("st_tp").value, udp: [$("st_udp").value].filter(Boolean),
     http_port: parseInt($("st_http").value, 10) || 9981,
   });
@@ -249,5 +259,19 @@ $("toggleTpForm").addEventListener("click", () => {
   await loadEpg();
   await loadNewcamd();
   await loadStream();
-})();
-setInterval(loadStream, 5000);
+})().catch(showError);
+setInterval(() => loadStream().catch(showError), 5000);
+
+function showError(error) {
+  $("notice").classList.remove("hidden");
+  $("notice").textContent = "No se pudo completar la operación: " + error.message;
+}
+window.addEventListener("unhandledrejection", event => { showError(event.reason); event.preventDefault(); });
+$("ncTest").addEventListener("click", async () => {
+  const b = $("ncTest"); b.disabled = true;
+  $("ncInfo").textContent = "Comprobando configuración guardada…";
+  try {
+    const result = await postJSON("/api/newcamd/test", {});
+    $("ncInfo").textContent = result.message || result.error;
+  } catch (e) { showError(e); } finally { b.disabled = false; }
+});

@@ -106,7 +106,7 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
   cola de paquetes scrambled, pero no llega a la precisión de TVHeadend
   (que predice el cambio y hace switchover exacto). Para un headend es
   suficiente; para una precisión total haría falta rastrear el crypto period.
-- El **formato del ECM enviado** (sección sin los 4 bytes de CRC) es la
+- El **formato del ECM enviado** (sección privada completa) es la
   convención más común, pero puede variar entre servidores newcamd; si un
   servidor no responde CW, es el primer punto a ajustar en `enqueue_ecm()`.
 - DVB-S: la frecuencia se pasa ya convertida por el LNB (sin DiSEqC/rotor).

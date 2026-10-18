@@ -233,7 +233,7 @@ static void process_sections(secbuf_t *sb)
     int total = 3 + slen;
     if (slen > 1021 || total <= 3) { sb->len = 0; return; }
     if (sb->len < total) break;
-    if ((sb->buf[1] & 0x80) && crc32_mpeg(sb->buf, total) == 0)
+    if (!(sb->buf[1] & 0x80) || crc32_mpeg(sb->buf, total) == 0)
       handle_section(sb->pid, sb->buf, slen);
     memmove(sb->buf, sb->buf + total, sb->len - total);
     sb->len -= total;
@@ -474,10 +474,16 @@ static void *ca_thread(void *arg)
     if (cam && newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
                                 r.sec, r.len, even, odd, 1500) == 0) {
       pthread_mutex_lock(&csa_mutex);
-      csa_set_key_even(csae, even);
-      csa_set_key_odd(csae, odd);
-      have_cw_even = 1;
-      have_cw_odd = 1;
+      /* A zero half means unavailable; do not replace a valid CW with it. */
+      const uint8_t zero[8] = {0};
+      if (memcmp(even, zero, 8)) {
+        csa_set_key_even(csae, even);
+        have_cw_even = 1;
+      }
+      if (memcmp(odd, zero, 8)) {
+        csa_set_key_odd(csae, odd);
+        have_cw_odd = 1;
+      }
       pthread_mutex_unlock(&csa_mutex);
       LOGV("CW actualizada (par/impar)\n");
     } else {
@@ -513,6 +519,17 @@ static void parse_pmt(const uint8_t *b, int len)
   svc.pmt_version = (b[2] >> 1) & 0x1F;
   svc.pcr_pid = ((uint16_t)(b[5] & 0x1F) << 8) | b[6];
   int pil = ((b[7] & 0x0F) << 8) | b[8];
+  if (9 + pil > len) return;
+  /* CA may be attached to the program, not only to an elementary stream. */
+  for (int j = 9; j + 2 <= 9 + pil; ) {
+    int dl = b[j+1];
+    if (j + 2 + dl > 9 + pil) break;
+    if (b[j] == DESC_CA && dl >= 4 && svc.ecm_pid < 0) {
+      svc.caid = ((uint16_t)b[j+2] << 8) | b[j+3];
+      svc.ecm_pid = ((b[j+4] & 0x1f) << 8) | b[j+5];
+    }
+    j += 2 + dl;
+  }
   int off = 9 + pil;
 
   svc.nes = 0;
@@ -544,7 +561,7 @@ static void parse_pmt(const uint8_t *b, int len)
     }
     if (is_video(stype) && svc.video_pid < 0) svc.video_pid = es_pid;
     if (is_audio(stype) && svc.audio_pid < 0) svc.audio_pid = es_pid;
-    if (caid && ecm_pid && !svc.ecm_pid) { svc.ecm_pid = (int)ecm_pid; svc.caid = caid; svc.provid = 0; }
+    if (caid && ecm_pid && svc.ecm_pid < 0) { svc.ecm_pid = (int)ecm_pid; svc.caid = caid; svc.provid = 0; }
 
     off += 5 + esil;
   }
@@ -564,6 +581,7 @@ static void parse_pat(const uint8_t *b, int len)
     if (opts.want_sid && prog != opts.want_sid) continue;
     svc.pmt_pid = pid;
     svc.sid = prog;
+    break;
   }
 }
 
@@ -579,8 +597,8 @@ static void handle_section(uint16_t pid, const uint8_t *s, int slen)
     parse_pmt(body, blen);
   } else if (svc.ecm_pid > 0 && pid == (uint16_t)svc.ecm_pid &&
              (tid == 0x80 || tid == 0x81)) {
-    /* ECM = sección sin los 4 bytes de CRC */
-    enqueue_ecm(svc.sid, svc.caid, svc.provid, s, slen - 1);
+    /* ECM uses private short sections: preserve the entire section. */
+    enqueue_ecm(svc.sid, svc.caid, svc.provid, s, slen + 3);
   }
 }
 

@@ -12,3 +12,8 @@ __pycache__/
 # sistema
 .DS_Store
 Thumbs.db
+
+# local state and release artifacts
+panel/*.json
+panel/*.log
+dist/

@@ -1,0 +1,24 @@
+name: Ubuntu packages
+on:
+  push:
+    branches: [arena/6e165552-dvb-panelscan]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev libdvbcsa-dev
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - run: |
+          make -C dvb2m3u8
+          make -C tbsstream
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-demux tests/test_demux.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
+          /tmp/test-demux
+      - run: sh packaging/build-deb.sh 0.4.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-22.04-amd64
+          path: dist/*.deb
