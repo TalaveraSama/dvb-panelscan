@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Panel administrativo del escáner DVB/TBS (dvb2m3u8).
+Mini panel DVB-Scan - panel completo para administrar el sintonizador TBS/DVB-S2.
 
-Servidor web con la biblioteca estándar de Python (sin dependencias) que:
-  * sirve el panel (HTML/JS/CSS) desde static/
-  * expone una API JSON:
-      GET  /api/status         -> plataforma, adaptadores, modo demo
-      POST /api/scan           -> lanza un escaneo (dvb2m3u8 en Linux)
-      GET  /api/channels       -> canales del último escaneo
-      GET  /api/playlist.m3u8  -> exporta el M3U8
-  * en Linux engancha el binario dvb2m3u8 real; en Windows (o sin binario)
-    sirve datos de demostración para poder ver el panel.
+Funciones:
+  * Adaptadores DVB
+  * Transponders: agregar / listar / borrar / escanear (persistidos en JSON)
+  * Canales con EPG (now/next) del último escaneo
+  * Exportar lista M3U8 (con tvg-id, tvg-name, group-title)
+  * Newcamd: servidor + cuenta + DES key (para descifrar)
+  * Streaming: arrancar/parar tbsstream (newcamd + salida UDP + HTTP)
 
-Uso:
-    python server.py [--port 8080] [--host 127.0.0.1] [--dvb2m3u8 /ruta/al/binario]
+Servidor con la biblioteca estándar de Python (sin dependencias).
 """
 
 import argparse
@@ -27,69 +24,85 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+DATA_DIR = BASE_DIR
 
-# ---------------------------------------------------------------------------
-# Estado global (protegido con un lock)
-# ---------------------------------------------------------------------------
 _lock = threading.Lock()
-_last_scan = None          # dict con el resultado del último escaneo (o None)
-_last_scan_time = None
 
-DEMO_NETWORK = "Red de demostración"
+STATE = {
+    "transponders": [],
+    "scan": None,          # resultado del último escaneo
+    "newcamd": {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "user": "astra",
+        "pass": "astra",
+        "deskey": "0102030405060708091011121314",
+    },
+    "stream": {"running": False, "pid": None, "udp": "", "http_port": 0},
+}
 
-
-def _demo_services():
-    """Canales de ejemplo (solo para ver el panel sin hardware DVB)."""
-    return [
-        {"sid": 1, "name": "La 1", "provider": "TVE", "type": 1,
-         "now": "Telediario", "next": "La Promesa"},
-        {"sid": 2, "name": "La 2", "provider": "TVE", "type": 1,
-         "now": "Documental", "next": "Cine de la tarde"},
-        {"sid": 3, "name": "24h", "provider": "TVE", "type": 1,
-         "now": "Informativos 24h", "next": "Agenda informativa"},
-        {"sid": 4, "name": "Antena 3", "provider": "Atresmedia", "type": 1,
-         "now": "Noticias", "next": "El Hormiguero"},
-        {"sid": 5, "name": "laSexta", "provider": "Atresmedia", "type": 1,
-         "now": "Al Rojo Vivo", "next": "laSexta Noticias"},
-        {"sid": 6, "name": "Telecinco", "provider": "Mediaset", "type": 1,
-         "now": "Informativos Telecinco", "next": "Got Talent"},
-        {"sid": 7, "name": "Cuatro", "provider": "Mediaset", "type": 1,
-         "now": "Deportes Cuatro", "next": "Cine"},
-        {"sid": 8, "name": "RNE", "provider": "TVE", "type": 2,
-         "now": "Boletín informativo", "next": "Magacín matinal"},
-    ]
+_cfg = {"dvb2m3u8": None, "tbsstream": None}
 
 
 # ---------------------------------------------------------------------------
-# Detección del entorno y del binario
+# Persistencia
 # ---------------------------------------------------------------------------
+def _load():
+    for name in ("transponders", "newcamd"):
+        path = os.path.join(DATA_DIR, name + ".json")
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    STATE[name] = json.load(f)
+            except Exception:
+                pass
+
+
+def _save(name):
+    path = os.path.join(DATA_DIR, name + ".json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(STATE[name], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Localizar binarios
+# ---------------------------------------------------------------------------
+def find_dvb2m3u8(explicit=None):
+    if explicit and os.path.isfile(explicit):
+        return os.path.abspath(explicit)
+    for cand in ("../dvb2m3u8/dvb2m3u8", "../../dvb2m3u8/dvb2m3u8"):
+        p = os.path.normpath(os.path.join(BASE_DIR, cand))
+        if os.path.isfile(p):
+            return p
+    return shutil.which("dvb2m3u8")
+
+
+def find_tbsstream(explicit=None):
+    if explicit and os.path.isfile(explicit):
+        return os.path.abspath(explicit)
+    for cand in ("../tbsstream/tbsstream", "../../tbsstream/tbsstream"):
+        p = os.path.normpath(os.path.join(BASE_DIR, cand))
+        if os.path.isfile(p):
+            return p
+    return shutil.which("tbsstream")
+
+
 def is_linux():
     return platform.system() == "Linux"
 
 
-def find_dvb2m3u8(explicit=None):
-    if explicit:
-        if os.path.isfile(explicit):
-            return os.path.abspath(explicit)
-        return None
-    # 1) junto al proyecto (../dvb2m3u8/dvb2m3u8)
-    sibling = os.path.normpath(os.path.join(BASE_DIR, "..", "dvb2m3u8", "dvb2m3u8"))
-    if os.path.isfile(sibling):
-        return sibling
-    # 2) en el PATH
-    return shutil.which("dvb2m3u8")
-
-
 def list_adapters():
-    """Enumera /dev/dvb/adapterN y sus frontends (vacío si no hay DVB)."""
     adapters = []
     for path in sorted(glob.glob("/dev/dvb/adapter*")):
-        name = os.path.basename(path)
-        num = name.replace("adapter", "")
+        num = os.path.basename(path).replace("adapter", "")
         frontends = [os.path.basename(f) for f in sorted(glob.glob(os.path.join(path, "frontend*")))]
         adapters.append({
             "adapter": int(num) if num.isdigit() else 0,
@@ -105,126 +118,167 @@ def list_adapters():
 VALID_TYPES = ("dvbt", "dvbt2", "dvbc", "dvbs", "dvbs2")
 
 
-def _build_cmd(binary, p):
-    cmd = [binary, "-t", p.get("type", "dvbt"), "--json"]
-    if p.get("freq"):
-        cmd += ["--freq", str(int(p["freq"]))]
-    elif p.get("freq_mhz"):
-        cmd += ["--freq-mhz", str(float(p["freq_mhz"]))]
-    # LNB LO: convierte frecuencia de satélite a FI (0 = la freq ya es FI)
-    lnb_lo = p.get("lnb_lo")
-    if lnb_lo is None:
-        lnb_lo = 9750
-    cmd += ["--lnb-lo", str(float(lnb_lo))]
-    if p.get("symbol_rate"):
-        cmd += ["--symbol-rate", str(int(p["symbol_rate"]))]
-    if p.get("pol"):
-        cmd += ["--pol", str(p["pol"])]
-    if p.get("adapter"):
-        cmd += ["-a", str(int(p["adapter"]))]
-    timeout = p.get("timeout") or 15
-    cmd += ["-T", str(int(timeout))]
-    cmd += ["-v"]  # para capturar la línea "señal: N" del stderr
+def _norm_tp(tp):
+    """Normaliza/valida los campos de un transponder."""
+    return {
+        "type": tp.get("type") if tp.get("type") in VALID_TYPES else "dvbs2",
+        "freq_mhz": float(tp.get("freq_mhz") or 0),
+        "lnb_lo": float(tp.get("lnb_lo") if tp.get("lnb_lo") is not None else 9750),
+        "symbol_rate": int(tp.get("symbol_rate") or 0),
+        "pol": str(tp.get("pol") or "V").upper()[:1],
+        "adapter": int(tp.get("adapter") or 0),
+        "timeout": int(tp.get("timeout") or 15),
+    }
+
+
+def _scan_cmd(binary, tp):
+    cmd = [binary, "-t", tp["type"], "--json",
+           "--freq-mhz", str(tp["freq_mhz"]),
+           "--lnb-lo", str(tp["lnb_lo"]),
+           "--pol", tp["pol"],
+           "-a", str(tp["adapter"]),
+           "-T", str(tp["timeout"]),
+           "-v"]
+    if tp["symbol_rate"]:
+        cmd += ["--symbol-rate", str(tp["symbol_rate"])]
     return cmd
 
 
-def _parse_signal(stderr_text):
-    for line in stderr_text.splitlines():
-        if "señal:" in line.lower() or "senal:" in line.lower():
-            try:
-                return int(line.split(":")[-1].strip())
-            except ValueError:
-                pass
-    return None
+def run_scan(tp):
+    tp = _norm_tp(tp)
+    binary = find_dvb2m3u8(_cfg["dvb2m3u8"])
+    if not (is_linux() and binary):
+        return {"ok": False, "error": "dvb2m3u8 no disponible (¿Linux?)"}
 
-
-def _run_real_scan(binary, p):
-    cmd = _build_cmd(binary, p)
+    cmd = _scan_cmd(binary, tp)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
-                              timeout=int(p.get("timeout") or 15) + 10)
+                              timeout=tp["timeout"] + 15)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout del escaneo"}
     except OSError as e:
         return {"ok": False, "error": str(e)}
 
     if proc.returncode != 0:
-        return {"ok": False, "error": (proc.stderr or "error desconocido").strip()}
+        return {"ok": False, "error": (proc.stderr or "sin lock/error").strip()}
 
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return {"ok": False, "error": "salida JSON inválida de dvb2m3u8"}
+        return {"ok": False, "error": "salida JSON inválida"}
 
     data["ok"] = True
+    data["transponder"] = tp
+    data["time"] = time.time()
     data["demo"] = False
-    data["signal"] = _parse_signal(proc.stderr)
-    data["command"] = " ".join(cmd)
+    # señal del stderr ("señal: N")
+    for line in proc.stderr.splitlines():
+        if "señal:" in line.lower() or "senal:" in line.lower():
+            try:
+                data["signal"] = int(line.split(":")[-1].strip())
+            except ValueError:
+                pass
+    with _lock:
+        STATE["scan"] = data
     return data
 
 
-def _run_demo_scan(p):
-    # pequeña pausa para que el spinner sea visible en el panel
-    time.sleep(0.6)
-    freq = int(p.get("freq") or (float(p.get("freq_mhz") or 674) * 1_000_000))
-    return {
-        "ok": True,
-        "demo": True,
-        "adapter": int(p.get("adapter") or 0),
-        "frequency": freq,
-        "network": DEMO_NETWORK,
-        "signal": 43210,
-        "services": _demo_services(),
-    }
-
-
-def perform_scan(p):
-    global _last_scan, _last_scan_time
-    p = {k: v for k, v in (p or {}).items() if v not in (None, "")}
-    if p.get("type") not in VALID_TYPES:
-        p["type"] = "dvbt"
-
-    binary = find_dvb2m3u8(_cfg.get("dvb2m3u8"))
-    if is_linux() and binary:
-        result = _run_real_scan(binary, p)
-    else:
-        result = _run_demo_scan(p)
-
-    if result.get("ok"):
-        with _lock:
-            _last_scan = result
-            _last_scan_time = time.time()
-    return result
-
-
-def current_channels():
-    with _lock:
-        if _last_scan and _last_scan.get("services"):
-            return _last_scan
-    return {"demo": True, "network": DEMO_NETWORK,
-            "services": _demo_services(), "signal": 43210}
-
-
+# ---------------------------------------------------------------------------
+# M3U8
+# ---------------------------------------------------------------------------
 def build_m3u8(scan, base_url=None):
     lines = ["#EXTM3U"]
-    for s in scan.get("services", []):
-        name = s.get("name") or f"Service {s.get('sid')}"
-        group = s.get("provider") or scan.get("network") or "DVB"
+    for s in (scan or {}).get("services", []):
+        name = s.get("name") or "Service %s" % s.get("sid")
+        group = s.get("provider") or (scan or {}).get("network") or "DVB"
         radio = ' radio="true"' if s.get("type") in (2, 0x0A) else ""
-        lines.append(f'#EXTINF:-1 tvg-id="{s.get("sid")}" tvg-name="{name}" '
-                     f'group-title="{group}"{radio},{name}')
+        attrs = 'tvg-id="%s" tvg-name="%s" group-title="%s"%s' % (s.get("sid"), name, group, radio)
+        lines.append("#EXTINF:-1 %s,%s" % (attrs, name))
         if base_url:
-            lines.append(f"{base_url}{s.get('sid')}")
+            lines.append("%s%s" % (base_url, s.get("sid")))
         else:
-            lines.append(f"dvb://adapter{scan.get('adapter', 0)}/{scan.get('frequency', 0)}/{s.get('sid')}")
+            lines.append("dvb://adapter%s/%s/%s" % (
+                (scan or {}).get("adapter", 0), (scan or {}).get("frequency", 0), s.get("sid")))
     return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
-# Servidor HTTP
+# Streaming (tbsstream)
 # ---------------------------------------------------------------------------
-_cfg = {"dvb2m3u8": None}
+def stream_start(tp, newcamd, udp, http_port):
+    binary = find_tbsstream(_cfg["tbsstream"])
+    if not (is_linux() and binary):
+        return {"ok": False, "error": "tbsstream no disponible"}
+    if STATE["stream"]["running"]:
+        return {"ok": False, "error": "ya hay un stream corriendo"}
+
+    tp = _norm_tp(tp)
+    nc = newcamd or STATE["newcamd"]
+    cmd = [binary, "-t", tp["type"],
+           "--freq-mhz", str(tp["freq_mhz"]),
+           "--lnb-lo", str(tp["lnb_lo"]),
+           "--pol", tp["pol"],
+           "-a", str(tp["adapter"]),
+           "-T", str(tp["timeout"]),
+           "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
+           "--deskey", nc.get("deskey", ""),
+           "--user", nc.get("user", ""),
+           "--pass", nc.get("pass", ""),
+           "--http-port", str(int(http_port or 9981))]
+    if tp["symbol_rate"]:
+        cmd += ["--symbol-rate", str(tp["symbol_rate"])]
+    for u in (udp or []):
+        cmd += ["--udp", u]
+
+    try:
+        log = open(os.path.join(DATA_DIR, "stream.log"), "w")
+        p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+    STATE["stream"] = {"running": True, "pid": p.pid, "udp": ", ".join(udp or []),
+                       "http_port": int(http_port or 9981), "cmd": " ".join(cmd)}
+    return {"ok": True, "pid": p.pid, "cmd": " ".join(cmd)}
+
+
+def stream_stop():
+    st = STATE["stream"]
+    if not st.get("running") or not st.get("pid"):
+        STATE["stream"] = {"running": False}
+        return {"ok": True}
+    try:
+        os.kill(int(st["pid"]), 15)
+        time.sleep(0.5)
+        try:
+            os.kill(int(st["pid"]), 9)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    STATE["stream"] = {"running": False}
+    return {"ok": True}
+
+
+def stream_status():
+    st = STATE["stream"]
+    alive = False
+    if st.get("running") and st.get("pid"):
+        try:
+            os.kill(int(st["pid"]), 0)
+            alive = True
+        except OSError:
+            alive = False
+    if st.get("running") and not alive:
+        STATE["stream"] = {"running": False}
+    return STATE["stream"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+_cfg = {"dvb2m3u8": None, "tbsstream": None}
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -236,7 +290,7 @@ MIME = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DVBAdmin/1.0"
+    server_version = "MiniDVBPanel/2.0"
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, (dict, list)):
@@ -259,47 +313,96 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_body(self):
         try:
-            length = int(self.headers.get("Content-Length", 0))
+            n = int(self.headers.get("Content-Length", 0))
         except ValueError:
-            length = 0
-        if length <= 0:
+            n = 0
+        if n <= 0:
             return {}
-        raw = self.rfile.read(length)
+        raw = self.rfile.read(n)
         try:
             return json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return {}
 
     def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path
+        u = urllib.parse.urlparse(self.path)
+        path, qs = u.path, urllib.parse.parse_qs(u.query)
+
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(STATIC_DIR, "index.html"))
         if path.startswith("/static/"):
-            rel = path[len("/static/"):]
-            return self._send_file(os.path.join(STATIC_DIR, rel))
+            return self._send_file(os.path.join(STATIC_DIR, path[len("/static/"):]))
+
         if path == "/api/status":
-            binary = find_dvb2m3u8(_cfg.get("dvb2m3u8"))
             return self._send(200, {
                 "platform": platform.system(),
                 "linux": is_linux(),
-                "demo": not (is_linux() and binary),
-                "dvb2m3u8": binary,
+                "dvb2m3u8": find_dvb2m3u8(_cfg["dvb2m3u8"]),
+                "tbsstream": find_tbsstream(_cfg["tbsstream"]),
                 "adapters": list_adapters() if is_linux() else [],
-                "last_scan_time": _last_scan_time,
+                "stream": stream_status(),
             })
-        if path == "/api/channels":
-            return self._send(200, current_channels())
+        if path == "/api/transponders":
+            return self._send(200, STATE["transponders"])
+        if path == "/api/channels" or path == "/api/epg":
+            return self._send(200, STATE["scan"] or {"services": [], "network": ""})
+        if path == "/api/newcamd":
+            return self._send(200, STATE["newcamd"])
+        if path == "/api/stream/status":
+            return self._send(200, stream_status())
         if path == "/api/playlist.m3u8":
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            base_url = qs.get("base_url", [None])[0]
-            body = build_m3u8(current_channels(), base_url)
-            return self._send(200, body, "application/vnd.apple.mpegurl")
+            base = qs.get("base_url", [None])[0]
+            return self._send(200, build_m3u8(STATE["scan"], base),
+                              "application/vnd.apple.mpegurl")
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path
-        if path == "/api/scan":
-            return self._send(200, perform_scan(self._read_body()))
+        u = urllib.parse.urlparse(self.path)
+        path = u.path
+        body = self._read_body()
+
+        if path == "/api/transponders":
+            tp = _norm_tp(body)
+            tp["id"] = uuid.uuid4().hex[:8]
+            tp["name"] = body.get("name") or ("%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"]))
+            with _lock:
+                STATE["transponders"].append(tp)
+                _save("transponders")
+            return self._send(200, {"ok": True, "transponder": tp})
+        if path.startswith("/api/transponders/") and path.endswith("/delete"):
+            tid = path[len("/api/transponders/"):-len("/delete")]
+            with _lock:
+                STATE["transponders"] = [t for t in STATE["transponders"] if t.get("id") != tid]
+                _save("transponders")
+            return self._send(200, {"ok": True})
+        if path.startswith("/api/scan"):
+            tid = body.get("id")
+            tp = None
+            if tid:
+                tp = next((t for t in STATE["transponders"] if t.get("id") == tid), None)
+            if tp is None:
+                tp = body
+            r = run_scan(tp)
+            return self._send(200, r)
+        if path == "/api/newcamd":
+            nc = dict(STATE["newcamd"])
+            for k in ("host", "user", "pass", "deskey"):
+                if k in body:
+                    nc[k] = str(body[k])
+            if "port" in body:
+                nc["port"] = int(body["port"] or 0)
+            STATE["newcamd"] = nc
+            _save("newcamd")
+            return self._send(200, {"ok": True, "newcamd": nc})
+        if path == "/api/stream/start":
+            udp = body.get("udp") or []
+            if isinstance(udp, str):
+                udp = [udp]
+            return self._send(200, stream_start(body.get("transponder") or body,
+                                                body.get("newcamd"),
+                                                udp, body.get("http_port")))
+        if path == "/api/stream/stop":
+            return self._send(200, stream_stop())
         return self._send(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):
@@ -307,23 +410,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Panel administrativo DVB/TBS")
+    ap = argparse.ArgumentParser(description="Mini panel DVB-Scan")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--dvb2m3u8", default=None, help="ruta al binario dvb2m3u8")
+    ap.add_argument("--port", type=int, default=8081)
+    ap.add_argument("--dvb2m3u8", default=None)
+    ap.add_argument("--tbsstream", default=None)
     args = ap.parse_args()
 
     _cfg["dvb2m3u8"] = args.dvb2m3u8
+    _cfg["tbsstream"] = args.tbsstream
+    _load()
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    demo = not (is_linux() and find_dvb2m3u8(args.dvb2m3u8))
-    print(f"Panel DVB/TBS en http://{args.host}:{args.port}")
-    print(f"  modo: {'DEMO (sin hardware/binario)' if demo else 'real (Linux + dvb2m3u8)'}")
-    print("  Ctrl+C para salir")
+    print("Mini panel DVB-Scan en http://%s:%d" % (args.host, args.port))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        print("\nCerrando…")
+        pass
     finally:
         srv.server_close()
 

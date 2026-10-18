@@ -186,3 +186,35 @@ tbody tr:hover { background: var(--panel-2); }
   color: var(--muted);
   font-size: 0.8rem;
 }
+
+/* --- panel completo --- */
+.grid-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.grid-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.grid-form input, .grid-form select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 0.9rem;
+}
+.actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn.small { padding: 4px 8px; font-size: 0.78rem; }
+.btn.danger { background: #5a2323; border-color: #7a2f2f; }
+.ok { color: #9be5c2; }
+.err { color: #e08383; }
+.small { font-size: 0.8rem; }
+.sub { font-size: 0.9rem; margin: 16px 0 8px; color: var(--muted); font-weight: 600; }
+h3.sub { margin-top: 18px; }
+

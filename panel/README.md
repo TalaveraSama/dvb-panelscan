@@ -1,106 +1,54 @@
-# Panel administrativo DVB/TBS
+# Mini DVB-Scan · Panel completo
 
-Interfaz web para administrar el escáner **dvb2m3u8**: ver adaptadores, lanzar
-escaneos, listar canales con EPG now/next y exportar la lista **M3U8**.
+Panel web (HTML/JS + Python stdlib, sin dependencias) para administrar el
+**sintonizador TBS/DVB-S2**: transponders, escaneo, EPG, listas M3U8,
+descifrado newcamd y streaming UDP/HTTP.
 
-Construido con **HTML/JS + la biblioteca estándar de Python** (cero
-dependencias externas).
+## Funciones
 
-```
-panel/
-├── server.py          ← servidor HTTP + API JSON
-├── static/
-│   ├── index.html     ← interfaz
-│   ├── app.js         ← lógica del frontend
-│   └── style.css      ← estilos
-└── README.md
-```
+| Sección | Qué hace |
+|---|---|
+| **Adaptadores** | Lista `/dev/dvb/adapterN` y frontends, y si `dvb2m3u8`/`tbsstream` están disponibles. |
+| **Transponders** | Agregar / listar / borrar / escanear transponders. Se guardan en `transponders.json`. |
+| **Canales y EPG** | Tabla de canales con SID, nombre, proveedor, TV/Radio y **EPG now/next**. Filtro de búsqueda. |
+| **M3U8** | Exporta `#EXTM3U` con `tvg-id`, `tvg-name`, `group-title` (acepta `?base_url=`). |
+| **Newcamd** | Servidor + puerto + usuario + contraseña + DES key (14 bytes hex). Se guarda en `newcamd.json`. |
+| **Streaming** | Arranca/para `tbsstream` (descifrado newcamd + salida UDP + HTTP). |
 
 ## Arrancar
 
 ```sh
-python server.py                # -> http://127.0.0.1:8080
-python server.py --port 9000    # otro puerto
+python3 server.py --host 0.0.0.0 --port 8081
+# o como servicio:
+systemd-run --unit=dvb-panel --working-directory=$(pwd) /usr/bin/python3 server.py --host 0.0.0.0 --port 8081
 ```
 
-Abre **http://127.0.0.1:8080** en el navegador.
-
-## Modo DEMO vs modo real
-
-- **Windows / sin binario** → el panel arranca en **modo demo** con canales de
-  ejemplo, para que puedas ver la interfaz ya.
-- **Linux con `dvb2m3u8` compilado** → el panel detecta el binario
-  (en `../dvb2m3u8/dvb2m3u8` o en el `PATH`) y lanza escaneos **reales** contra
-  el hardware DVB/TBS.
-
-Para forzar la ruta del binario:
-
-```sh
-python server.py --dvb2m3u8 /ruta/al/dvb2m3u8
-```
-
-> El binario se compila en `../dvb2m3u8/` con `make`. Necesita la extensión
-> `--json` que se añadió en este proyecto.
+Abrir **http://<ip>:8081**.
 
 ## API
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `GET` | `/api/status` | Plataforma, modo demo, adaptadores detectados |
-| `POST` | `/api/scan` | Lanza un escaneo; cuerpo JSON con parámetros |
-| `GET` | `/api/channels` | Canales del último escaneo (o demo) |
-| `GET` | `/api/playlist.m3u8` | Exporta la lista M3U8 |
-
-### POST /api/scan
-
-```json
-{
-  "type": "dvbt",
-  "freq_mhz": 674,
-  "symbol_rate": null,
-  "pol": "H",
-  "adapter": 0,
-  "timeout": 15
-}
-```
-
-`type` puede ser `dvbt`, `dvbt2`, `dvbc`, `dvbs` o `dvbs2`. `symbol_rate` es
-obligatorio para `dvbc`/`dvbs`/`dvbs2`. Alternativamente `freq` (en Hz).
-
-Respuesta (real o demo):
-
-```json
-{
-  "ok": true,
-  "demo": false,
-  "adapter": 0,
-  "frequency": 674000000,
-  "network": "RTVE",
-  "signal": 43210,
-  "services": [
-    {"sid": 101, "name": "Canal 24h", "provider": "RTVE",
-     "type": 1, "now": "Noticias", "next": "Documental"}
-  ]
-}
-```
-
-## Qué hace el panel
-
-1. **Adaptadores** → enumera `/dev/dvb/adapterN` y sus frontends.
-2. **Escanear** → ejecuta `dvb2m3u8 -t <tipo> --json -v …`, muestra el nº de
-   servicios, la red y la **señal**.
-3. **Canales** → tabla con SID, nombre, proveedor, tipo (TV/Radio) y el
-   **now/next** de la EPG (EIT).
-4. **Exportar M3U8** → descarga `/api/playlist.m3u8` (acepta `?base_url=…`).
+| GET | `/api/status` | Plataforma, adaptadores, binarios, estado stream |
+| GET/POST | `/api/transponders` | Listar / agregar transponder |
+| POST | `/api/transponders/<id>/delete` | Borrar transponder |
+| POST | `/api/scan` | Escanear (`{"id":"..."}` o parámetros sueltos) |
+| GET | `/api/channels` · `/api/epg` | Canales + EPG del último escaneo |
+| GET | `/api/playlist.m3u8` | Lista M3U8 |
+| GET/POST | `/api/newcamd` | Config newcamd |
+| POST | `/api/stream/start` | Iniciar tbsstream (transponder + newcamd + udp + http_port) |
+| POST | `/api/stream/stop` | Detener stream |
+| GET | `/api/stream/status` | Estado del stream |
 
 ## Notas
 
-- El servidor escucha por defecto en `127.0.0.1` (solo local). Para acceso en
-  red usa `--host 0.0.0.0`.
-- Para sintonizar hardware real el servidor necesita permisos sobre
-  `/dev/dvb/*` (normalmente hay que lanzarlo como root o con el usuario en el
-  grupo `video`).
+- El panel debe correr como **root** (acceso a `/dev/dvb` y al LNB).
+- El transponder se define por: **tipo, frecuencia de satélite (MHz), LNB LO, SR, pol, adaptador**.
+  La frecuencia de satélite se convierte a FI con el LNB LO (9750 = universal Ku baja).
+- El escaneo usa `dvb2m3u8` (que ya incluye el fix del voltaje del LNB y el filtro
+  demux "full TS" que el driver TBSECP3 necesita).
+- El descifrado real necesita el **lector de smartcard** conectado y OSCam estable.
 
 ## Licencia
 
-GPLv3 (se integra con dvb2m3u8, derivado de TVHeadend).
+GPLv3.
