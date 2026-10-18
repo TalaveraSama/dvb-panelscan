@@ -1,0 +1,14 @@
+# binarios compilados
+*.o
+dvb2m3u8/dvb2m3u8
+tbsstream/tbsstream
+tbsstream/tools/nctest
+tbsstream/tools/sigtest
+
+# python
+__pycache__/
+*.pyc
+
+# sistema
+.DS_Store
+Thumbs.db

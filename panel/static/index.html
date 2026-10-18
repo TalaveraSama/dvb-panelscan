@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panel DVB/TBS</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📡</span>
+      <h1>Panel DVB/TBS</h1>
+    </div>
+    <div class="status-badge" id="statusBadge">cargando…</div>
+  </header>
+
+  <main>
+    <!-- Adaptadores -->
+    <section class="card">
+      <h2>Adaptadores</h2>
+      <div id="adapters" class="adapters">—</div>
+    </section>
+
+    <!-- Escaneo -->
+    <section class="card">
+      <h2>Escanear mux</h2>
+      <form id="scanForm" class="scan-form">
+        <label>Tipo
+          <select name="type" id="type">
+            <option value="dvbt">DVB-T</option>
+            <option value="dvbt2">DVB-T2</option>
+            <option value="dvbc">DVB-C</option>
+            <option value="dvbs">DVB-S</option>
+            <option value="dvbs2">DVB-S2</option>
+          </select>
+        </label>
+        <label>Frecuencia (MHz)
+          <input name="freq_mhz" id="freq_mhz" type="number" step="any" value="674" required>
+        </label>
+        <label>Symbol rate
+          <input name="symbol_rate" id="symbol_rate" type="number" placeholder="C/S" min="0">
+        </label>
+        <label>Polarización
+          <select name="pol" id="pol">
+            <option value="H">H</option>
+            <option value="V">V</option>
+            <option value="L">L</option>
+            <option value="R">R</option>
+          </select>
+        </label>
+        <label>Adaptador
+          <input name="adapter" id="adapter" type="number" value="0" min="0">
+        </label>
+        <label>Tiempo (s)
+          <input name="timeout" id="timeout" type="number" value="15" min="1">
+        </label>
+        <button type="submit" id="scanBtn" class="btn primary">Escanear</button>
+      </form>
+      <div class="scan-result" id="scanResult"></div>
+    </section>
+
+    <!-- Canales -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Canales <span id="channelCount" class="muted"></span></h2>
+        <div class="actions">
+          <input id="filter" type="search" placeholder="Filtrar…">
+          <a class="btn" id="exportBtn" href="/api/playlist.m3u8" target="_blank">Exportar M3U8</a>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="channelTable">
+          <thead>
+            <tr>
+              <th>SID</th><th>Nombre</th><th>Proveedor</th><th>Tipo</th>
+              <th>Ahora</th><th>Después</th>
+            </tr>
+          </thead>
+          <tbody id="channelBody"><tr><td colspan="6" class="muted">Sin canales</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer" id="footer">—</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
