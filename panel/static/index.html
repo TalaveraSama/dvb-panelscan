@@ -66,12 +66,16 @@
       <section class="card">
         <div class="card-head">
           <h2>EPG <span id="epgCount" class="muted"></span></h2>
-          <input id="epgFilter" type="search" placeholder="Filtrar…">
+          <div class="actions">
+            <input id="epgFilter" type="search" placeholder="Filtrar…">
+            <a class="btn" href="/api/epg.xml" target="_blank">XMLTV (xui.one/xcode)</a>
+            <a class="btn" href="/api/playlist.m3u8" target="_blank">M3U8</a>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Transponder</th><th>SID</th><th>Canal</th><th>Proveedor</th><th>Tipo</th><th>Ahora</th><th>Después</th></tr></thead>
-            <tbody id="epgBody"><tr><td colspan="7" class="muted">Sin EPG (escanea transponders)</td></tr></tbody>
+            <thead><tr><th>TP</th><th>SID</th><th>Canal</th><th>Prov.</th><th>Tipo</th><th>Ahora</th><th>Después</th><th></th></tr></thead>
+            <tbody id="epgBody"><tr><td colspan="8" class="muted">Sin EPG (escanea transponders)</td></tr></tbody>
           </table>
         </div>
       </section>

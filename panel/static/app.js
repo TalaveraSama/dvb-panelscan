@@ -158,11 +158,21 @@ function renderEpg() {
       rows.push(`<tr>
         <td>${esc(tp.transponder)}</td><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>
         <td>${esc(s.provider || "—")}</td><td>${typeTag(s.type)}</td>
-        <td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td></tr>`);
+        <td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td>
+        <td><button class="btn small danger" data-delch="${esc(s.sid)}" title="Borrar canal">🗑</button></td></tr>`);
     }
   }
   $("epgCount").textContent = rows.length ? `(${rows.length})` : "";
-  body.innerHTML = rows.join("") || '<tr><td colspan="7" class="muted">Sin EPG</td></tr>';
+  body.innerHTML = rows.join("") || '<tr><td colspan="8" class="muted">Sin EPG</td></tr>';
+  body.querySelectorAll("[data-delch]").forEach((b) =>
+    b.addEventListener("click", () => deleteChannel(b.dataset.delch)));
+}
+
+async function deleteChannel(sid) {
+  if (!confirm("¿Eliminar este canal del EPG?")) return;
+  await postJSON("/api/channels/" + sid + "/delete", {});
+  loadTransponders();
+  loadEpg();
 }
 
 /* ----------------------------- Newcamd ----------------------------- */

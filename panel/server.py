@@ -251,6 +251,46 @@ def build_m3u8(base_url=None, tid=None, profile="pass"):
     return "\n".join(lines) + "\n"
 
 
+def _xml_esc(s):
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def build_xmltv(tid=None):
+    """XMLTV (EPG) para XUI.one / Xtream Codes (xcode)."""
+    import datetime
+    now = datetime.datetime.now().astimezone()
+
+    def fmt(dt):
+        return dt.strftime("%Y%m%d%H%M%S %z")
+
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<tv generator-info-name="Mini DVB-Scan">']
+    with _lock:
+        tps = STATE["transponders"]
+    for t in tps:
+        if tid and t.get("id") != tid:
+            continue
+        scan = t.get("scan")
+        if not scan:
+            continue
+        for s in scan.get("services", []):
+            sid = s.get("sid")
+            name = _xml_esc(s.get("name") or "Service %s" % sid)
+            lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (sid, name))
+            if s.get("now"):
+                start, stop = now, now + datetime.timedelta(hours=1)
+                lines.append('<programme start="%s" stop="%s" channel="%s"><title lang="es">%s</title></programme>'
+                             % (fmt(start), fmt(stop), sid, _xml_esc(s.get("now"))))
+            if s.get("next"):
+                start = now + datetime.timedelta(hours=1)
+                stop = now + datetime.timedelta(hours=2)
+                lines.append('<programme start="%s" stop="%s" channel="%s"><title lang="es">%s</title></programme>'
+                             % (fmt(start), fmt(stop), sid, _xml_esc(s.get("next"))))
+    lines.append('</tv>')
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
@@ -383,6 +423,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, STATE["transponders"])
         if path == "/api/epg":
             return self._send(200, epg_aggregate())
+        if path == "/api/epg.xml":
+            tid = qs.get("transponder", [None])[0]
+            return self._send(200, build_xmltv(tid), "application/xml; charset=utf-8")
         if path == "/api/newcamd":
             return self._send(200, STATE["newcamd"])
         if path == "/api/stream/status":
@@ -476,6 +519,19 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 STATE["transponders"] = [t for t in STATE["transponders"] if t.get("id") != tid]
                 _save("transponders")
+            return self._send(200, {"ok": True})
+
+        if path.startswith("/api/channels/") and path.endswith("/delete"):
+            sid = path[len("/api/channels/"):-len("/delete")]
+            with _lock:
+                for t in STATE["transponders"]:
+                    scan = t.get("scan")
+                    if scan:
+                        before = len(scan.get("services", []))
+                        scan["services"] = [s for s in scan.get("services", [])
+                                            if str(s.get("sid")) != sid]
+                        if len(scan["services"]) != before:
+                            _save_transponder(t)
             return self._send(200, {"ok": True})
 
         if path == "/api/scan":
