@@ -354,24 +354,34 @@ def _session_start(tp, nc, udp=(), http_port=0, sid=None, pinned=False):
     except (ValueError, TypeError):
         raise StreamError("SID o puerto HTTP inválido", 400)
     key = channel_id(tp, sid)
-    cmd = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
-           "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
-           "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"]),
-           "--sid", str(sid), "--stdout", "--verbose",
-           "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
-           "--deskey", nc.get("deskey", ""), "--user", nc.get("user", ""),
-           "--pass", nc.get("pass", ""), "--http-port", str(http_port)]
+    tuning = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
+              "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
+              "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"])]
     if normalized["symbol_rate"]:
-        cmd += ["--symbol-rate", str(normalized["symbol_rate"])]
+        tuning += ["--symbol-rate", str(normalized["symbol_rate"])]
+    capture = tuning + ["--mux-only", "--stdout", "--http-port", "0", "--verbose"]
+    # Workers never open/tune DVB devices. Newcamd credentials stay in the
+    # single broker, not in every service process.
+    cmd = [binary, "--stdin", "--sid", str(sid), "--stdout", "--verbose",
+           "--http-port", str(http_port)]
     if not isinstance(udp, (list, tuple)) or any(not isinstance(u, str) for u in udp):
         raise StreamError("Destinos UDP inválidos", 400)
     for destination in udp:
         cmd += ["--udp", destination]
-    # Name depends only on validated adapter/SID, never a path from the request.
+    ca = [binary, "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
+          "--deskey", nc.get("deskey", ""), "--user", nc.get("user", ""),
+          "--pass", nc.get("pass", "")]
     log = os.path.join(DATA_DIR, "stream-%d-%d.log" % (normalized["adapter"], sid))
+    mux_log = os.path.join(DATA_DIR, "mux-%d.log" % normalized["adapter"])
+    # Exclude the acquisition timeout: it does not change the RF tuning.
+    mux_id = tuple(normalized[k] for k in
+                   ("type", "freq_mhz", "lnb_lo", "pol", "symbol_rate", "adapter"))
     return _streams.acquire(key, normalized["adapter"], cmd, log,
                             timeout=normalized["timeout"] + 20, pinned=pinned,
-                            http_port=http_port, udp=udp)
+                            http_port=http_port, udp=udp, mux_id=mux_id,
+                            mux_command=capture, mux_log=mux_log,
+                            broker_command=ca, broker_id=tuple(ca),
+                            broker_log=os.path.join(DATA_DIR, "ca.log"))
 
 
 def stream_start(tp, newcamd, udp, http_port, sid=None):
@@ -480,7 +490,12 @@ class Handler(BaseHTTPRequestHandler):
             if not session:
                 return self._send(404, {"error": "Sesión no encontrada"})
             try:
-                with open(os.path.join(DATA_DIR, session["log"]), "rb") as log:
+                scope = qs.get("scope", ["service"])[0]
+                if scope not in ("service", "mux", "ca"):
+                    return self._send(400, {"error": "Registro inválido"})
+                filename = ("ca.log" if scope == "ca" else
+                            "mux-%d.log" % session["adapter"] if scope == "mux" else session["log"])
+                with open(os.path.join(DATA_DIR, filename), "rb") as log:
                     log.seek(0, os.SEEK_END)
                     log.seek(max(0, log.tell() - 32768))
                     text = log.read().decode("utf-8", errors="replace")

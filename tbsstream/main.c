@@ -129,6 +129,8 @@ typedef struct {
   int nudp;
   int http_port;
   int stdout_ts;
+  int stdin_ts, mux_only;
+  char cam_socket[108], ca_broker[108];
   char m3u8_base[256];
 } opts_t;
 
@@ -492,7 +494,7 @@ static pthread_mutex_t ecm_q_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ecm_q_cond = PTHREAD_COND_INITIALIZER;
 
 /* Buffer de paquetes scrambled sin CW (solo se toca desde el hilo principal) */
-#define SCRAM_MAX 4096
+#define SCRAM_MAX 65536 /* 12 MiB per active service; bounded, not a latency target */
 static uint8_t scram_buf[SCRAM_MAX * TS_PKT];
 static int scram_head = 0, scram_count = 0;
 static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
@@ -620,6 +622,13 @@ static void log_transport_stats(void)
   due = now + 5000;
 }
 
+static newcamd_t *connect_cam(char *error, size_t size)
+{
+  if (opts.cam_socket[0]) return newcamd_connect_local(opts.cam_socket, error, size);
+  return newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
+                         opts.nc_user, opts.nc_pass, error, size);
+}
+
 /* Hilo CA: envía ECMs y actualiza las CW (el bloqueo de red ocurre aquí) */
 static void *ca_thread(void *arg)
 {
@@ -637,9 +646,8 @@ static void *ca_thread(void *arg)
     pthread_mutex_unlock(&ecm_q_mutex);
 
     if (!cam) {
-      char error[256];
-      cam = newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
-                            opts.nc_user, opts.nc_pass, error, sizeof(error));
+      char error[256] = {0};
+      cam = connect_cam(error, sizeof(error));
       if (!cam) {
         fprintf(stderr, "newcamd: %s; retry in %u s\n", error, retry_delay);
         sleep(retry_delay);
@@ -647,12 +655,13 @@ static void *ca_thread(void *arg)
         continue;
       }
       retry_delay = 1;
-      fprintf(stderr, "newcamd: connected (login + card data)\n");
+      fprintf(stderr, "newcamd: %s connected\n",
+              opts.cam_socket[0] ? "local broker" : "upstream (login + card data)");
     }
     uint8_t even[8], odd[8];
     uint64_t requested = monotonic_ms();
     int result = newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
-                                 r.sec, r.len, even, odd, 1500);
+                                 r.sec, r.len, even, odd, 5000);
     LOGV("ECM: sid=%u caid=%04X time_ms=%llu result=%d\n", r.sid, r.caid,
          (unsigned long long)(monotonic_ms() - requested), result);
     if (result == 0) {
@@ -671,9 +680,10 @@ static void *ca_thread(void *arg)
       LOGV("CW actualizada (par/impar)\n");
     } else {
       LOGV("ECM sin CW (resultado %d)\n", result);
-      if (result == -1) {
-        newcamd_close(cam);
-        cam = NULL;
+      if (result < 0) {
+        /* Deadline/NOK invalidates this service only; never reuse an old CW
+         * indefinitely. A framed broker deadline does not close its socket. */
+        if (result == -1) { newcamd_close(cam); cam = NULL; }
         pthread_mutex_lock(&csa_mutex);
         have_cw_even = have_cw_odd = 0;
         pthread_mutex_unlock(&csa_mutex);
@@ -959,7 +969,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE, OPT_LNBLO, OPT_STDOUT };
+         OPT_BASE, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -981,6 +991,10 @@ int main(int argc, char **argv)
     {"udp", required_argument, 0, OPT_UDP},
     {"http-port", required_argument, 0, OPT_HTTP},
     {"stdout", no_argument, 0, OPT_STDOUT},
+    {"stdin", no_argument, 0, OPT_STDIN},
+    {"mux-only", no_argument, 0, OPT_MUX_ONLY},
+    {"cam-socket", required_argument, 0, OPT_CAM_SOCKET},
+    {"ca-broker", required_argument, 0, OPT_CA_BROKER},
     {"m3u8-base", required_argument, 0, OPT_BASE},
     {"lnb-lo", required_argument, 0, OPT_LNBLO},
     {"timeout", required_argument, 0, 'T'},
@@ -1037,17 +1051,36 @@ int main(int argc, char **argv)
         break;
       }
       case OPT_STDOUT: opts.stdout_ts = 1; break;
+      case OPT_STDIN: opts.stdin_ts = 1; break;
+      case OPT_MUX_ONLY: opts.mux_only = 1; break;
+      case OPT_CAM_SOCKET:
+      case OPT_CA_BROKER:
+        if (strlen(optarg) >= sizeof(opts.cam_socket)) {
+          fprintf(stderr, "local socket path too long\n"); return 1;
+        }
+        strcpy(c == OPT_CAM_SOCKET ? opts.cam_socket : opts.ca_broker, optarg);
+        break;
       case OPT_HTTP: opts.http_port = atoi(optarg); break;
       case OPT_BASE: strncpy(opts.m3u8_base, optarg, sizeof(opts.m3u8_base)-1); break;
       case OPT_LNBLO: opts.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'T': timeout = atoi(optarg); break;
       case 'v': verbose = 1; break;
       case 'h':
+        fprintf(stderr, "Panel roles: --mux-only --stdout (DVB capture), "
+                "--stdin --sid N --stdout --cam-socket PATH (service), "
+                "--ca-broker PATH --newcamd HOST:PORT (shared CA)\n");
         fprintf(stderr, "Uso: %s -t dvbs --freq-mhz 11836 --symbol-rate 27500000 "
                 "--newcamd 192.168.1.2:15050 --deskey <hex14bytes> --udp 239.1.1.1:1234\n", argv[0]);
         return 0;
       default: return 1;
     }
+  }
+
+  if (opts.ca_broker[0])
+    return newcamd_broker(opts.ca_broker, opts.nc_host, opts.nc_port,
+                         opts.nc_deskey, opts.nc_user, opts.nc_pass);
+  if (opts.stdin_ts && opts.mux_only) {
+    fprintf(stderr, "--stdin and --mux-only are mutually exclusive\n"); return 1;
   }
 
   if (freq_mhz > 0) opts.freq_hz = (int64_t)(freq_mhz * 1000000.0);
@@ -1060,8 +1093,8 @@ int main(int argc, char **argv)
   else if (!strcmp(type, "dvbs2")) opts.delsys = SYS_DVBS2;
   else { fprintf(stderr, "tipo desconocido\n"); return 1; }
 
-  if (!opts.freq_hz) { fprintf(stderr, "falta --freq/--freq-mhz\n"); return 1; }
-  if ((opts.delsys == SYS_DVBC_ANNEX_A || opts.delsys == SYS_DVBS || opts.delsys == SYS_DVBS2) && !opts.symbol_rate) {
+  if (!opts.stdin_ts && !opts.freq_hz) { fprintf(stderr, "falta --freq/--freq-mhz\n"); return 1; }
+  if (!opts.stdin_ts && (opts.delsys == SYS_DVBC_ANNEX_A || opts.delsys == SYS_DVBS || opts.delsys == SYS_DVBS2) && !opts.symbol_rate) {
     fprintf(stderr, "falta --symbol-rate\n"); return 1;
   }
   if (pols) { opts.pol = *pols; }
@@ -1082,70 +1115,94 @@ int main(int argc, char **argv)
     fprintf(stderr, "UDP -> %s:%d\n", opts.udp[i].host, opts.udp[i].port);
   }
 
-  /* abrir frontend/dvr */
-  char fe_path[128], dvr_path[128];
-  snprintf(fe_path, sizeof(fe_path), "/dev/dvb/adapter%d/frontend%d", opts.adapter, opts.frontend);
-  snprintf(dvr_path, sizeof(dvr_path), "/dev/dvb/adapter%d/dvr%d", opts.adapter, opts.frontend);
-  int fe = open(fe_path, O_RDWR);
-  if (fe < 0) { fprintf(stderr, "open %s: %s\n", fe_path, strerror(errno)); return 1; }
-  int dvr = open(dvr_path, O_RDONLY | O_NONBLOCK);
-  if (dvr < 0) { fprintf(stderr, "open %s: %s\n", dvr_path, strerror(errno)); return 1; }
+  int dvr = STDIN_FILENO;
+  if (!opts.stdin_ts) {
+    /* abrir frontend/dvr */
+    char fe_path[128], dvr_path[128];
+    snprintf(fe_path, sizeof(fe_path), "/dev/dvb/adapter%d/frontend%d", opts.adapter, opts.frontend);
+    snprintf(dvr_path, sizeof(dvr_path), "/dev/dvb/adapter%d/dvr%d", opts.adapter, opts.frontend);
+    int fe = open(fe_path, O_RDWR);
+    if (fe < 0) { fprintf(stderr, "open %s: %s\n", fe_path, strerror(errno)); return 1; }
+    dvr = open(dvr_path, O_RDONLY | O_NONBLOCK);
+    if (dvr < 0) { fprintf(stderr, "open %s: %s\n", dvr_path, strerror(errno)); return 1; }
 
-  if (frontend_tune(fe, &opts) < 0) return 1;
-  if (wait_lock(fe, timeout) < 0) { fprintf(stderr, "sin lock\n"); return 1; }
-  LOGV("lock OK\n");
+    if (frontend_tune(fe, &opts) < 0) return 1;
+    if (wait_lock(fe, timeout) < 0) { fprintf(stderr, "sin lock\n"); return 1; }
+    LOGV("lock OK\n");
 
-  /* El driver TBSECP3 solo entrega TS al dvr si el demux tiene un filtro
-     "full TS" (todos los PIDs -> DMX_OUT_TS_TAP). */
-  char dmx_path[128];
-  snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", opts.adapter, opts.frontend);
-  int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
-  if (dmx >= 0) {
-    /* Larger kernel buffering absorbs short userspace scheduling stalls.
-     * Some vendor drivers do not implement this ioctl: keep running/log it. */
-    if (ioctl(dmx, DMX_SET_BUFFER_SIZE, 4 * 1024 * 1024) < 0)
-      LOGV("DMX_SET_BUFFER_SIZE unsupported/failed: %s\n", strerror(errno));
-    struct dmx_pes_filter_params pes;
-    memset(&pes, 0, sizeof(pes));
-    pes.pid = 0x2000;
-    pes.input = DMX_IN_FRONTEND;
-    pes.output = DMX_OUT_TS_TAP;
-    pes.pes_type = DMX_PES_OTHER;
-    pes.flags = 0;
-    ioctl(dmx, DMX_SET_PES_FILTER, &pes);
-    ioctl(dmx, DMX_START);
+    /* El driver TBSECP3 solo entrega TS al dvr si el demux tiene un filtro
+       "full TS" (todos los PIDs -> DMX_OUT_TS_TAP). */
+    char dmx_path[128];
+    snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", opts.adapter, opts.frontend);
+    int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
+    if (dmx < 0) { fprintf(stderr, "open demux: %s\n", strerror(errno)); return 1; }
+    {
+      /* Larger kernel buffering absorbs short userspace scheduling stalls.
+       * Some vendor drivers do not implement this ioctl: keep running/log it. */
+      if (ioctl(dmx, DMX_SET_BUFFER_SIZE, 4 * 1024 * 1024) < 0)
+        LOGV("DMX_SET_BUFFER_SIZE unsupported/failed: %s\n", strerror(errno));
+      struct dmx_pes_filter_params pes;
+      memset(&pes, 0, sizeof(pes));
+      pes.pid = 0x2000;
+      pes.input = DMX_IN_FRONTEND;
+      pes.output = DMX_OUT_TS_TAP;
+      pes.pes_type = DMX_PES_OTHER;
+      pes.flags = 0;
+      if (ioctl(dmx, DMX_SET_PES_FILTER, &pes) < 0 || ioctl(dmx, DMX_START) < 0) {
+        fprintf(stderr, "full mux filter: %s\n", strerror(errno)); return 1;
+      }
+    }
+
   }
 
-  /* newcamd + CSA */
-  csae = csa_create();
-  char err[256];
-  nc = newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
-                       opts.nc_user, opts.nc_pass, err, sizeof(err));
-  if (!nc) fprintf(stderr, "newcamd: %s\n", err);
+  /* Capture has no descrambler or CA connection. */
+  if (!opts.mux_only) {
+    /* newcamd + CSA */
+    csae = csa_create();
+    if (!csae) { fprintf(stderr, "CSA allocation failed\n"); return 1; }
+    char err[256] = {0};
+    nc = connect_cam(err, sizeof(err));
+    if (!nc) fprintf(stderr, "newcamd: %s\n", err);
 
-  /* hilo CA asíncrono: envía ECMs y actualiza las CW sin bloquear el principal */
-  pthread_t ca_tid;
-  pthread_create(&ca_tid, NULL, ca_thread, nc);
+    /* hilo CA asíncrono: envía ECMs y actualiza las CW sin bloquear el principal */
+    pthread_t ca_tid;
+    pthread_create(&ca_tid, NULL, ca_thread, nc);
 
-  refresh_playlist(opts.want_sid);
+    refresh_playlist(opts.want_sid);
 
-  /* servidor HTTP */
-  pthread_t ht;
-  if (opts.http_port > 0)
-    pthread_create(&ht, NULL, http_server, &opts.http_port);
+    /* servidor HTTP */
+    pthread_t ht;
+    if (opts.http_port > 0)
+      pthread_create(&ht, NULL, http_server, &opts.http_port);
+
+  }
 
   /* bucle */
   uint8_t buf[TS_PKT * 256];
   struct pollfd pfd = { .fd = dvr, .events = POLLIN };
   while (1) {
     int r = poll(&pfd, 1, 100);
-    if (r <= 0) {
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return 1;
+    if (r == 0) {
+      if (opts.mux_only) continue;
       flush_scrambled();
       log_transport_stats();
       continue;
     }
     ssize_t n = read(dvr, buf, sizeof(buf));
-    if (n <= 0) continue;
+    if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+    if (n <= 0) return n == 0 ? 0 : 1;
+    if (opts.mux_only) {
+      size_t sent = 0;
+      while (sent < (size_t)n) {
+        ssize_t out = write(STDOUT_FILENO, buf + sent, (size_t)n - sent);
+        if (out < 0 && errno == EINTR) continue;
+        if (out <= 0) return 1;
+        sent += (size_t)out;
+      }
+      continue;
+    }
     process_buffer(buf, (int)n);
     log_transport_stats();
 

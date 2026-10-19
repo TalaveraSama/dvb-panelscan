@@ -18,6 +18,23 @@ while True:
 '''
 
 
+# Simulates the three CLI roles, not three independent tuner processes.
+FAKE_ENGINE = r'''import os,sys,time,socket
+if "--ca-broker" in sys.argv:
+ s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index("--ca-broker")+1]); s.listen()
+ while True: time.sleep(1)
+elif "--stdin" in sys.argv:
+ while True:
+  data=os.read(0,188*256)
+  if not data: break
+  sys.stdout.buffer.write(data); sys.stdout.buffer.flush()
+else:
+ p=bytes([0x47,0,0,0x10])+bytes(184)
+ while True:
+  sys.stdout.buffer.write(p*7); sys.stdout.buffer.flush(); time.sleep(.02)
+'''
+
+
 class StreamingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -134,6 +151,85 @@ class StreamingTests(unittest.TestCase):
         self.manager.release(a)
 
 
+class MuxTests(unittest.TestCase):
+    setUp = StreamingTests.setUp
+    tearDown = StreamingTests.tearDown
+    def acquire_mux(self, key="tp:1", adapter=0, mux_id="mux-a", **kwargs):
+        return self.manager.acquire(key, adapter,
+            [sys.executable, "-u", "-c", "import sys;\nwhile True:\n b=sys.stdin.buffer.read(188*7)\n if not b: break\n sys.stdout.buffer.write(b); sys.stdout.buffer.flush()"],
+            self.log, mux_id=mux_id, mux_command=self.command,
+            mux_log=os.path.join(self.tmp.name, "mux-%s.log" % adapter), timeout=2, **kwargs)
+
+    def test_two_services_one_capture_and_independent_stop(self):
+        a = self.acquire_mux()
+        b = self.acquire_mux("tp:2")
+        self.assertIs(a.source, b.source)
+        self.assertNotEqual(a.process.pid, b.process.pid)
+        self.assertEqual(a.status()["mux_pid"], b.status()["mux_pid"])
+        self.manager.stop_channel("tp:1")
+        self.assertIsNone(b.source.process.poll())
+        self.assertEqual(b.read(b.cursor(), timeout=1)[1][0], 0x47)
+        source = b.source
+        self.manager.release(b)
+        self.assertIsNotNone(source.process.poll())
+        self.assertEqual(self.manager.muxes, {})
+
+    def test_concurrent_different_services_share_one_capture(self):
+        results, errors = [], []
+        def start(index):
+            try: results.append(self.acquire_mux("tp:%s" % (index % 2 + 1)))
+            except Exception as error: errors.append(error)
+        threads = [threading.Thread(target=start, args=(i,)) for i in range(10)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 10)
+        self.assertEqual(len({s.source.process.pid for s in results}), 1)
+        self.assertEqual(len({s.process.pid for s in results}), 2)
+        for session in results: self.manager.release(session)
+        self.assertEqual(self.manager.muxes, {})
+
+    def test_distinct_muxes_and_scan_still_conflict_on_same_adapter(self):
+        a = self.acquire_mux()
+        with self.assertRaises(StreamError) as error:
+            self.acquire_mux("other:2", mux_id="mux-b")
+        self.assertEqual(error.exception.status, 409)
+        with self.assertRaises(StreamError): self.manager.reserve_scan(0)
+        b = self.acquire_mux("other:2", adapter=1, mux_id="mux-b")
+        self.assertIsNot(a.source, b.source)
+
+    def test_mux_process_failure_ends_all_its_workers(self):
+        a = self.acquire_mux()
+        b = self.acquire_mux("tp:2")
+        a.source.stop()
+        a.worker.join(timeout=2); b.worker.join(timeout=2)
+        self.assertTrue(a.ended and b.ended)
+        self.assertTrue(a.input_error and b.input_error)
+
+    def test_slow_worker_does_not_block_mux_or_other_service(self):
+        a = self.acquire_mux()
+        b = self.acquire_mux("tp:2")
+        import signal
+        os.kill(a.process.pid, signal.SIGSTOP)
+        try:
+            # Give its feeder a full pipe, but keep the source bounded.
+            for _ in range(100): a.source._append((bytes([0x47])+bytes(187))*64)
+            before = b.bytes_received
+            deadline = time.monotonic() + 2
+            while b.bytes_received <= before and time.monotonic() < deadline: time.sleep(.01)
+            self.assertGreater(b.bytes_received, before)
+            self.assertIsNone(b.source.process.poll())
+        finally:
+            os.kill(a.process.pid, signal.SIGCONT)
+
+    def test_failed_worker_does_not_leave_capture(self):
+        with self.assertRaises(StreamError):
+            self.manager.acquire("tp:1", 0, [sys.executable,"-c","raise SystemExit(1)"],
+                self.log, mux_id="mux-a", mux_command=self.command,
+                mux_log=os.path.join(self.tmp.name,"mux.log"), timeout=2)
+        self.assertEqual(self.manager.muxes, {})
+
+
 class PlaylistTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -183,7 +279,7 @@ class HttpSubscriptionTests(unittest.TestCase):
         spec.loader.exec_module(self.panel)
         self.binary = os.path.join(self.tmp.name, "producer")
         with open(self.binary, "w") as script:
-            script.write("#!" + sys.executable + "\n" + PRODUCER)
+            script.write("#!" + sys.executable + "\n" + FAKE_ENGINE)
         os.chmod(self.binary, 0o700)
         self.panel._cfg["tbsstream"] = self.binary
         self.panel.STATE["transponders"] = [{"id": "tp-a", "adapter": 0,
@@ -231,6 +327,21 @@ class HttpSubscriptionTests(unittest.TestCase):
         with self.request.urlopen(self.base + "/stream/channel/tp-a:643", timeout=2) as stream:
             self.assertEqual(stream.read(188)[0], 0x47)
             self.assertEqual(self.panel.stream_status()["channel_id"], "tp-a:643")
+
+    def test_two_http_channels_share_mux_and_ca(self):
+        tp = self.panel.STATE["transponders"][0]
+        tp["scan"]["services"].append({"sid": 643})
+        with self.request.urlopen(self.base + "/stream/channel/tp-a:672", timeout=2) as a:
+            self.assertEqual(a.read(188)[0], 0x47)
+            with self.request.urlopen(self.base + "/stream/channel/tp-a:643", timeout=2) as b:
+                self.assertEqual(b.read(188)[0], 0x47)
+                sessions = self.panel.stream_status()["sessions"]
+                self.assertEqual(len(sessions), 2)
+                self.assertEqual(len({s["mux_pid"] for s in sessions}), 1)
+                self.assertEqual(len({s["ca_pid"] for s in sessions}), 1)
+                self.assertTrue(all(s["ca_pid"] for s in sessions))
+                self.panel._streams.stop_channel("tp-a:672")
+                self.assertEqual(b.read(188)[0], 0x47)
 
     def test_failed_start_is_not_http_200(self):
         import urllib.error

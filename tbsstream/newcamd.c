@@ -1,7 +1,7 @@
 /*
  *  newcamd.c - cliente newcamd (Code Word Client)
  *
- *  Portado fielmente de TVHeadend src/descrambler/cwc.c (DES, framing,
+ *  Basado en TVHeadend src/descrambler/cwc.c (DES, framing,
  *  derivación de claves, login y mensajes ECM/CW). Se usa OpenSSL para DES y
  *  MD5. El algoritmo de salado de contraseña (crypt_md5) también es de cwc.c.
  *
@@ -16,6 +16,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <poll.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/un.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -37,11 +41,14 @@
 
 struct newcamd {
   int fd;
+  int local;
   DES_key_schedule k1, k2;
   uint16_t seq;
   uint8_t confedkey[14];
   char *salted;
 };
+
+static uint64_t nc_now_ms(void);
 
 static void set_err(char *err, size_t errlen, const char *fmt, const char *arg)
 {
@@ -53,11 +60,16 @@ static void set_err(char *err, size_t errlen, const char *fmt, const char *arg)
 static int recv_full(int fd, uint8_t *buf, int n, int timeout_ms)
 {
   int got = 0;
+  uint64_t deadline = nc_now_ms() + (timeout_ms > 0 ? (unsigned)timeout_ms : 0);
   while (got < n) {
+    uint64_t now = nc_now_ms();
+    if (now >= deadline) { errno = ETIMEDOUT; return -1; }
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    int r = poll(&pfd, 1, timeout_ms);
-    if (r <= 0) return -1;
+    int r = poll(&pfd, 1, (int)(deadline - now));
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) { if (!r) errno = ETIMEDOUT; return -1; }
     ssize_t k = recv(fd, buf + got, n - got, 0);
+    if (k < 0 && errno == EINTR) continue;
     if (k <= 0) return -1;
     got += k;
   }
@@ -69,6 +81,7 @@ static int send_full(int fd, const uint8_t *buf, int n)
   int sent = 0;
   while (sent < n) {
     ssize_t k = send(fd, buf + sent, n - sent, MSG_NOSIGNAL);
+    if (k < 0 && errno == EINTR) continue;
     if (k <= 0) return -1;
     sent += k;
   }
@@ -206,6 +219,7 @@ static char *crypt_md5(const char *pw, const char *salt)
     else       MD5_Update(&ctx, (unsigned char *)pw + j, 1);
 
   char *passwd = malloc(120);
+  if (!passwd) return NULL;
   strcpy(passwd, magic);
   strncat(passwd, sp, sl);
   strcat(passwd, "$");
@@ -274,11 +288,13 @@ static int nc_send_msg(newcamd_t *nc, const uint8_t *msg, int len,
 /* Lee un mensaje, lo descifra y devuelve su longitud (>= 12). */
 static int nc_read_msg(newcamd_t *nc, uint8_t *buf, int maxlen, int timeout_ms)
 {
+  uint64_t deadline = nc_now_ms() + (timeout_ms > 0 ? (unsigned)timeout_ms : 0);
   uint8_t hdr[2];
   if (recv_full(nc->fd, hdr, 2, timeout_ms) < 0) return -1;
   int msglen = (hdr[0] << 8) | hdr[1];
   if (msglen < 12 || msglen > maxlen - 2) return -1;
-  if (recv_full(nc->fd, buf + 2, msglen, 1000) < 0) return -1;
+  uint64_t now = nc_now_ms();
+  if (now >= deadline || recv_full(nc->fd, buf + 2, msglen, (int)(deadline - now)) < 0) return -1;
   buf[0] = hdr[0]; buf[1] = hdr[1];
   return des_decrypt(nc, buf, msglen + 2);
 }
@@ -321,9 +337,11 @@ newcamd_t *newcamd_connect(const char *host, int port, const uint8_t deskey[14],
   if (fd < 0) return NULL;
 
   newcamd_t *nc = calloc(1, sizeof(*nc));
+  if (!nc) { close(fd); set_err(err, errlen, "allocation failed", NULL); return NULL; }
   nc->fd = fd;
   memcpy(nc->confedkey, deskey, 14);
   nc->salted = crypt_md5(password ? password : "", "$1$abcdefgh$");
+  if (!nc->salted) { close(fd); free(nc); return NULL; }
 
   /* 1) clave de login del servidor (14 bytes) */
   uint8_t loginkey[14];
@@ -389,6 +407,21 @@ int newcamd_send_ecm(newcamd_t *nc, uint16_t sid, uint16_t caid, uint32_t provid
                      const uint8_t *ecm, int ecm_len,
                      uint8_t even[8], uint8_t odd[8], int timeout_ms)
 {
+  if (nc->local) {
+    if (ecm_len < 3 || ecm_len > 900) return -1;
+    uint8_t request[910], reply[17];
+    request[0] = sid >> 8; request[1] = sid;
+    request[2] = caid >> 8; request[3] = caid;
+    request[4] = provid >> 24; request[5] = provid >> 16;
+    request[6] = provid >> 8; request[7] = provid;
+    request[8] = ecm_len >> 8; request[9] = ecm_len;
+    memcpy(request + 10, ecm, ecm_len);
+    if (send_full(nc->fd, request, ecm_len + 10) < 0 ||
+        recv_full(nc->fd, reply, sizeof(reply), timeout_ms + 2000) < 0) return -1;
+    if (reply[0]) return (int8_t)reply[0];
+    memcpy(even, reply + 1, 8); memcpy(odd, reply + 9, 8);
+    return 0;
+  }
   uint16_t seq = 0;
   if (nc_send_msg(nc, ecm, ecm_len, sid, caid, provid, &seq) < 0)
     return -1;
@@ -421,4 +454,213 @@ void newcamd_close(newcamd_t *nc)
   if (nc->fd >= 0) close(nc->fd);
   free(nc->salted);
   free(nc);
+}
+
+/* A single upstream connection, multiple outstanding ECM sequences. Each
+ * worker has a private UNIX stream and at most one outstanding request. A
+ * deadline/NOK for one service does not reconnect or stall the other services.
+ * No credentials, ECM payloads or CWs are written to logs. */
+#define BROKER_PEERS 256
+#define BROKER_TIMEOUT 5000
+
+typedef struct {
+  int fd, used, expected, pending;
+  uint16_t seq;
+  uint64_t deadline, cached_at;
+  uint8_t request[910], cached_request[910], cached_cw[16];
+  int cached_len;
+} broker_peer_t;
+
+static uint64_t nc_now_ms(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+newcamd_t *newcamd_connect_local(const char *path, char *err, size_t errlen)
+{
+  struct sockaddr_un addr = {.sun_family = AF_UNIX};
+  if (strlen(path) >= sizeof(addr.sun_path)) {
+    set_err(err, errlen, "local socket path too long", NULL); return NULL;
+  }
+  strcpy(addr.sun_path, path);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return NULL;
+  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    set_err(err, errlen, "local CA broker: ", strerror(errno)); close(fd); return NULL;
+  }
+  struct timeval tv = {.tv_sec = 7};
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  newcamd_t *nc = calloc(1, sizeof(*nc));
+  if (!nc) { close(fd); return NULL; }
+  nc->fd = fd; nc->local = 1;
+  return nc;
+}
+
+static void broker_reply(broker_peer_t *peer, int result, const uint8_t *cw)
+{
+  uint8_t reply[17] = {0};
+  reply[0] = (uint8_t)(int8_t)result;
+  if (result) peer->cached_len = 0;
+  if (!result) memcpy(reply + 1, cw, 16);
+  /* Nonblocking local descriptors: slow/dead consumers cannot stall CA. */
+  if (send(peer->fd, reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT) != sizeof(reply)) {
+    close(peer->fd); peer->fd = -1;
+  }
+  peer->used = peer->pending = 0;
+  peer->expected = 10;
+}
+
+static void broker_disconnect(newcamd_t **upstream, broker_peer_t *peers)
+{
+  newcamd_close(*upstream); *upstream = NULL;
+  for (int i = 0; i < BROKER_PEERS; i++) {
+    peers[i].cached_len = 0;
+    if (peers[i].fd >= 0 && peers[i].pending) broker_reply(&peers[i], -1, NULL);
+  }
+}
+
+/* Kept separate from the listener so a deterministic socketpair test can
+ * drive the real encrypted multiplexing loop without any DVB hardware. */
+static int broker_loop(int listener, newcamd_t *upstream, const char *host, int port,
+                       const uint8_t deskey[14], const char *user, const char *password)
+{
+  broker_peer_t peers[BROKER_PEERS];
+  memset(peers, 0, sizeof(peers));
+  for (int i = 0; i < BROKER_PEERS; i++) peers[i].fd = -1;
+  uint64_t reconnect_at = 0, keepalive_at = nc_now_ms() + 30000;
+  for (;;) {
+    struct pollfd fds[BROKER_PEERS + 2];
+    fds[0] = (struct pollfd){.fd = listener, .events = POLLIN};
+    fds[1] = (struct pollfd){.fd = upstream ? upstream->fd : -1, .events = POLLIN};
+    for (int i = 0; i < BROKER_PEERS; i++)
+      fds[i+2] = (struct pollfd){.fd = peers[i].fd, .events = POLLIN};
+    int ready = poll(fds, BROKER_PEERS + 2, 100);
+    if (ready < 0) { if (errno == EINTR) continue; break; }
+    uint64_t now = nc_now_ms();
+    if (fds[0].revents & POLLIN) {
+      int fd = accept(listener, NULL, NULL), slot = -1;
+      for (int i = 0; i < BROKER_PEERS; i++) if (peers[i].fd < 0) { slot = i; break; }
+      if (fd >= 0 && slot >= 0) {
+        fcntl(fd, F_SETFL, O_NONBLOCK);
+        memset(&peers[slot], 0, sizeof(peers[slot]));
+        peers[slot].fd = fd; peers[slot].expected = 10;
+      } else if (fd >= 0) close(fd);
+    }
+    /* Process replies before new requests: old sequences cannot be delivered
+     * to a newly accepted worker reusing a disconnected worker's slot. */
+    if (upstream && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+      uint8_t buf[CWS_NETMSGSIZE];
+      int size = nc_read_msg(upstream, buf, sizeof(buf), 1000);
+      if (size < 15) {
+        fprintf(stderr, "CA broker: upstream transport/protocol error; reconnecting\n");
+        broker_disconnect(&upstream, peers); reconnect_at = now + 1000;
+      } else if (buf[12] == 0x80 || buf[12] == 0x81) {
+        uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
+        int length = ((buf[13] & 15) << 8) | buf[14];
+        for (int i = 0; i < BROKER_PEERS; i++) {
+          broker_peer_t *p = &peers[i];
+          if (p->fd < 0 || !p->pending || p->seq != seq) continue;
+          int result = length == 0 ? -2 : (length == 16 && size >= 31 ? 0 : -1);
+          if (!result) {
+            memcpy(p->cached_request, p->request, p->expected);
+            p->cached_len = p->expected; p->cached_at = now;
+            memcpy(p->cached_cw, buf + 15, 16);
+          }
+          broker_reply(p, result, result == 0 ? buf + 15 : NULL);
+          break;
+        }
+      }
+    }
+    if (upstream && now >= keepalive_at) {
+      const uint8_t keepalive[3] = {MSG_KEEPALIVE, 0, 0};
+      if (nc_send_msg(upstream, keepalive, 3, 0, 0, 0, NULL) < 0) {
+        broker_disconnect(&upstream, peers); reconnect_at = now + 1000;
+      }
+      keepalive_at = now + 30000;
+    }
+    for (int i = 0; i < BROKER_PEERS; i++) {
+      broker_peer_t *p = &peers[i];
+      if (p->fd < 0) continue;
+      if (p->pending && now >= p->deadline) {
+        fprintf(stderr, "CA broker: ECM deadline sid=%u caid=%04X seq=%u\n",
+                (p->request[0] << 8) | p->request[1],
+                (p->request[2] << 8) | p->request[3], p->seq);
+        broker_reply(p, -3, NULL);
+      }
+      if (p->fd < 0) continue;
+      if (fds[i+2].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        close(p->fd); p->fd = -1; continue;
+      }
+      if (!(fds[i+2].revents & POLLIN)) continue;
+      if (p->pending) {
+        /* Protocol permits one request at a time per worker. */
+        close(p->fd); p->fd = -1; continue;
+      }
+      ssize_t n = recv(p->fd, p->request + p->used, p->expected - p->used, MSG_DONTWAIT);
+      if (n <= 0) {
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+        close(p->fd); p->fd = -1; continue;
+      }
+      p->used += n;
+      if (p->used == 10) {
+        int length = (p->request[8] << 8) | p->request[9];
+        if (length < 3 || length > 900) { close(p->fd); p->fd = -1; continue; }
+        p->expected = 10 + length;
+      }
+      if (p->used != p->expected) continue;
+      if (p->cached_len == p->expected && now - p->cached_at < 1000 &&
+          !memcmp(p->request, p->cached_request, p->expected)) {
+        broker_reply(p, 0, p->cached_cw); continue;
+      }
+      if (!upstream && now >= reconnect_at) {
+        char error[256] = {0};
+        upstream = newcamd_connect(host, port, deskey, user, password, error, sizeof(error));
+        if (upstream) fprintf(stderr, "CA broker: connected (login + card data)\n");
+        else { fprintf(stderr, "CA broker: connection failed: %s\n", error); reconnect_at = now + 1000; }
+      }
+      if (!upstream) { broker_reply(p, -1, NULL); continue; }
+      uint32_t provid = ((uint32_t)p->request[4] << 24) | ((uint32_t)p->request[5] << 16) |
+                        ((uint32_t)p->request[6] << 8) | p->request[7];
+      /* Do not reuse a sequence still outstanding after the 16-bit wrap. */
+      for (int attempt = 0; attempt <= BROKER_PEERS; attempt++) {
+        uint16_t next = (uint16_t)(upstream->seq + 1);
+        int collision = 0;
+        for (int j = 0; j < BROKER_PEERS; j++)
+          if (peers[j].fd >= 0 && peers[j].pending && peers[j].seq == next) collision = 1;
+        if (!collision) break;
+        upstream->seq++;
+      }
+      if (nc_send_msg(upstream, p->request + 10, p->expected - 10,
+                      (p->request[0] << 8) | p->request[1],
+                      (p->request[2] << 8) | p->request[3], provid, &p->seq) < 0) {
+        broker_reply(p, -1, NULL);
+        broker_disconnect(&upstream, peers); reconnect_at = now + 1000;
+      } else { p->pending = 1; p->deadline = nc_now_ms() + BROKER_TIMEOUT; }
+    }
+  }
+  broker_disconnect(&upstream, peers);
+  for (int i = 0; i < BROKER_PEERS; i++) if (peers[i].fd >= 0) close(peers[i].fd);
+  return 1;
+}
+
+int newcamd_broker(const char *path, const char *host, int port,
+                  const uint8_t deskey[14], const char *user, const char *password)
+{
+  struct sockaddr_un addr = {.sun_family = AF_UNIX};
+  if (strlen(path) >= sizeof(addr.sun_path)) return 1;
+  strcpy(addr.sun_path, path);
+  int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (listener < 0) return 1;
+  /* Parent directory is created with mode 0700 by the panel. Never unlink
+   * an existing endpoint here (another broker might own it). */
+  if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+      chmod(path, 0600) < 0 || listen(listener, BROKER_PEERS) < 0) {
+    fprintf(stderr, "CA broker: cannot bind private socket: %s\n", strerror(errno));
+    close(listener); return 1;
+  }
+  int result = broker_loop(listener, NULL, host, port, deskey, user, password);
+  close(listener); unlink(path);
+  return result;
 }

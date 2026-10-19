@@ -36,6 +36,13 @@ int newcamd_send_ecm(newcamd_t *nc, uint16_t sid, uint16_t caid, uint32_t provid
                      const uint8_t *ecm, int ecm_len,
                      uint8_t even[8], uint8_t odd[8], int timeout_ms);
 
+/* Private IPC for panel service workers (not a public network protocol).
+ * -3 means the request deadline expired; the stream connection remains framed.
+ */
+newcamd_t *newcamd_connect_local(const char *path, char *err, size_t errlen);
+int newcamd_broker(const char *path, const char *host, int port,
+                  const uint8_t deskey[14], const char *user, const char *password);
+
 void newcamd_close(newcamd_t *nc);
 
 #endif /* NEWCAMD_H */

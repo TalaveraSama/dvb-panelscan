@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish verified v0.5.1 release
+        description: Publish verified v0.6.0 release
         type: boolean
         default: false
 permissions:
@@ -16,6 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev libdvbcsa-dev
+      - run: make -C dvb2m3u8 && make -C tbsstream
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: |
           make -C dvb2m3u8
@@ -26,9 +27,11 @@ jobs:
           /tmp/test-transport
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-newcamd tests/test_newcamd.c -lcrypto
           /tmp/test-newcamd
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-broker tests/test_broker.c -lcrypto
+          /tmp/test-broker
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-csa tests/test_csa.c tbsstream/csa.c -ldvbcsa
           /tmp/test-csa
-      - run: sh packaging/build-deb.sh 0.5.1
+      - run: sh packaging/build-deb.sh 0.6.0
       - run: |
           sudo apt-get install -y ./dist/*.deb
           sudo systemctl start dvb-panel
@@ -39,10 +42,10 @@ jobs:
           name: ubuntu-22.04-amd64
           path: dist/*.deb
       - name: Publish release
-        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.5.1'))
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.6.0'))
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
           sha256sum *.deb > SHA256SUMS
-          gh release create v0.5.1 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.5.1 · Continuidad TS y control de sesiones · Ubuntu" --notes-file ../RELEASE_NOTES.md
+          gh release create v0.6.0 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.6.0 · Multicanal por transpondedor y Newcamd compartido · Ubuntu" --notes-file ../RELEASE_NOTES.md

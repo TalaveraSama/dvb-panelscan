@@ -28,12 +28,16 @@ static void csa_set_key(struct dvbcsa_bs_key_s *key, const uint8_t cw[8])
 csa_t *csa_create(void)
 {
   csa_t *c = calloc(1, sizeof(*c));
+  if (!c) return NULL;
   c->cluster_size = (int)dvbcsa_bs_batch_size();
   if (c->cluster_size < 1) c->cluster_size = 1;
   c->batch_even = calloc((size_t)c->cluster_size + 1, sizeof(*c->batch_even));
   c->batch_odd  = calloc((size_t)c->cluster_size + 1, sizeof(*c->batch_odd));
   c->key_even = dvbcsa_bs_key_alloc();
   c->key_odd  = dvbcsa_bs_key_alloc();
+  if (!c->batch_even || !c->batch_odd || !c->key_even || !c->key_odd) {
+    csa_free(c); return NULL;
+  }
   return c;
 }
 
@@ -88,8 +92,8 @@ void csa_descramble(csa_t *c, uint8_t *ts, int npkts)
 void csa_free(csa_t *c)
 {
   if (!c) return;
-  dvbcsa_bs_key_free(c->key_even);
-  dvbcsa_bs_key_free(c->key_odd);
+  if (c->key_even) dvbcsa_bs_key_free(c->key_even);
+  if (c->key_odd) dvbcsa_bs_key_free(c->key_odd);
   free(c->batch_even);
   free(c->batch_odd);
   free(c);

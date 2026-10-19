@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-VERSION=${1:-0.5.1}
+VERSION=${1:-0.6.0}
 ARCH=$(dpkg --print-architecture)
 ROOT=$(pwd)
 DEST="$ROOT/dist/dvb-panelscan_${VERSION}_${ARCH}"

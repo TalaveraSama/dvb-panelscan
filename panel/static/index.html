@@ -28,7 +28,7 @@
           <h2 id="pageTitle">Vista general</h2>
           <p>Administra tu señal. Conecta, escanea y distribuye.</p>
         </div>
-        <span class="version">v0.5.1 <span>● Sistema local</span></span>
+        <span class="version">v0.6.0 <span>● Sistema local</span></span>
       </div>
       <div
         id="notice"
@@ -249,7 +249,7 @@
             /></label>
             <label
               >HTTP puerto (0 = solo panel)
-              <input id="st_http" type="number" value="9981"
+              <input id="st_http" type="number" value="0"
             /></label>
             <button type="submit" class="btn primary" id="stStart">
               Iniciar
@@ -259,12 +259,12 @@
             </button>
           </form>
           <div class="callout">
-            Un canal por adaptador. Si solo abre el canal iniciado manualmente,
-            pulsa «Detener este canal» para liberar el tuner antes de abrir otro
-            desde el M3U. Cierra también el reproductor anterior. El inicio
-            manual fija la sesión aunque marque 0 clientes del panel; la URL
-            directa :9981 puede tener clientes no contados aquí. No es HLS y los
-            bytes TS no certifican descifrado.
+            Multicanal: varios servicios del mismo transpondedor comparten una
+            sola captura por adaptador. Transpondedores distintos requieren
+            adaptadores distintos. El inicio manual fija solo ese canal; detenerlo
+            no interrumpe los demás. Usa puerto 0 para las URLs del panel, o un
+            puerto directo distinto por canal. Los clientes directos no se cuentan
+            aquí. No es HLS y los bytes TS no certifican descifrado.
           </div>
           <div class="adapters" id="stInfo" aria-live="polite"></div>
         </section>

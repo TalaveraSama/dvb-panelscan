@@ -20,6 +20,21 @@ Es un reensamblado del código de TVHeadend: el **protocolo newcamd** está
 portado de `src/descrambler/cwc.c`, el **CSA** de `src/descrambler/tvhcsa.c`
 (vía libdvbcsa), y la sintonización/demux de `dvb2m3u8`.
 
+## Roles multicanal usados por el panel (0.6.0)
+
+- `--mux-only --stdout`: sintoniza y entrega todo el multiplex, sin CA ni remux.
+- `--stdin --sid N --stdout --cam-socket PATH`: procesa un servicio desde stdin,
+  sin abrir ningún dispositivo DVB; genera PAT/PMT propias y descifra con su CSA.
+- `--ca-broker PATH --newcamd HOST:PORT --deskey ... --user ... --pass ...`:
+  endpoint UNIX privado y una conexión Newcamd para varios servicios, con ECM
+  pendientes correlacionados por secuencia y deadline individual de 5000 ms.
+
+El panel administra el reparto, las suscripciones y la limpieza. Varias URLs de
+un mismo mux comparten captura y broker; los ejemplos CLI monolíticos de abajo
+siguen disponibles, pero no deben ejecutarse en paralelo sobre un mismo tuner.
+Ver [arquitectura y pruebas](../docs/MULTICHANNEL.md). La cola CW es ahora de
+65536 paquetes por servicio; la aplicación temporal completa de CW sigue pendiente.
+
 ## Dependencias
 
 - Linux con headers DVB (`linux/dvb/*`).
@@ -90,19 +105,19 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
 5. **CSA**: descifra los paquetes con bit de scrambling usando libdvbcsa
    (port de `tvhcsa.c`). Los paquetes scrambled que llegan **antes** de tener la
    CW se **guardan en una cola** y se descifran en orden cuando llega la clave
-   (evita cortes al inicio y en el cambio de clave).
+   (espera acotada; no garantiza evitar cortes en los cambios de clave).
 6. **Remux**: genera PAT y PMT **limpios** (sin descriptores CA) y los inyecta
    periódicamente; reenvía los ES descifrados y descarta los ECM.
 7. **Salida**: UDP (con `sendto`) y HTTP (ring buffer + servidor mínimo).
 
-## Avisos importantes (0.5.1)
+## Avisos importantes (0.6.0)
 
 - Compilación y regresiones con ASan/UBSan verificadas en Ubuntu mediante
   Actions. Falta validación end-to-end de esta versión con hardware y acceso
   condicional autorizados.
 - Un servicio por proceso. La cola guarda en orden todos los paquetes del
   servicio, incluido PCR/audio claros, mientras espera una CW. Su límite es
-  4096 paquetes; un desbordamiento se registra y contabiliza.
+  65536 paquetes; un desbordamiento se registra y contabiliza.
 - CSA descifra en lotes de hasta 64 paquetes disponibles. No se añade espera
   para llenar el lote; se drena al terminar cada lectura y durante pausas DVR.
 - No se implementa el seguimiento temporal completo de generaciones de CW

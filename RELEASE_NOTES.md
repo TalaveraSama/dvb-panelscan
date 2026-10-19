@@ -1,42 +1,81 @@
-## DVB PanelScan 0.5.1 · Continuidad TS y cambio de canal
+## DVB PanelScan 0.6.0 · Multicanal por transpondedor y Newcamd compartido
 
-Correcciones verificadas por pruebas, no una garantía de resolver todos los tirones en hardware real.
+### Varios canales simultáneos
 
-### Sesiones
+- Una sola captura DVB por adaptador/transpondedor, compartida por varios SID.
+- Un worker independiente por canal para demux, CSA, claves y colas. Los workers
+  reciben TS por stdin y **no vuelven a sintonizar** el adaptador.
+- Varios espectadores del mismo canal siguen compartiendo worker. Detener un
+  canal no detiene los demás; captura y broker cierran al salir su último usuario.
+- Diferentes transpondedores pueden trabajar simultáneamente en adaptadores
+  distintos. Se mantiene 409 si se intenta cambiar de transpondedor o escanear un
+  adaptador con canales activos; no se interrumpe su recepción.
+- Mux de 32 MiB y salida de 8 MiB por servicio, acotados. Un feeder o reproductor
+  rezagado no bloquea a otros servicios; el fallo se informa, no se oculta.
 
-- Botón **Detener este canal** y parada individual mediante `POST /api/stream/stop` con `{"channel_id":"<tp>:<sid>"}`. Sin channel_id se mantiene Detener todas.
-- El error 409 identifica el adaptador, el canal que lo ocupa y si es una sesión manual fija. Una sesión manual del SID 672 impide abrir otro SID en ese tuner hasta detenerla, aunque marque cero clientes del panel. Clientes del puerto directo 9981 no se cuentan como suscriptores del panel.
-- Se mantiene un SID por adaptador: no se promete multicanal por mux ni se reasignan tuners sin conocer sus conexiones de antena.
+### Newcamd compartido
 
-### Continuidad
+- Un broker por configuración, compartido entre servicios y adaptadores, con una
+  sola conexión upstream y múltiples ECM pendientes (hasta 256 workers).
+- SID/CAID/proveedor y secuencia conservados; las respuestas fuera de orden se
+  envían al worker correcto. Caché positiva de un segundo para retransmisiones
+  idénticas del mismo worker, no una caché global por SID.
+- Deadline individual de 5000 ms en lugar de 1500 ms. Un deadline devuelve -3 y
+  **no reconecta la conexión compartida**, ni bloquea los ECM de los otros canales.
+  Respuestas tardías se ignoran. Un NOK devuelve -2. Un error real de transporte
+  puede afectar a todos los servicios del broker y provoca reconexión bajo demanda.
+- Indicadores de CW invalidados en el servicio que falla; no se promete conservar
+  una clave antigua indefinidamente. Cola de espera ampliada a 65536 paquetes
+  (~12 MB) por servicio, con descartes explícitos si se llena. El mayor límite no
+  impone una pausa de arranque ni garantiza soportar cualquier bitrate/espera.
+- Socket UNIX privado (directorio 0700, socket 0600); credenciales solo en argv del
+  broker, no en los workers ni en el capturador. Keepalive de 30 segundos.
 
-- Cola ordenada del servicio completo (vídeo, audio y PCR), no solo los paquetes cifrados. No se adelantan paquetes claros a otros que esperan CW.
-- Descrambling CSA en lotes de hasta 64 paquetes disponibles por lectura; una clave no disponible bloquea el prefijo pendiente en lugar de descartarlo al llegar otra paridad.
-- Desbordamiento de cola acotado y contabilizado, sin crecimiento ilimitado.
-- Deduplicación exacta de ECM todavía en cola; se conservan ECM diferentes y siguen siendo posibles los reintentos.
-- Solicitud de buffer demux de 4 MiB cuando el driver lo permite, lecturas DVR más grandes y drenaje de cola en pausas de lectura.
-- Logs `TS stats` cada 5 segundos con TEI, saltos CC, descartes de servicio, cola y descartes ECM, lotes y paquetes CSA. Las métricas TEI/CC corresponden al TS de entrada completo, no solo al canal seleccionado.
-- Logs de tiempo de respuesta ECM y resultado, sin imprimir credenciales ni CW.
+### Panel y diagnóstico
 
-### Tvheadend y HLS
+- Estado con PID del worker, PID de captura compartida, PID/estado del broker,
+  cola de mux y error del feeder. El formulario manual usa puerto 0 (solo panel).
+- Para salida HTTP directa, utilizar un puerto distinto por canal. Las URLs del
+  M3U/panel no necesitan puertos extra. Clientes directos no se cuentan aquí.
+- Registros separados de canal, mux y Newcamd desde Streaming:
+  `stream-<adapter>-<SID>.log`, `mux-<adapter>.log`, `ca.log`.
+- Se conservan TP:SID, M3U/XMLTV, paradas individuales y sesiones manuales fijas.
 
-La ruta oficial revisada `profile=pass` usa suscripción, cola, muxer y TS continuo. Su M3U de canales no es un manifiesto HLS segmentado. Esta versión **no añade HLS**: un empaquetador HLS podría amortiguar jitter a costa de latencia, pero no recupera paquetes perdidos ni corrige claves aplicadas en un período equivocado. Ver docs/TVHEADEND_STREAMING_REVIEW.md.
-
-### Actualizar Ubuntu amd64
+### Actualizar Ubuntu 22.04 amd64
 
 ```sh
-wget -O /tmp/dvb-panelscan_0.5.1_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.5.1/dvb-panelscan_0.5.1_amd64.deb
+wget -O /tmp/dvb-panelscan_0.6.0_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.6.0/dvb-panelscan_0.6.0_amd64.deb
 sudo systemctl stop dvb-panel
-sudo apt install /tmp/dvb-panelscan_0.5.1_amd64.deb
+sudo apt install /tmp/dvb-panelscan_0.6.0_amd64.deb
 sudo systemctl start dvb-panel
 ```
 
-Datos y overrides systemd se conservan. Recargar el dashboard con Ctrl+F5, cerrar VLC anterior y detener la sesión manual fija antes de probar otro SID del M3U. Nuevos registros siguen en `/var/lib/dvb-panelscan/stream-<adapter>-<SID>.log`.
+Se conservan los datos y overrides de systemd. Cerrar reproductores antiguos y
+recargar el panel con Ctrl+F5. Abrir dos canales del mismo transpondedor en dos
+reproductores sin cerrar el primero: deben tener el mismo `mux_pid` y `ca_pid`,
+pero distinto `pid`. Detener uno y comprobar que el otro continúa. Repetir con
+otro transpondedor/adapter: distinto `mux_pid`, mismo `ca_pid` si comparte CA.
+No es necesario volver a escanear si la lista guardada es correcta.
 
 ### Pruebas y límites
 
-19 pruebas Python/HTTP, incluyendo parar el canal fijado y abrir otro sin afectar otro adaptador. Regresiones C con ASan/UBSan: orden de audio/PCR al esperar claves, dos paridades, lote CSA de 64 paquetes con comparación del payload descifrado, cola llena, contadores TEI/CC y las pruebas anteriores de demux/PSI/framing/transporte. Instalación/arranque en Ubuntu 22.04 amd64 mediante Actions.
+28 pruebas Python/HTTP, incluyendo concurrencia, refcounts, limpieza, aislamiento
+ante worker detenido, dos canales sobre una captura y dos adaptadores. Integración
+con multiplex sintético de dos servicios, broker y workers C **reales**: separación
+de PIDs, PAT con CRC y parada independiente. Regresiones C con ASan/UBSan para
+CSA, demux, transporte y Newcamd. Nueva prueba de broker con upstream cifrado
+simulado: solicitudes simultáneas, respuestas fuera de orden, caché, deadline,
+CW tardía y NOK sin reconectar los otros servicios. Actions también verifica el
+paquete mediante instalación y arranque del servicio en Ubuntu 22.04 amd64.
 
-No se ha validado esta versión end-to-end con hardware DVB del usuario. Sigue pendiente el seguimiento temporal completo de generaciones CW, selección CAID/proveedor en simulcrypt y EMM. Recibir una CW no demuestra que el vídeo sea válido. Tampoco se incluyen HLS, transcodificación, varios SID simultáneos en un tuner ni reparación artificial de PCR/PTS/CC.
+**Sin validación en la TBS del usuario ni benchmark de todos sus canales.**
+La arquitectura reparte el mux completo a cada worker, no es todavía el demux
+central por PID de Tvheadend. El servidor CA debe autorizar y poder atender los
+servicios simultáneos. Se activan bajo demanda o manualmente, no todos al escanear.
 
-El panel continúa sin autenticación: no exponer a Internet. Las credenciales en argv son visibles al administrador del host. Los logs aún no tienen rotación automática.
+No se garantiza que desaparezcan todos los tirones. Siguen pendientes la gestión
+temporal completa de generaciones CW, muestreo de paridad inicial, selección
+avanzada de CAID/simulcrypt y EMM. No hay HLS, transcodificación ni reparación
+artificial de PCR/PTS/CC. Los bytes TS/CW no certifican vídeo válido. El panel
+sigue sin autenticación y los logs sin rotación: usar solo en red confiable o
+tras un proxy seguro. Ver `docs/MULTICHANNEL.md` para arquitectura y prueba TBS.

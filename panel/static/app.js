@@ -329,11 +329,15 @@ async function loadStream() {
     <div class="adapter">
       <strong>${esc(session.channel_id)}</strong> · adaptador ${esc(session.adapter)}
       <span class="${session.running ? "ok" : "err"}">${session.running ? "● Activo" : "○ Finalizado"}</span><br>
+      Mux PID ${esc(session.mux_pid)} · CA PID ${esc(session.ca_pid || "—")}<br>
       ${esc(session.clients)} clientes · ${session.pinned ? "Inicio manual" : "Bajo demanda"} ·
       TS recibido: ${(session.bytes_received / 1048576).toFixed(2)} MiB ·
       Cola: ${Math.round(session.queue_bytes / 1024)} KiB · Clientes lentos: ${esc(session.slow_clients)}<br>
+      ${session.input_error ? `<span class="err">${esc(session.input_error)}</span><br>` : ""}
       <a class="btn small" href="/stream/channel/${encodeURIComponent(session.channel_id)}?profile=pass" target="_blank">URL TS</a>
-      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}" target="_blank">Ver registro</a>
+      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}" target="_blank">Registro del canal</a>
+      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}&scope=mux" target="_blank">Registro del mux</a>
+      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}&scope=ca" target="_blank">Registro Newcamd</a>
       <button class="btn small danger" data-stop-channel="${esc(session.channel_id)}">Detener este canal</button>
     </div>`,
         )
@@ -345,7 +349,7 @@ async function loadStream() {
       button.addEventListener("click", async () => {
         if (
           !confirm(
-            "¿Desconectar clientes y liberar el adaptador de " +
+            "¿Detener solo este canal y desconectar sus clientes: " +
               button.dataset.stopChannel +
               "?",
           )
@@ -368,7 +372,7 @@ async function loadStream() {
 }
 async function startStream(e) {
   e.preventDefault();
-  if (!confirm("¿Iniciar sesión manual? Se reserva un canal por adaptador."))
+  if (!confirm("¿Fijar este canal? Puede compartir el adaptador con otros canales del mismo transpondedor."))
     return;
   const r = await postJSON("/api/stream/start", {
     sid: $("st_sid").value ? Number($("st_sid").value) : null,

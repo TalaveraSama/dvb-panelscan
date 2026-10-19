@@ -7,6 +7,24 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
+## Actual: 0.6.0 · Multicanal por transpondedor
+
+El panel recibe **una sola vez cada transpondedor por adaptador** y abre varios
+canales simultáneamente, con worker/colas/claves independientes por servicio.
+Varios espectadores del mismo canal comparten worker. Un broker Newcamd por
+configuración comparte conexión entre canales y adaptadores y correlaciona ECM
+con CW por secuencia, sin bloquear los demás servicios por un timeout individual.
+
+Usar las URLs del M3U en varios reproductores a la vez. El formulario manual usa
+puerto **0** (solo panel); salidas directas adicionales necesitan puertos distintos.
+Detener un canal no detiene los otros del mismo mux. Transpondedores diferentes
+siguen necesitando adaptadores diferentes; un escaneo no interrumpe streaming.
+
+Ver [arquitectura, límites y prueba TBS](docs/MULTICHANNEL.md) y
+[instalación/notas actuales](RELEASE_NOTES.md). Las secciones de versiones 0.4/0.5
+más abajo son históricas: su límite de un SID por adaptador ya no aplica al panel
+0.6.0. No se promete eliminar todos los tirones ni se incluye HLS.
+
 ## Componentes
 
 | Carpeta | Descripción |
@@ -110,14 +128,14 @@ no devuelve estos argumentos en el estado del streaming.
    predeterminada. Usar **Comprobar conexión TCP**: solo valida conectividad,
    no autenticación ni permisos de tarjeta.
 2. Elegir transponder y **SID** del canal en Streaming; vacío selecciona el primer
-   servicio de PAT. La salida es **un servicio**, no todos los canales del mux.
-3. Revisar `/var/lib/dvb-panelscan/stream.log` y los logs de OSCam. El cliente
+   servicio de PAT. Cada URL entrega **un servicio**; se pueden abrir varias simultáneamente.
+3. Revisar los registros de canal, mux y Newcamd desde Streaming y los logs de OSCam. El cliente
    completa login + solicitud de datos de tarjeta; `CW actualizada` indica una
    respuesta ECM válida, no una comprobación visual del vídeo.
 4. Confirmar CAID, lector activo y autorización de la cuenta. En simulcrypt se
    selecciona el primer descriptor CA: la selección explícita por CAID/proveedor
-   sigue pendiente. La reconexión TCP/login usa espera
-   progresiva (1–30 s) y descarta ECM en cola después de un fallo de transporte. No se implementan EMM ni renovación de derechos de tarjeta.
+   sigue pendiente. El panel usa ahora el broker compartido descrito arriba.
+   No se implementan EMM ni renovación de derechos de tarjeta.
 
 Corregido en esta versión: ECM cortas descartadas por exigir CRC de sección
 larga; envío ECM truncado; PID ECM inicializado a -1 pero comparado con cero;
