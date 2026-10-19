@@ -29,7 +29,7 @@
           <h2 id="pageTitle">Vista general</h2>
           <p>Administra tu señal. Conecta, escanea y distribuye.</p>
         </div>
-        <span class="version">v0.8.1 <span>● Sistema local</span></span>
+        <span class="version">v0.8.2 <span>● Sistema local</span></span>
       </div>
       <div
         id="notice"
@@ -192,17 +192,31 @@
                 value="1"
                 required
               /> </label
-            ><button class="btn" type="submit">Guardar período EPG</button>
+            ><label
+              >Desfase horario UTC (horas)
+              <input
+                id="epgUtcOffset"
+                type="number"
+                min="-12"
+                max="14"
+                step="0.25"
+                value="0"
+                required
+              /> </label
+            ><button class="btn" type="submit">Guardar ajustes EPG</button>
             <button class="btn" type="button" id="epgRefresh">
               Actualizar vista
             </button>
             <span id="epgSettingsInfo" class="muted" role="status"></span>
           </form>
           <p class="callout">
-            De 1 a 14 días de programación recibida por EIT. Se guarda en disco
-            y sobrevive al reinicio. Depende de lo que emita el satélite: no se
-            inventan programas ni horarios. Se actualiza al escanear o mientras
-            el transpondedor esté recibiéndose; no resintoniza otros canales.
+            Horario: Nicaragua UTC −6; UTC 0 conserva la hora universal. Este
+            ajuste cambia la presentación y el huso de XMLTV, no el reloj del
+            servidor ni las horas reales de emisión. De 1 a 14 días de
+            programación recibida por EIT. Se guarda en disco y sobrevive al
+            reinicio. Depende de lo que emita el satélite: no se inventan
+            programas ni horarios. Se actualiza al escanear o mientras el
+            transpondedor esté recibiéndose; no resintoniza otros canales.
           </p>
           <div class="table-wrap">
             <table>

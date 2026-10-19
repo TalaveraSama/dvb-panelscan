@@ -1,3 +1,20 @@
+## DVB PanelScan 0.8.2 · Desfase horario UTC configurable
+
+- Casilla en Canales y EPG: desfase UTC en horas, de −12 a +14, pasos de 0,25.
+  Nicaragua: −6. Valor inicial 0 (UTC) para conservar compatibilidad.
+- Ajuste persistente en epg.json, compartido entre navegadores y conservado al
+  cambiar el número de días. API: utc_offset_minutes, entero validado.
+- Vista Programas usa el desfase elegido, independiente del huso del navegador.
+- XMLTV exporta horas locales con sufijo correcto (−0600 para Nicaragua), sin
+  modificar los instantes UTC guardados, la retención ni la hora del servidor.
+- Un desfase fijo no calcula horario de verano automáticamente.
+- El diagnóstico comunicado confirma EPG activo: 42 eventos guardados, 665
+  eventos parseados y CRC sin errores; esto no indica un fallo de recepción.
+- 59 pruebas Python/HTTP, interfaz DOM y validación de persistencia, rangos,
+  UTC−6 y conservación del instante real del programa.
+
+---
+
 ## DVB PanelScan 0.8.1 · Logos locales y diagnóstico de EPG vacío
 
 - Descarga e incluye 12 logos identificados del listado comunicado, con coincidencias

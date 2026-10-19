@@ -306,6 +306,7 @@ class EPGStore:
         self.path = path
         self.clock = clock
         self.days = 1
+        self.utc_offset_minutes = 0
         self.channels = {}
         self.count = 0
         self.lock = threading.RLock()
@@ -318,6 +319,9 @@ class EPGStore:
             with open(path, encoding="utf-8") as source:
                 saved = json.load(source)
             self.days = self.validate_days(saved.get("days", 1))
+            self.utc_offset_minutes = self.validate_offset(
+                saved.get("utc_offset_minutes", 0)
+            )
             for channel, events in saved.get("channels", {}).items():
                 for event in events.values():
                     self.put(channel, event)
@@ -398,10 +402,27 @@ class EPGStore:
             if not events:
                 del self.channels[channel]
 
-    def set_days(self, days):
+    @staticmethod
+    def validate_offset(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not -720 <= value <= 840
+            or value % 15
+        ):
+            raise ValueError(
+                "Desfase UTC inválido: de -12 a +14 horas, en pasos de 15 minutos"
+            )
+        return value
+
+    def set_days(self, days, utc_offset_minutes=None):
         days = self.validate_days(days)
+        if utc_offset_minutes is not None:
+            utc_offset_minutes = self.validate_offset(utc_offset_minutes)
         with self.lock:
             self.days = days
+            if utc_offset_minutes is not None:
+                self.utc_offset_minutes = utc_offset_minutes
             self._prune()
             self.dirty = True
             self.generation += 1
@@ -416,6 +437,7 @@ class EPGStore:
                 generation = self.generation
                 data = {
                     "days": self.days,
+                    "utc_offset_minutes": self.utc_offset_minutes,
                     "channels": {
                         c: dict(events) for c, events in self.channels.items()
                     },

@@ -94,3 +94,21 @@ explícitas por nombre, sin aproximación para canales desconocidos. Un logo man
 tiene prioridad; vaciar el campo lo desactiva. XMLTV exporta `<icon src="...">` y
 M3U `tvg-logo`, con URL del panel, independientemente del servidor de streaming.
 Fuentes y condiciones en `/static/LOGOS-SOURCES.txt`; marcas de sus titulares.
+
+## Desfase horario UTC (0.8.2)
+
+En Canales y EPG hay una casilla **Desfase horario UTC (horas)**. Nicaragua: −6.
+Guardar junto con los días. Se conserva al reiniciar, es global para todos los
+canales y sustituye el uso implícito del huso del navegador en la vista Programas.
+Valor inicial 0 por compatibilidad. Rango de −12 a +14 con pasos de 0,25 horas;
+permite UTC+05:30 y +05:45. No calcula cambios estacionales automáticamente.
+
+API GET/POST `/api/epg/settings`: `{"days":2,"utc_offset_minutes":-360}`. Omitir
+el campo conserva la selección anterior; tipos/rangos inválidos no modifican los
+ajustes. GET `/api/epg/channel` devuelve también el desfase de presentación.
+
+XMLTV pasa de, por ejemplo, `20261019040000 +0000` a `20261018220000 -0600`:
+es el mismo instante, no un programa desplazado seis horas. Los timestamps
+almacenados siguen UTC, y la retención y selección de ahora/después no cambian.
+No se cambia el huso del sistema Linux. Si el proveedor enviase horarios incorrectos,
+este ajuste no los corrige ni elude la validación: es solo zona de presentación.

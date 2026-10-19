@@ -159,3 +159,24 @@ class ChannelSettingsTests(unittest.TestCase):
             self.assertEqual(reception['receivers'][0]['eit_packets'],0)
             self.assertEqual(reception['stored_events'],0)
         self.assertEqual(self.call('/api/epg/status')[1]['receivers'],[])
+
+    def test_utc_offset_persist_validation_and_xmltv_instant(self):
+        import datetime
+        import time
+        start=int(time.time())+3600
+        self.panel._epg.put('a:672',{'event_id':1,'start':start,'stop':start+3600,'title':'Real'})
+        self.assertEqual(self.call('/api/epg/settings',{'days':2,'utc_offset_minutes':-360})[0],200)
+        self.assertEqual(self.call('/api/epg/settings')[1]['utc_offset_minutes'],-360)
+        self.assertEqual(self.call('/api/epg/channel?channel=a:672')[1]['utc_offset_minutes'],-360)
+        stamp=datetime.datetime.fromtimestamp(start,datetime.timezone(datetime.timedelta(hours=-6))).strftime('%Y%m%d%H%M%S %z')
+        self.assertIn('start="'+stamp+'"',self.panel.build_xmltv())
+        self.assertEqual(self.panel._epg.events_for('a:672')[0]['start'],start)
+        restored=self.panel.EPGStore(self.panel._epg.path)
+        self.assertEqual(restored.utc_offset_minutes,-360)
+        self.assertEqual(restored.days,2)
+        for bad in (-721,841,True,'-360',1,None):
+            self.assertEqual(self.call('/api/epg/settings',{'days':7,'utc_offset_minutes':bad})[0],400)
+        self.assertEqual(self.panel._epg.days,2)
+        self.assertEqual(self.call('/api/epg/settings',{'days':3})[0],200)
+        self.assertEqual(self.panel._epg.utc_offset_minutes,-360)
+        self.assertEqual(self.call('/api/epg/settings',{'days':3,'utc_offset_minutes':345})[0],200)

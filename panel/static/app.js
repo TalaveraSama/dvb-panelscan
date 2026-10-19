@@ -244,6 +244,7 @@ async function loadEpg() {
   epg = await getJSON("/api/epg");
   const settings = await getJSON("/api/epg/settings");
   $("epgDays").value = settings.days;
+  $("epgUtcOffset").value = (settings.utc_offset_minutes || 0) / 60;
   $("epgSettingsInfo").textContent =
     `Ventana: próximos ${settings.days} día(s), según emisión`;
   if (!epg.some((tp) => (tp.services || []).some((s) => s.epg_events > 0))) {
@@ -290,10 +291,24 @@ $("epgSettingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const result = await postJSON("/api/epg/settings", {
     days: Number($("epgDays").value),
+    utc_offset_minutes: Number($("epgUtcOffset").value) * 60,
   });
   if (!result.ok) throw new Error(result.error);
   await loadEpg();
 });
+function formatEpgTime(seconds, offsetMinutes) {
+  const offset = offsetMinutes || 0;
+  const sign = offset < 0 ? "−" : "+";
+  const label = `UTC${sign}${String(Math.floor(Math.abs(offset) / 60)).padStart(2, "0")}:${String(Math.abs(offset) % 60).padStart(2, "0")}`;
+  return (
+    new Date((seconds + offset * 60) * 1000).toLocaleString(undefined, {
+      timeZone: "UTC",
+    }) +
+    " " +
+    label
+  );
+}
+
 $("epgScheduleClose").addEventListener("click", () => $("epgSchedule").close());
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-epg-channel]");
@@ -308,8 +323,10 @@ document.addEventListener("click", async (event) => {
       data.events
         .slice(0, 500)
         .map(
-          (e) => `<tr><td>${esc(new Date(e.start * 1000).toLocaleString())}</td>
-      <td>${esc(new Date(e.stop * 1000).toLocaleString())}</td><td>${esc(e.title || "Sin título")}</td><td>${esc(e.description)}</td></tr>`,
+          (
+            e,
+          ) => `<tr><td>${esc(formatEpgTime(e.start, data.utc_offset_minutes))}</td>
+      <td>${esc(formatEpgTime(e.stop, data.utc_offset_minutes))}</td><td>${esc(e.title || "Sin título")}</td><td>${esc(e.description)}</td></tr>`,
         )
         .join("") +
       `</tbody></table></div><p>Mostrando ${Math.min(500, data.events.length)} de ${data.events.length} eventos recibidos.</p>`

@@ -45,7 +45,7 @@ w.fetch = async (url, options={}) => {
 };
 const tick = () => new Promise(resolve=>setTimeout(resolve,10));
 (async () => {
-  w.eval(fs.readFileSync('panel/static/app.js','utf8') + '\nwindow.__testLoadStream = loadStream;');
+  w.eval(fs.readFileSync('panel/static/app.js','utf8') + '\nwindow.__testLoadStream = loadStream; window.__testFormatEpgTime = formatEpgTime;');
   await tick();
   assert.equal(w.document.querySelector('[data-health]').textContent,'ECM/CW continuas');
   assert(w.document.querySelector('[data-health]').classList.contains('ecm-ok'));
@@ -70,9 +70,11 @@ const tick = () => new Promise(resolve=>setTimeout(resolve,10));
   assert(!w.document.querySelector('.ecm-ok'));
   assert(w.document.querySelector('#epgBody [data-edit-channel="tp:672"]'));
   w.document.getElementById('epgDays').value='7';
+  w.document.getElementById('epgUtcOffset').value='-6';
   w.document.getElementById('epgSettingsForm').dispatchEvent(new w.Event('submit',{cancelable:true}));
   await tick();
-  assert(requests.some(([url,body])=>url==='/api/epg/settings' && body.days===7));
+  assert(requests.some(([url,body])=>url==='/api/epg/settings' && body.days===7 && body.utc_offset_minutes===-360));
+  assert.equal(w.__testFormatEpgTime(0, -360), new w.Date(-21600000).toLocaleString(undefined,{timeZone:'UTC'})+' UTC−06:00');
   assert.equal(sources.length,0);
   w.document.querySelector('[data-tab="events"]').click();
   assert.equal(sources.length,1);

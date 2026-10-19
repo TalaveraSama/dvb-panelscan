@@ -377,8 +377,10 @@ def build_xmltv(tid=None, base_url=""):
     """XMLTV (EPG) para XUI.one / Xtream Codes (xcode)."""
     import datetime
 
+    zone = datetime.timezone(datetime.timedelta(minutes=_epg.utc_offset_minutes))
+
     def fmt(dt):
-        return dt.strftime("%Y%m%d%H%M%S %z")
+        return dt.astimezone(zone).strftime("%Y%m%d%H%M%S %z")
 
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<tv generator-info-name="Mini DVB-Scan">']
@@ -587,11 +589,11 @@ class Handler(BaseHTTPRequestHandler):
                                    "receivers": [dict(collector.status(), adapter=adapter)
                                                  for adapter, collector in receivers if isinstance(collector, EITCollector)]})
         if path == "/api/epg/settings":
-            return self._send(200, {"days": _epg.days, "max_days": 14})
+            return self._send(200, {"days": _epg.days, "max_days": 14, "utc_offset_minutes": _epg.utc_offset_minutes})
         if path == "/api/epg/channel":
             try:
                 tp, sid = resolve_channel(qs.get("channel", [""])[0])
-                return self._send(200, {"days": _epg.days, "events": _epg.events_for(channel_id(tp, sid))})
+                return self._send(200, {"days": _epg.days, "utc_offset_minutes": _epg.utc_offset_minutes, "events": _epg.events_for(channel_id(tp, sid))})
             except StreamError as error:
                 return self._send(error.status, {"error": str(error)})
         if path == "/api/epg":
@@ -720,8 +722,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/epg/settings":
             try:
-                _epg.set_days(body.get("days"))
-                return self._send(200, {"ok": True, "days": _epg.days})
+                if "utc_offset_minutes" in body and body["utc_offset_minutes"] is None:
+                    raise ValueError("Desfase UTC requerido")
+                _epg.set_days(body.get("days"), body.get("utc_offset_minutes"))
+                return self._send(200, {"ok": True, "days": _epg.days, "utc_offset_minutes": _epg.utc_offset_minutes})
             except (ValueError, TypeError) as error:
                 return self._send(400, {"ok": False, "error": str(error)})
             except OSError:

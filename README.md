@@ -7,7 +7,14 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.8.1 · Logos locales y diagnóstico EPG
+## Actual: 0.8.2 · Horario UTC configurable
+
+En **Canales y EPG**, poner **−6** en Desfase horario UTC para Nicaragua y guardar.
+La vista de programas y XMLTV usan ese huso sin alterar los instantes recibidos,
+la retención ni el reloj del servidor. De −12 a +14 horas, pasos de 15 minutos.
+El valor inicial es UTC 0; no se aplica horario de verano automáticamente.
+
+### Logos locales y diagnóstico EPG (0.8.1)
 
 Incluye 12 logos del listado comunicado, con asignación explícita por nombre,
 prioridad a logos personalizados y exportación de iconos XMLTV/M3U. Los canales
