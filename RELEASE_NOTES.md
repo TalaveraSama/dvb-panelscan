@@ -1,3 +1,24 @@
+## DVB PanelScan 0.8.3 · Referencia estable y empaquetado consolidado
+
+Base funcional: 0.8.2, confirmada por el usuario en TBS real. Sin funciones nuevas
+ni cambios al motor multicanal, perfiles, EPG, logos o interpretación de horarios.
+
+- VERSION centraliza paquete, interfaz, API y publicación; BUILD_INFO incluye commit.
+- Paquete incluye los documentos de operación y versiones, fuentes de logos,
+  Installed-Size y manifiesto md5sums de todos los archivos instalados.
+- Staging limpio por versión, validación del artefacto Debian antes de instalar,
+  dependencias de instalación explícitas y recarga systemd tras desinstalación.
+- CI instala y reinstala verificando conservación de EPG, UTC−6, período y un
+  override local de systemd. No se empaquetan datos ni credenciales del usuario.
+- Publicación con .deb, SHA256SUMS y BUILD_INFO.txt, marcada como latest.
+- 60 pruebas Python/HTTP, DOM, integraciones C, sanitizadores y validación Debian.
+
+Plataforma: Ubuntu 22.04 amd64. Ver docs/RELEASING.md para próximos cambios,
+versiones, actualización y vuelta a una base. Esto no declara soporte LTS ni
+fusiona automáticamente el PR abierto.
+
+---
+
 ## DVB PanelScan 0.8.2 · Desfase horario UTC configurable
 
 - Casilla en Canales y EPG: desfase UTC en horas, de −12 a +14, pasos de 0,25.

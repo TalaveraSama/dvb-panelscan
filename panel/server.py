@@ -29,6 +29,11 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VERSION_PATH = os.path.join(BASE_DIR, "VERSION")
+if not os.path.isfile(VERSION_PATH):
+    VERSION_PATH = os.path.join(BASE_DIR, "..", "VERSION")
+with open(VERSION_PATH, encoding="ascii") as _version_file:
+    VERSION = _version_file.read().strip()
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 with open(os.path.join(STATIC_DIR, "logos.json"), encoding="utf-8") as _logos_file:
     LOGOS = json.load(_logos_file)
@@ -544,7 +549,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         ext = os.path.splitext(path)[1].lower()
         with open(path, "rb") as f:
-            self._send(200, f.read(), MIME.get(ext, "application/octet-stream"))
+            content = f.read()
+            if path == os.path.join(STATIC_DIR, "index.html"):
+                content = content.replace(b"@VERSION@", VERSION.encode("ascii"))
+            self._send(200, content, MIME.get(ext, "application/octet-stream"))
 
     def _read_body(self):
         try:
@@ -573,7 +581,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/status":
             return self._send(200, {
-                "platform": platform.system(), "linux": is_linux(),
+                "version": VERSION, "platform": platform.system(), "linux": is_linux(),
                 "dvb2m3u8": find_dvb2m3u8(_cfg["dvb2m3u8"]),
                 "tbsstream": find_tbsstream(_cfg["tbsstream"]),
                 "adapters": list_adapters() if is_linux() else [],

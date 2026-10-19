@@ -7,7 +7,14 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.8.2 · Horario UTC configurable
+## Actual: 0.8.3 · Referencia estable
+
+Consolidación de la base 0.8.2 confirmada por el usuario en TBS real, sin cambios
+funcionales. Paquete Ubuntu 22.04 amd64 verificado, documentación incluida y
+comprobación de conservación de configuración al reinstalar. VERSION centraliza
+el número para paquete, panel y CI. Ver [proceso de versiones](docs/RELEASING.md).
+
+### Horario UTC configurable (0.8.2)
 
 En **Canales y EPG**, poner **−6** en Desfase horario UTC para Nicaragua y guardar.
 La vista de programas y XMLTV usan ese huso sin alterar los instantes recibidos,

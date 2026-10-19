@@ -180,3 +180,11 @@ class ChannelSettingsTests(unittest.TestCase):
         self.assertEqual(self.call('/api/epg/settings',{'days':3})[0],200)
         self.assertEqual(self.panel._epg.utc_offset_minutes,-360)
         self.assertEqual(self.call('/api/epg/settings',{'days':3,'utc_offset_minutes':345})[0],200)
+
+    def test_version_matches_runtime_and_html(self):
+        version=Path('VERSION').read_text().strip()
+        self.assertEqual(self.call('/api/status')[1]['version'],version)
+        with urllib.request.urlopen(self.base) as response:
+            page=response.read().decode()
+        self.assertIn('v'+version,page)
+        self.assertNotIn('@VERSION@',page)

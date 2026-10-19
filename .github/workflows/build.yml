@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish verified v0.8.2 release
+        description: Publish verified version from VERSION
         type: boolean
         default: false
 permissions:
@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
+      - name: Read package version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
       - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev libdvbcsa-dev
       - run: make -C dvb2m3u8 && make -C tbsstream
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -37,21 +39,37 @@ jobs:
           /tmp/test-broker
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-csa tests/test_csa.c tbsstream/csa.c -ldvbcsa
           /tmp/test-csa
-      - run: sh packaging/build-deb.sh 0.8.2
+      - run: sh packaging/build-deb.sh
+      - run: python3 packaging/check-deb.py dist/*.deb
       - run: |
           sudo apt-get install -y ./dist/*.deb
           sudo systemctl start dvb-panel
           curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/api/status
+          curl --fail -H 'Content-Type: application/json' -d '{"days":2,"utc_offset_minutes":-360}' http://127.0.0.1:8081/api/epg/settings
+          sudo systemctl stop dvb-panel
+          sudo mkdir -p /etc/systemd/system/dvb-panel.service.d
+          echo '# Preserve local service override' | sudo tee /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf
+          sudo sha256sum /var/lib/dvb-panelscan/epg.json /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf > /tmp/upgrade-state.sha256
+          sudo apt-get install -y --reinstall ./dist/*.deb
+          sudo sha256sum -c /tmp/upgrade-state.sha256
+          sudo systemctl start dvb-panel
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/api/epg/settings > /tmp/settings.json
+          python3 -c 'import json; s=json.load(open("/tmp/settings.json")); assert s["days"]==2 and s["utc_offset_minutes"]==-360'
           sudo systemctl stop dvb-panel
       - uses: actions/upload-artifact@v4
         with:
           name: ubuntu-22.04-amd64
           path: dist/*.deb
       - name: Publish release
-        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.8.2'))
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            case "$HEAD_MESSAGE" in "Release v${VERSION}:"*) ;; *) echo "Release prefix/version mismatch"; exit 1 ;; esac
+          fi
+          cp "dist/dvb-panelscan_${VERSION}_amd64/usr/share/doc/dvb-panelscan/BUILD_INFO.txt" dist/BUILD_INFO.txt
           cd dist
-          sha256sum *.deb > SHA256SUMS
-          gh release create v0.8.2 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.8.2 · EPG de varios días y perfiles por canal · Ubuntu" --notes-file ../RELEASE_NOTES.md
+          sha256sum *.deb BUILD_INFO.txt > SHA256SUMS
+          gh release create "v${VERSION}" *.deb SHA256SUMS BUILD_INFO.txt --latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v${VERSION} · DVB PanelScan · Ubuntu 22.04 amd64" --notes-file ../RELEASE_NOTES.md
