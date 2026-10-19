@@ -41,20 +41,24 @@ jobs:
           /tmp/test-csa
       - run: sh packaging/build-deb.sh
       - run: python3 packaging/check-deb.py dist/*.deb
-      - run: |
+      - env:
+          SMOKE_PASSWORD: ci-only-password-not-for-production
+        run: |
           sudo apt-get install -y ./dist/*.deb
+          sudo -u dvb-panel env SMOKE_PASSWORD="$SMOKE_PASSWORD" python3 -c 'import sys,os; sys.path.insert(0,"/usr/lib/dvb-panelscan"); from auth import AuthStore; AuthStore("/var/lib/dvb-panelscan/auth.json").set_admin("ci-admin",os.environ["SMOKE_PASSWORD"])'
           sudo systemctl start dvb-panel
-          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/api/status
-          curl --fail -H 'Content-Type: application/json' -d '{"days":2,"utc_offset_minutes":-360}' http://127.0.0.1:8081/api/epg/settings
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/login > /dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/status)" = 401
+          python3 packaging/smoke-auth.py configure
           sudo systemctl stop dvb-panel
           sudo mkdir -p /etc/systemd/system/dvb-panel.service.d
           echo '# Preserve local service override' | sudo tee /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf
-          sudo sha256sum /var/lib/dvb-panelscan/epg.json /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf > /tmp/upgrade-state.sha256
+          sudo sha256sum /var/lib/dvb-panelscan/auth.json /var/lib/dvb-panelscan/epg.json /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf > /tmp/upgrade-state.sha256
           sudo apt-get install -y --reinstall ./dist/*.deb
           sudo sha256sum -c /tmp/upgrade-state.sha256
           sudo systemctl start dvb-panel
-          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/api/epg/settings > /tmp/settings.json
-          python3 -c 'import json; s=json.load(open("/tmp/settings.json")); assert s["days"]==2 and s["utc_offset_minutes"]==-360'
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/login > /dev/null
+          python3 packaging/smoke-auth.py verify
           sudo systemctl stop dvb-panel
       - uses: actions/upload-artifact@v4
         with:

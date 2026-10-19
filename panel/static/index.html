@@ -19,7 +19,16 @@
         <a href="#" data-tab="m3u8">▷ &nbsp; Streaming</a>
         <a href="#" data-tab="events">≋ &nbsp; Eventos en vivo</a>
       </nav>
-      <div class="status-badge" id="statusBadge">cargando…</div>
+      <div class="sidebar-session">
+        <span class="eyebrow">ESPACIO DE ADMINISTRACIÓN</span
+        ><strong id="adminName">Administrador</strong>
+        <div class="status-badge" id="statusBadge">cargando…</div>
+        <button class="btn" id="securityOpen" type="button">
+          Seguridad y reproductores</button
+        ><button class="btn" id="logoutButton" type="button">
+          Cerrar sesión ↗
+        </button>
+      </div>
     </header>
 
     <main>
@@ -27,7 +36,9 @@
         <div>
           <div class="eyebrow">HEADEND / CENTRO DE CONTROL</div>
           <h2 id="pageTitle">Vista general</h2>
-          <p>Administra tu señal. Conecta, escanea y distribuye.</p>
+          <p>
+            Tu operación en tiempo real. Una señal, múltiples posibilidades.
+          </p>
         </div>
         <span class="version">v@VERSION@ <span>● Sistema local</span></span>
       </div>
@@ -429,6 +440,37 @@
           <button class="btn" type="button" id="chCancel">Cancelar</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="securityDialog">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">CONTROL DE ACCESO</div>
+          <h3>Reproducción privada</h3>
+        </div>
+        <button class="btn" id="securityClose" type="button">Cerrar</button>
+      </div>
+      <p>
+        VLC y otros clientes necesitan un token independiente del login. Quien
+        tenga estos enlaces puede ver canales y EPG, pero no administrar el
+        panel.
+      </p>
+      <p class="callout">
+        Generar otro token revoca los enlaces anteriores. No compartas estos
+        enlaces públicamente. Utiliza HTTPS o una VPN; el token no cifra el
+        tráfico.
+      </p>
+      <button class="btn primary" id="rotateMediaToken" type="button">
+        Revocar anteriores y generar enlaces
+      </button>
+      <div id="mediaLinks" class="hidden">
+        <label>Lista M3U privada<input id="privatePlaylist" readonly /></label
+        ><label>Guía XMLTV privada<input id="privateEpg" readonly /></label>
+        <p class="muted">
+          Copia y guarda estos enlaces ahora. El servidor conserva únicamente el
+          hash del token; no se puede volver a consultar.
+        </p>
+      </div>
+      <p id="securityInfo" role="status"></p>
     </dialog>
     <script src="/static/app.js"></script>
   </body>

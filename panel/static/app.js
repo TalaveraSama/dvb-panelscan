@@ -1,6 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+let csrfToken = "";
 
 function esc(s) {
   return String(s ?? "").replace(
@@ -13,6 +14,10 @@ function esc(s) {
 }
 async function getJSON(u) {
   const response = await fetch(u);
+  if (response.status === 401) {
+    window.location.replace("/login");
+    throw new Error("Sesión finalizada");
+  }
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
   return data;
@@ -20,10 +25,16 @@ async function getJSON(u) {
 async function postJSON(u, b) {
   const r = await fetch(u, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
     body: JSON.stringify(b || {}),
   });
-  return r.json();
+  if (r.status === 401) {
+    window.location.replace("/login");
+    throw new Error("Sesión finalizada");
+  }
+  const result = await r.json();
+  if (!r.ok) throw new Error(result.error || "Solicitud rechazada");
+  return result;
 }
 
 function typeTag(t) {
@@ -502,14 +513,9 @@ function renderSelects() {
 
 async function downloadM3u8(e) {
   e.preventDefault();
-  const tid = $("m3u_tp").value;
-  const base = $("m3u_base").value.trim();
-  const url =
-    "/api/playlist.m3u8?transponder=" +
-    tid +
-    "&base_url=" +
-    encodeURIComponent(base);
-  window.open(url, "_blank");
+  $("securityDialog").showModal();
+  $("securityInfo").textContent =
+    "Genera una lista privada para tu reproductor. Los enlaces conservan acceso sin una sesión de navegador.";
 }
 
 async function loadStream() {
@@ -726,6 +732,9 @@ $("toggleTpForm").addEventListener("click", () => {
 });
 
 (async () => {
+  const session = await getJSON("/api/auth/session");
+  csrfToken = session.csrf || "";
+  $("adminName").textContent = session.username || "Administrador";
   await loadStatus();
   await loadTransponders();
   await loadEpg();
@@ -764,5 +773,38 @@ $("ncTest").addEventListener("click", async () => {
     showError(e);
   } finally {
     b.disabled = false;
+  }
+});
+
+$("securityOpen").addEventListener("click", () =>
+  $("securityDialog").showModal(),
+);
+$("securityClose").addEventListener("click", () => $("securityDialog").close());
+$("logoutButton").addEventListener("click", async () => {
+  await postJSON("/api/auth/logout", {});
+  window.location.replace("/login");
+});
+$("rotateMediaToken").addEventListener("click", async () => {
+  if (
+    !confirm(
+      "¿Revocar todos los enlaces de reproducción anteriores y generar otros nuevos?",
+    )
+  )
+    return;
+  try {
+    const result = await postJSON("/api/auth/media-token", {});
+    $("privatePlaylist").value =
+      location.origin +
+      "/api/playlist.m3u8?token=" +
+      encodeURIComponent(result.token);
+    $("privateEpg").value =
+      location.origin +
+      "/api/epg.xml?token=" +
+      encodeURIComponent(result.token);
+    $("mediaLinks").classList.remove("hidden");
+    $("securityInfo").textContent =
+      "Enlaces generados. Los anteriores han sido revocados.";
+  } catch (error) {
+    showError(error);
   }
 });

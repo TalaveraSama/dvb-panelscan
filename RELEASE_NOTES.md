@@ -1,3 +1,26 @@
+## DVB PanelScan 0.9.0 · Login y panel renovado
+
+**Cambio de acceso:** después de actualizar, configurar el administrador con
+`--set-admin` desde la consola; no hay contraseña predeterminada. Leer docs/SECURITY.md.
+Las listas antiguas sin token dejan de funcionar; generar nuevas desde Seguridad.
+
+- Login moderno, espacio de administración renovado y adaptación móvil.
+- PBKDF2-SHA256 600 000 iteraciones, cookie HttpOnly/SameSite, sesiones en RAM
+  de ocho horas, logout, limitación de intentos y verificación concurrente acotada.
+- CSRF/Origin en acciones, APIs y SSE protegidos, cabeceras CSP/no-sniff/no-framing.
+- Token de reproducción independiente y revocable para M3U, TS y XMLTV; guardado
+  solo como hash. El token no permite acceder a configuración ni administrar.
+- Ajuste explícito para HTTPS con Secure/HSTS y enlaces https; no se instala TLS.
+- Conserva motor multicanal, perfiles, EPG/UTC−6, logos y logs exclusivamente en vivo.
+- Paquete incluye módulo auth, página de login y documentación. CI prueba login,
+  logout y conservación de auth.json/EPG/override al reinstalar.
+- 68 pruebas Python/HTTP más DOM, sanitizadores C y verificación del paquete.
+
+La versión 0.8.3 queda como referencia anterior. La nueva autenticación no protege
+salidas UDP/HTTP directas del motor ni resuelve permisos/licencias comerciales.
+
+---
+
 ## DVB PanelScan 0.8.3 · Referencia estable y empaquetado consolidado
 
 Base funcional: 0.8.2, confirmada por el usuario en TBS real. Sin funciones nuevas

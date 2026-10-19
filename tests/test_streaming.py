@@ -236,7 +236,7 @@ class PlaylistTests(unittest.TestCase):
         os.environ["DVB_PANEL_DATA_DIR"] = self.tmp.name
         spec = importlib.util.spec_from_file_location("review_panel", "panel/server.py")
         self.panel = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.panel)
+        spec.loader.exec_module(self.panel); self.panel._auth = None  # Auth is covered separately in test_auth.py
         self.panel.STATE["transponders"] = [
             {"id": tid, "adapter": i, "freq_mhz": 10970,
              "scan": {"services": [{"sid": 672, "name": 'Name"\nInjected', "now": "Show"}]}}
@@ -276,7 +276,7 @@ class HttpSubscriptionTests(unittest.TestCase):
         os.environ["DVB_PANEL_DATA_DIR"] = self.tmp.name
         spec = importlib.util.spec_from_file_location("http_panel", "panel/server.py")
         self.panel = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.panel)
+        spec.loader.exec_module(self.panel); self.panel._auth = None  # Auth is covered separately in test_auth.py
         self.binary = os.path.join(self.tmp.name, "producer")
         with open(self.binary, "w") as script:
             script.write("#!" + sys.executable + "\n" + FAKE_ENGINE)

@@ -14,7 +14,7 @@ class PanelTests(unittest.TestCase):
         self.env.start()
         spec = importlib.util.spec_from_file_location("panel_server", "panel/server.py")
         self.panel = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.panel)
+        spec.loader.exec_module(self.panel); self.panel._auth = None  # Auth is covered separately in test_auth.py
 
     def tearDown(self):
         self.env.stop()

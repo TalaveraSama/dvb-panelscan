@@ -574,3 +574,226 @@ dialog .actions {
 .live-events td {
   overflow-wrap: anywhere;
 }
+
+/* Secure workspace refresh */
+:root {
+  --accent: #65e5bc;
+  --border: #26384c;
+  --radius: 18px;
+}
+body {
+  background:
+    radial-gradient(ellipse at 90% -10%, #173447 0, transparent 42%), #0a101a;
+}
+.topbar {
+  background: linear-gradient(180deg, #111e2c, #0c1521);
+  box-shadow: 8px 0 40px #0002;
+}
+.card,
+.metric {
+  box-shadow: 0 12px 30px #0002;
+}
+.metric {
+  border-top: 2px solid #65e5bc55;
+}
+.btn {
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    transform 0.15s;
+}
+.btn:hover {
+  transform: translateY(-1px);
+}
+input:focus-visible,
+button:focus-visible,
+a:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.sidebar-session {
+  margin-top: auto;
+  display: grid;
+  gap: 12px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-session .eyebrow {
+  font-size: 9px;
+}
+.sidebar-session .status-badge {
+  margin: 0;
+}
+.sidebar-session .btn {
+  width: 100%;
+  font-size: 12px;
+}
+#securityDialog {
+  width: min(680px, 94vw);
+}
+#securityDialog input {
+  width: 100%;
+  font-family: monospace;
+}
+.login-page {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100vh;
+}
+.login-shell {
+  margin: auto;
+  padding: 64px 32px;
+  width: min(1160px, 100%);
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 90px;
+  align-items: center;
+}
+.login-intro h1 {
+  font-size: clamp(42px, 5vw, 70px);
+  line-height: 1.12;
+  letter-spacing: -3px;
+  margin: 30px 0;
+}
+.login-intro h1 span {
+  color: var(--accent);
+}
+.login-intro p {
+  color: var(--muted);
+  max-width: 430px;
+  font-size: 17px;
+}
+.login-pills {
+  display: flex;
+  gap: 10px;
+  margin-top: 30px;
+}
+.login-pills span {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  font-size: 10px;
+  letter-spacing: 2px;
+}
+.login-card {
+  padding: 42px;
+  border: 1px solid #355065;
+  border-radius: 26px;
+  background: linear-gradient(135deg, #192b3b, #111b29);
+  box-shadow: 0 30px 90px #0005;
+}
+.login-card h2 {
+  font-size: 28px;
+  margin: 14px 0 4px;
+  letter-spacing: -1px;
+}
+.login-symbol {
+  display: inline-grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  background: #65e5bc16;
+  border: 1px solid #65e5bc44;
+  border-radius: 16px;
+  color: var(--accent);
+  font-size: 36px;
+  margin-bottom: 28px;
+}
+.login-card label {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+}
+.login-card input {
+  width: 100%;
+  padding: 14px;
+}
+.login-card .password-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.login-card .password-toggle input {
+  width: auto;
+}
+.login-card .btn {
+  width: 100%;
+  padding: 14px;
+  margin-top: 10px;
+  font-weight: 700;
+}
+.login-help {
+  color: var(--muted);
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 22px;
+  margin-top: 26px;
+}
+.login-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin-top: 14px;
+}
+.login-footer {
+  text-align: center;
+  color: var(--muted);
+  padding: 24px;
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+.signal-art {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 110px;
+  margin-top: 40px;
+  opacity: 0.6;
+}
+.signal-art i {
+  width: 8px;
+  border-radius: 5px;
+  height: 30%;
+  background: linear-gradient(var(--accent), #236b86);
+}
+.signal-art i:nth-child(3n) {
+  height: 75%;
+}
+.signal-art i:nth-child(4n) {
+  height: 100%;
+}
+.signal-art i:nth-child(2n) {
+  height: 55%;
+}
+@media (max-width: 800px) {
+  .login-shell {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    padding: 32px 20px;
+  }
+  .login-intro h1 {
+    font-size: 40px;
+    margin: 18px 0;
+  }
+  .signal-art,
+  .login-pills {
+    display: none;
+  }
+  .login-card {
+    padding: 28px;
+  }
+  .sidebar-session {
+    margin-top: 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn {
+    transition: none;
+  }
+  .btn:hover {
+    transform: none;
+  }
+}

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acceder · DVB Panel</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="login-page">
+    <main class="login-shell">
+      <section class="login-intro">
+        <div class="eyebrow">DVB PANEL / CONTROL DE SEÑAL</div>
+        <h1>Tu headend.<br /><span>Bajo control.</span></h1>
+        <p>
+          Recepción, acceso condicional y distribución desde un único espacio de
+          trabajo protegido.
+        </p>
+        <div class="login-pills">
+          <span>DVB-S2</span><span>MULTICANAL</span><span>EPG</span>
+        </div>
+        <div class="signal-art" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i
+          ><i></i><i></i>
+        </div>
+      </section>
+      <section class="login-card">
+        <span class="login-symbol" aria-hidden="true">◈</span>
+        <div class="eyebrow">ACCESO ADMINISTRATIVO</div>
+        <h2>Bienvenido de nuevo</h2>
+        <p class="muted">
+          Introduce tus credenciales para administrar el sistema.
+        </p>
+        <form id="loginForm">
+          <label
+            >Usuario<input
+              name="username"
+              id="username"
+              autocomplete="username"
+              maxlength="64"
+              required
+              autofocus /></label
+          ><label
+            >Contraseña<input
+              name="password"
+              id="password"
+              type="password"
+              autocomplete="current-password"
+              maxlength="256"
+              required /></label
+          ><label class="password-toggle"
+            ><input id="showPassword" type="checkbox" /> Mostrar
+            contraseña</label
+          >
+          <div
+            id="loginError"
+            class="login-error"
+            role="alert"
+            aria-live="polite"
+          ></div>
+          <button class="btn primary" id="loginSubmit" type="submit">
+            Entrar al panel →
+          </button>
+        </form>
+        <p class="login-help">
+          Sin contraseña predeterminada. El administrador se configura desde la
+          consola del servidor.
+        </p>
+      </section>
+    </main>
+    <footer class="login-footer">
+      DVB Panel · Administración de señal · Usa HTTPS fuera de una red de
+      confianza
+    </footer>
+    <script src="/static/login.js"></script>
+  </body>
+</html>

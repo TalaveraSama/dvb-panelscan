@@ -16,7 +16,7 @@ class ChannelSettingsTests(unittest.TestCase):
         self.old = os.environ.get("DVB_PANEL_DATA_DIR")
         os.environ["DVB_PANEL_DATA_DIR"] = self.tmp.name
         spec = importlib.util.spec_from_file_location("settings_panel", "panel/server.py")
-        self.panel = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.panel)
+        self.panel = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.panel); self.panel._auth = None  # Auth is covered separately in test_auth.py
         self.panel.STATE["transponders"] = [
             {"id": tid, "adapter": adapter, "freq_mhz":10970, "scan":{"services":[{"sid":672,"name":"Original"}]}}
             for adapter, tid in enumerate(("a", "b"))]

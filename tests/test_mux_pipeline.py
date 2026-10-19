@@ -55,7 +55,7 @@ class RealMuxPipelineTests(unittest.TestCase):
         os.environ["DVB_PANEL_DATA_DIR"] = self.tmp.name
         spec = importlib.util.spec_from_file_location("real_mux_panel", ROOT / "panel/server.py")
         self.panel = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.panel)
+        spec.loader.exec_module(self.panel); self.panel._auth = None  # Auth is covered separately in test_auth.py
         wrapper = Path(self.tmp.name) / "capture-substitute"
         wrapper.write_text("#!" + sys.executable + "\n" + '''import os,sys,time,base64
 if "--mux-only" not in sys.argv:

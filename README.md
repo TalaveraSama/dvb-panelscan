@@ -7,7 +7,16 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.8.3 · Referencia estable
+## Actual: 0.9.0 · Login y panel renovado
+
+Login obligatorio, administrador sin contraseña predeterminada, sesiones con
+logout, CSRF y enlaces privados para reproductores. Antes de actualizar leer
+[configuración y límites de seguridad](docs/SECURITY.md). Se conserva el motor
+multicanal y el EPG, pero las listas sin token deben regenerarse desde Seguridad.
+HTTP no cifra credenciales: usar red de confianza/VPN o proxy HTTPS correctamente
+configurado. No publicar directamente en Internet.
+
+### Referencia anterior: 0.8.3
 
 Consolidación de la base 0.8.2 confirmada por el usuario en TBS real, sin cambios
 funcionales. Paquete Ubuntu 22.04 amd64 verificado, documentación incluida y

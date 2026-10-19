@@ -14,6 +14,8 @@ Sin dependencias externas (solo stdlib de Python).
 import argparse
 import copy
 import glob
+import getpass
+import hmac
 import json
 import os
 import platform
@@ -39,6 +41,7 @@ with open(os.path.join(STATIC_DIR, "logos.json"), encoding="utf-8") as _logos_fi
     LOGOS = json.load(_logos_file)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+from auth import AuthStore
 from streaming import StreamManager, StreamError
 from epg import EPGStore, EITCollector, clean_text
 
@@ -59,6 +62,7 @@ STATE = {
 }
 
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
+_auth = AuthStore(os.path.join(DATA_DIR, "auth.json"), secure=os.environ.get("DVB_PANEL_SECURE_COOKIE") == "1")
 _streams = StreamManager()
 _epg = EPGStore(os.path.join(DATA_DIR, "epg.json"))
 
@@ -532,6 +536,32 @@ MIME = {
 class Handler(BaseHTTPRequestHandler):
     server_version = "MiniDVBPanel/3.0"
 
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if _auth is not None and _auth.secure:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        if getattr(self, "auth_cookie", None):
+            self.send_header("Set-Cookie", self.auth_cookie)
+        super().end_headers()
+
+    def _origin(self):
+        scheme = "https" if _auth is not None and _auth.secure else "http"
+        return scheme + "://" + self.headers.get("Host", "127.0.0.1:8081")
+
+    def _authorized(self, media=False):
+        if _auth is None:
+            return True
+        if _auth.session(self.headers.get("Cookie")):
+            return True
+        return media and _auth.media_allowed(getattr(self, "media_token", ""))
+
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False)
@@ -571,6 +601,25 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         path, qs = u.path, urllib.parse.parse_qs(u.query)
 
+        self.auth_cookie = None
+        self.media_token = qs.get("token", [""])[0]
+        if _auth is not None:
+            if path == "/api/auth/session":
+                session = _auth.session(self.headers.get("Cookie"))
+                return self._send(200 if session else 401, session or {"error": "Inicia sesión"})
+            if path == "/login":
+                return self._send_file(os.path.join(STATIC_DIR, "login.html"))
+            public = path in ("/static/style.css", "/static/login.js", "/static/LOGOS-SOURCES.txt") or (path.startswith("/static/logo-") and path.endswith(".png"))
+            media = path in ("/api/playlist.m3u8", "/api/epg.xml") or path.startswith(("/stream/channel/", "/stream/channelid/"))
+            if not public and not self._authorized(media):
+                if path in ("/", "/index.html"):
+                    self.send_response(303)
+                    self.send_header("Location", "/login")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                return self._send(401, {"error": "Inicia sesión o utiliza un token de reproducción válido"})
+
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(STATIC_DIR, "index.html"))
         if path.startswith("/static/"):
@@ -608,7 +657,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, epg_aggregate())
         if path == "/api/epg.xml":
             tid = qs.get("transponder", [None])[0]
-            return self._send(200, build_xmltv(tid, "http://" + self.headers.get("Host", "127.0.0.1:8081")), "application/xml; charset=utf-8")
+            return self._send(200, build_xmltv(tid, self._origin()), "application/xml; charset=utf-8")
         if path == "/api/newcamd/profiles":
             profiles = [{"id": "default", "name": "Predeterminado", **STATE["newcamd"]}] + [
                 {**config, "id": identity} for identity, config in STATE["profiles"].items()]
@@ -633,11 +682,19 @@ class Handler(BaseHTTPRequestHandler):
             tid = qs.get("transponder", [None])[0]
             profile = qs.get("profile", ["pass"])[0]
             if not base:
-                host = self.headers.get("Host", "127.0.0.1:8081")
-                base = "http://%s/stream/channel/{channel_id}" % host
+                base = self._origin() + "/stream/channel/{channel_id}"
             if profile != "pass":
                 return self._send(400, {"error": "Solo se admite el perfil pass (TS sin transcodificar)"})
-            return self._send(200, build_m3u8(base, tid, profile, logo_base="http://" + self.headers.get("Host", "127.0.0.1:8081")), "application/vnd.apple.mpegurl")
+            playlist = build_m3u8(base, tid, profile, logo_base=self._origin())
+            if _auth is not None:
+                if not _auth.media_allowed(self.media_token):
+                    return self._send(400, {"error": "Genera un token en Seguridad y usa el enlace de lista privada"})
+                # Only append secrets to panel URLs, never to a custom third-party base.
+                if qs.get("base_url", [""])[0]:
+                    return self._send(400, {"error": "Con autenticación utiliza la URL de streaming del panel"})
+                playlist = "\n".join(line + ("&" if "?" in line else "?") + "token=" + urllib.parse.quote(self.media_token)
+                                     if line.startswith("http") else line for line in playlist.splitlines()) + "\n"
+            return self._send(200, playlist, "application/vnd.apple.mpegurl")
         for prefix in ("/stream/channel/", "/stream/channelid/"):
             if path.startswith(prefix):
                 if qs.get("profile", ["pass"])[0] != "pass":
@@ -660,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"event: ready\ndata: {}\n\n")
             self.wfile.flush()
-            while not subscription.closed:
+            while not subscription.closed and self._authorized():
                 batch = subscription.read(timeout=1)
                 if not batch:
                     self.wfile.write(b": keepalive\n\n")
@@ -707,13 +764,15 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.connection.settimeout(5)
         try:
-            while True:
+            while self._authorized(media=True):
                 cursor, data = session.read(cursor)
                 self.wfile.write(data)
         except (OSError, StreamError):
             pass
 
     def do_POST(self):
+        if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) > 1:
+            return self._send(400, {"error": "Encuadre HTTP no permitido"})
         origin = self.headers.get("Origin")
         if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
             return self._send(403, {"ok": False, "error": "Origen no permitido"})
@@ -727,6 +786,29 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_body()
         if not isinstance(body, dict):
             return self._send(400, {"ok": False, "error": "Se requiere un objeto JSON"})
+
+        self.auth_cookie = None
+        if _auth is not None:
+            if path == "/api/auth/login":
+                if not isinstance(body.get("username"), str) or not isinstance(body.get("password"), str) or len(body["username"]) > 64 or len(body["password"]) > 256:
+                    return self._send(400, {"error": "Credenciales inválidas"})
+                token, status = _auth.login(body["username"], body["password"], self.client_address[0])
+                if token:
+                    self.auth_cookie = _auth.cookie(token)
+                    return self._send(200, {"ok": True})
+                return self._send(status, {"error": "Demasiados intentos; espera 10 minutos" if status == 429 else "Usuario o contraseña incorrectos. Si falta configurar el administrador, utiliza --set-admin en el servidor."})
+            session = _auth.session(self.headers.get("Cookie"))
+            if not session:
+                return self._send(401, {"error": "Inicia sesión"})
+            csrf = self.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(csrf.encode(), session["csrf"].encode()):
+                return self._send(403, {"error": "Token CSRF inválido; recarga el panel"})
+            if path == "/api/auth/logout":
+                _auth.logout(self.headers.get("Cookie"))
+                self.auth_cookie = _auth.cookie()
+                return self._send(200, {"ok": True})
+            if path == "/api/auth/media-token":
+                return self._send(200, {"ok": True, "token": _auth.rotate_media_token()})
 
         if path == "/api/epg/settings":
             try:
@@ -907,12 +989,25 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global _auth
     ap = argparse.ArgumentParser(description="Mini panel DVB-Scan")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--dvb2m3u8", default=None)
     ap.add_argument("--tbsstream", default=None)
+    ap.add_argument("--set-admin", metavar="USUARIO", help="Crear/restablecer administrador y salir")
     args = ap.parse_args()
+    _auth = AuthStore(os.path.join(DATA_DIR, "auth.json"), secure=os.environ.get("DVB_PANEL_SECURE_COOKIE") == "1")
+    if args.set_admin:
+        password = getpass.getpass("Contraseña (mínimo 12 caracteres): ")
+        if password != getpass.getpass("Repetir contraseña: "):
+            ap.error("Las contraseñas no coinciden")
+        try:
+            _auth.set_admin(args.set_admin, password)
+        except ValueError as error:
+            ap.error(str(error))
+        print("Administrador actualizado. Reinicia dvb-panel para invalidar sesiones anteriores.")
+        return
 
     _cfg["dvb2m3u8"] = args.dvb2m3u8
     _cfg["tbsstream"] = args.tbsstream

@@ -86,7 +86,7 @@ class EventHTTPTests(unittest.TestCase):
             previous = os.environ.get("DVB_PANEL_DATA_DIR")
             os.environ["DVB_PANEL_DATA_DIR"] = folder
             spec = importlib.util.spec_from_file_location("event_panel", "panel/server.py")
-            panel = importlib.util.module_from_spec(spec); spec.loader.exec_module(panel)
+            panel = importlib.util.module_from_spec(spec); spec.loader.exec_module(panel); panel._auth = None  # Auth is covered separately in test_auth.py
             server = panel.ThreadingHTTPServer(("127.0.0.1",0),panel.Handler)
             thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             try:
