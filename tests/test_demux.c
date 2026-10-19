@@ -21,6 +21,8 @@ int main(void) {
   memcpy(sb.buf, ecm, sizeof(ecm)); sb.len = sizeof(ecm);
   process_sections(&sb);
   assert(ecm_q_count == 1);
+  enqueue_ecm(svc.sid, svc.caid, svc.provid, ecm, sizeof(ecm));
+  assert(ecm_q_count == 1); /* repeated queued ECM does not build a backlog */
   assert(ecm_q[0].len == sizeof(ecm));
   assert(!memcmp(ecm_q[0].sec, ecm, sizeof(ecm)));
   /* Invalid CRC on a long section must not be queued. */

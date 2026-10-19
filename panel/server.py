@@ -643,6 +643,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"ok": False, "error": "Transponder no encontrado"})
             return self._send(200, stream_start(tp, body.get("newcamd"), udp, body.get("http_port"), body.get("sid")))
         if path == "/api/stream/stop":
+            if body.get("channel_id"):
+                if not _streams.stop_channel(str(body["channel_id"])):
+                    return self._send(404, {"ok": False, "error": "Sesión no encontrada"})
+                return self._send(200, {"ok": True})
             return self._send(200, stream_stop())
 
         return self._send(404, {"error": "not found"})

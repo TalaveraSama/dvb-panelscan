@@ -1,40 +1,42 @@
-## DVB PanelScan 0.5.0 · Sesiones compartidas y PSI
+## DVB PanelScan 0.5.1 · Continuidad TS y cambio de canal
 
-Implementación delimitada de las mejoras identificadas al revisar Tvheadend.
-No es una integración completa de su motor ni una garantía de eliminar todos los tirones.
+Correcciones verificadas por pruebas, no una garantía de resolver todos los tirones en hardware real.
 
-### Cambios
+### Sesiones
 
-- M3U y streaming manual usan el mismo gestor. Varios clientes del mismo canal comparten un proceso tbsstream, sin puente UDP local.
-- Reserva del adaptador: otro SID y los escaneos se rechazan mientras el tuner está ocupado. **Un canal por adaptador**, aunque varios pertenezcan al mismo mux.
-- URLs nuevas `/stream/channel/<transponder_id>:<SID>?profile=pass`; identidades equivalentes en M3U y XMLTV. URLs antiguas SID-only siguen funcionando si no hay ambigüedad.
-- Perfil `pass` explícito, sin transcodificación; perfiles no soportados se rechazan. La lista no es HLS.
-- Colas acotadas por sesión, consumidores independientes, conteo de clientes/bytes/desbordamientos y cierre del proceso al salir el último cliente bajo demanda.
-- Inicio manual conserva la sesión hasta detenerla. Reutilización con salidas incompatibles devuelve error; no resintoniza silenciosamente.
-- Espera de TS antes de responder HTTP 200; diagnóstico por servicio disponible desde el panel. TS presente no certifica vídeo descifrado.
-- PMT conserva descriptores no CA (idiomas, audio, subtítulos, etc.) y elimina CA selectivamente; rechaza actualizaciones incompletas.
-- Packetización PSI multipaquete con PUSI, pointer, CC y CRC; tablas iniciales antes del payload seleccionado y repetición basada en CLOCK_MONOTONIC (100 ms mientras llega TS).
-- Binario añade `--stdout` para entregar exclusivamente TS al gestor; logs permanecen en stderr.
+- Botón **Detener este canal** y parada individual mediante `POST /api/stream/stop` con `{"channel_id":"<tp>:<sid>"}`. Sin channel_id se mantiene Detener todas.
+- El error 409 identifica el adaptador, el canal que lo ocupa y si es una sesión manual fija. Una sesión manual del SID 672 impide abrir otro SID en ese tuner hasta detenerla, aunque marque cero clientes del panel. Clientes del puerto directo 9981 no se cuentan como suscriptores del panel.
+- Se mantiene un SID por adaptador: no se promete multicanal por mux ni se reasignan tuners sin conocer sus conexiones de antena.
+
+### Continuidad
+
+- Cola ordenada del servicio completo (vídeo, audio y PCR), no solo los paquetes cifrados. No se adelantan paquetes claros a otros que esperan CW.
+- Descrambling CSA en lotes de hasta 64 paquetes disponibles por lectura; una clave no disponible bloquea el prefijo pendiente en lugar de descartarlo al llegar otra paridad.
+- Desbordamiento de cola acotado y contabilizado, sin crecimiento ilimitado.
+- Deduplicación exacta de ECM todavía en cola; se conservan ECM diferentes y siguen siendo posibles los reintentos.
+- Solicitud de buffer demux de 4 MiB cuando el driver lo permite, lecturas DVR más grandes y drenaje de cola en pausas de lectura.
+- Logs `TS stats` cada 5 segundos con TEI, saltos CC, descartes de servicio, cola y descartes ECM, lotes y paquetes CSA. Las métricas TEI/CC corresponden al TS de entrada completo, no solo al canal seleccionado.
+- Logs de tiempo de respuesta ECM y resultado, sin imprimir credenciales ni CW.
+
+### Tvheadend y HLS
+
+La ruta oficial revisada `profile=pass` usa suscripción, cola, muxer y TS continuo. Su M3U de canales no es un manifiesto HLS segmentado. Esta versión **no añade HLS**: un empaquetador HLS podría amortiguar jitter a costa de latencia, pero no recupera paquetes perdidos ni corrige claves aplicadas en un período equivocado. Ver docs/TVHEADEND_STREAMING_REVIEW.md.
 
 ### Actualizar Ubuntu amd64
 
 ```sh
-wget -O /tmp/dvb-panelscan_0.5.0_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.5.0/dvb-panelscan_0.5.0_amd64.deb
+wget -O /tmp/dvb-panelscan_0.5.1_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.5.1/dvb-panelscan_0.5.1_amd64.deb
 sudo systemctl stop dvb-panel
-sudo apt install /tmp/dvb-panelscan_0.5.0_amd64.deb
+sudo apt install /tmp/dvb-panelscan_0.5.1_amd64.deb
 sudo systemctl start dvb-panel
 ```
 
-Se conservan los transponders, Newcamd y los overrides systemd (incluido el acceso LAN configurado). Recargar el dashboard y **volver a descargar el M3U8 y XMLTV** para utilizar las identidades nuevas.
+Datos y overrides systemd se conservan. Recargar el dashboard con Ctrl+F5, cerrar VLC anterior y detener la sesión manual fija antes de probar otro SID del M3U. Nuevos registros siguen en `/var/lib/dvb-panelscan/stream-<adapter>-<SID>.log`.
 
-Registros nuevos: `/var/lib/dvb-panelscan/stream-<adapter>-<SID>.log`, accesibles con **Ver registro** en Streaming. No se escribe un stream.log global. Detener todas desconecta todas las sesiones gestionadas.
+### Pruebas y límites
 
-Para el stream directo `:9981/stream.ts`, iniciar manualmente antes de abrir el M3U. Si la sesión bajo demanda ya está activa sin ese puerto, usar su URL del panel o detener y reiniciar con las salidas deseadas. No se cambian salidas de un proceso activo.
+19 pruebas Python/HTTP, incluyendo parar el canal fijado y abrir otro sin afectar otro adaptador. Regresiones C con ASan/UBSan: orden de audio/PCR al esperar claves, dos paridades, lote CSA de 64 paquetes con comparación del payload descifrado, cola llena, contadores TEI/CC y las pruebas anteriores de demux/PSI/framing/transporte. Instalación/arranque en Ubuntu 22.04 amd64 mediante Actions.
 
-### Verificación y límites
+No se ha validado esta versión end-to-end con hardware DVB del usuario. Sigue pendiente el seguimiento temporal completo de generaciones CW, selección CAID/proveedor en simulcrypt y EMM. Recibir una CW no demuestra que el vídeo sea válido. Tampoco se incluyen HLS, transcodificación, varios SID simultáneos en un tuner ni reparación artificial de PCR/PTS/CC.
 
-Pruebas con procesos reales sin DVB: clientes simultáneos, reutilización manual/HTTP, cierre, conflictos, timeout, error antes de HTTP 200, desbordamiento y M3U/XMLTV. Regresiones C con ASan/UBSan: descriptores/CA, PMT inválida, PSI multipaquete y continuidad, transporte, CSA y framing Newcamd. Instalación/arranque en Ubuntu 22.04 amd64 mediante Actions.
-
-**Pendiente:** generación temporal de CW y cambios de paridad equivalentes a Tvheadend, CSA por lotes, EMM, selección CAID/proveedor en simulcrypt y métricas completas CC/TEI/ECM. Las claves siguen usando la lógica de 0.4.1; no se afirma resolver cortes por período criptográfico ni se ha validado esta versión end-to-end con hardware y acceso autorizado. No hay transcodificación ni varios SID simultáneos por tuner.
-
-El panel sigue sin autenticación; loopback por defecto. No exponer a Internet. Las credenciales permanecen privadas en disco pero se pasan por argv al proceso; un administrador del host puede leerlas. Los logs por servicio no incluyen el comando ni CW en hexadecimal y todavía no tienen rotación automática.
+El panel continúa sin autenticación: no exponer a Internet. Las credenciales en argv son visibles al administrador del host. Los logs aún no tienen rotación automática.

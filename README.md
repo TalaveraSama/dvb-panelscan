@@ -193,3 +193,38 @@ actualizarse juntos: el gestor necesita la opción `tbsstream --stdout`.
 adaptador ni el seguimiento temporal de generaciones de CW, y no garantiza
 eliminar tirones por cambio de claves, señal o red. La revisión histórica de
 0.4.1 sigue en `docs/`; las diferencias aplicadas se resumen aquí.
+
+## Versión 0.5.1 · Cambio de canal y diagnóstico de tirones
+
+Si solo abre el SID iniciado manualmente, revisar **Streaming**: una sesión
+manual fija reserva el adaptador. **Detener este canal** la libera sin detener
+las de otros tuners. Se mantiene un SID por adaptador, varios clientes del
+mismo SID. La petición sin channel_id a `/api/stream/stop` detiene todas;
+con `{"channel_id":"transponder:SID"}` detiene solo la sesión indicada.
+
+La cola del servicio ahora mantiene el orden de audio/vídeo/PCR al esperar CW
+y descifra lotes de hasta 64 paquetes disponibles. El límite de cola no cambia
+las restricciones de generaciones de clave: no equivale al motor completo de
+Tvheadend. Se deduplican ECM iguales pendientes y se solicita más buffer al
+kernel cuando el driver lo admite.
+
+Para diagnosticar, reproducir 30 segundos y revisar **Ver registro** o:
+
+```sh
+grep -E 'TS stats|ECM:|ECM sin|queue full|newcamd:' /var/lib/dvb-panelscan/stream-0-672.log | tail -n 30
+```
+
+- `tei`/`cc_errors`: indicadores acumulados del TS de entrada completo. No
+  distinguen por sí solos señal del driver o del lector, y CC repetidos no
+  se consideran automáticamente pérdidas.
+- `service_drops`: paquetes descartados al llenarse la cola esperando claves.
+- `pending`, `ecm_pending`, `ecm_drops`: presión de las colas.
+- `csa_batches`, `csa_packets`: trabajo CSA acumulado; la relación depende
+  de cuántos paquetes seleccionados hay en cada lectura.
+- `ECM time_ms`/`result`: latencia y resultado de la solicitud, no prueba de
+  decodificación correcta. Nunca se imprimen las CW.
+
+**No se añade HLS en 0.5.1.** La playlist de canales de Tvheadend y su perfil
+pass no son HLS segmentado. Un empaquetador HLS con búfer puede reducir jitter
+percibido, pero no reconstruye paquetes perdidos ni corrige CW fuera de período.
+La actualización conserva datos y overrides. Ver RELEASE_NOTES.md.

@@ -334,10 +334,37 @@ async function loadStream() {
       Cola: ${Math.round(session.queue_bytes / 1024)} KiB · Clientes lentos: ${esc(session.slow_clients)}<br>
       <a class="btn small" href="/stream/channel/${encodeURIComponent(session.channel_id)}?profile=pass" target="_blank">URL TS</a>
       <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}" target="_blank">Ver registro</a>
+      <button class="btn small danger" data-stop-channel="${esc(session.channel_id)}">Detener este canal</button>
     </div>`,
         )
         .join("")
     : "Sin sesiones. Abrir un canal del M3U inicia una sesión compartida.";
+  $("stInfo")
+    .querySelectorAll("[data-stop-channel]")
+    .forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (
+          !confirm(
+            "¿Desconectar clientes y liberar el adaptador de " +
+              button.dataset.stopChannel +
+              "?",
+          )
+        )
+          return;
+        button.disabled = true;
+        try {
+          const result = await postJSON("/api/stream/stop", {
+            channel_id: button.dataset.stopChannel,
+          });
+          if (!result.ok) throw new Error(result.error);
+          await loadStream();
+        } catch (error) {
+          showError(error);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
 }
 async function startStream(e) {
   e.preventDefault();

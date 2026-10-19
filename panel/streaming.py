@@ -143,7 +143,9 @@ class StreamManager:
             if adapter in self.scanning:
                 raise StreamError("Adaptador ocupado por un escaneo", 409)
             if previous and previous.key != key:
-                raise StreamError("Adaptador ocupado por otro canal; detén sus reproducciones primero", 409)
+                raise StreamError("Adaptador %s ocupado por %s (%s); usa Detener en esa sesión antes de cambiar" %
+                                  (adapter, previous.key,
+                                   "inicio manual fijo" if previous.pinned else "%s clientes" % previous.clients), 409)
             if pinned and previous and (previous.http_port != http_port or previous.udp != tuple(udp)):
                 raise StreamError("Canal ya activo con otras salidas; usa su URL del panel o detén la sesión", 409)
             if not previous:
@@ -186,6 +188,15 @@ class StreamManager:
     def release_scan(self, adapter):
         with self.lock:
             self.scanning.discard(adapter)
+
+    def stop_channel(self, key):
+        with self.lock:
+            targets = [s for s in self.sessions.values() if s.key == key]
+            for session in targets:
+                self.sessions.pop(session.adapter, None)
+                session.pinned = False
+                session.stop()
+            return bool(targets)
 
     def stop_all(self):
         with self.lock:

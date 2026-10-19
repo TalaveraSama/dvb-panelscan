@@ -494,8 +494,10 @@ static pthread_cond_t ecm_q_cond = PTHREAD_COND_INITIALIZER;
 /* Buffer de paquetes scrambled sin CW (solo se toca desde el hilo principal) */
 #define SCRAM_MAX 4096
 static uint8_t scram_buf[SCRAM_MAX * TS_PKT];
-static uint8_t scram_odd[SCRAM_MAX];
-static int scram_count = 0;
+static int scram_head = 0, scram_count = 0;
+static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
+static uint64_t ecm_queue_drops;
+static uint8_t cc_seen[8192], last_cc[8192];
 
 static volatile int ca_running = 1;
 
@@ -513,6 +515,15 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
 {
   if (len <= 0 || len > (int)sizeof(ecm_q[0].sec)) return;
   pthread_mutex_lock(&ecm_q_mutex);
+  /* Do not let identical queued retransmissions age later ECM requests. */
+  for (int i = 0; i < ecm_q_count; i++) {
+    ecm_req_t *pending = &ecm_q[(ecm_q_head + i) % ECMQ_MAX];
+    if (pending->sid == sid && pending->caid == caid && pending->provid == provid &&
+        pending->len == len && !memcmp(pending->sec, sec, len)) {
+      pthread_mutex_unlock(&ecm_q_mutex);
+      return;
+    }
+  }
   if (ecm_q_count < ECMQ_MAX) {
     ecm_req_t *r = &ecm_q[ecm_q_tail];
     memcpy(r->sec, sec, len);
@@ -520,35 +531,93 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
     ecm_q_tail = (ecm_q_tail + 1) % ECMQ_MAX;
     ecm_q_count++;
     pthread_cond_signal(&ecm_q_cond);
+  } else {
+    ecm_queue_drops++;
   }
   pthread_mutex_unlock(&ecm_q_mutex);
 }
 
-/* Guardar un paquete scrambled sin CW (hilo principal) */
-static void buffer_scrambled(const uint8_t *pkt, int odd)
+/* Keep the entire selected service in order, including clear audio/PCR.
+ * A missing key at the head must not let later packets overtake it. */
+static void flush_scrambled(void)
 {
-  if (scram_count < SCRAM_MAX) {
-    memcpy(scram_buf + (size_t)scram_count * TS_PKT, pkt, TS_PKT);
-    scram_odd[scram_count] = (uint8_t)odd;
-    scram_count++;
+  uint8_t batch[64 * TS_PKT];
+  while (scram_count) {
+    int count = 0, encrypted = 0;
+    pthread_mutex_lock(&csa_mutex);
+    while (count < scram_count && count < 64) {
+      const uint8_t *pkt = scram_buf + ((scram_head + count) % SCRAM_MAX) * TS_PKT;
+      if (pkt[3] & 0x80) {
+        int available = (pkt[3] & 0x40) ? have_cw_odd : have_cw_even;
+        if (!available) break;
+        encrypted++;
+      }
+      memcpy(batch + count * TS_PKT, pkt, TS_PKT);
+      count++;
+    }
+    if (encrypted) {
+      csa_descramble(csae, batch, count);
+      csa_batches++;
+      csa_packets += encrypted;
+    }
+    pthread_mutex_unlock(&csa_mutex);
+    if (!count) break;
+    scram_head = (scram_head + count) % SCRAM_MAX;
+    scram_count -= count;
+    for (int i = 0; i < count; i++) output_packet(batch + i * TS_PKT);
   }
 }
 
-/* Descifrar los paquetes bufferizados cuya CW ya esté disponible (hilo principal) */
-static void flush_scrambled(void)
+static void buffer_service_packet(const uint8_t *pkt)
 {
-  for (int i = 0; i < scram_count; i++) {
-    uint8_t *pkt = scram_buf + (size_t)i * TS_PKT;
-    int ok = 0;
-    pthread_mutex_lock(&csa_mutex);
-    if (scram_odd[i] ? have_cw_odd : have_cw_even) {
-      csa_descramble(csae, pkt, 1);
-      ok = 1;
-    }
-    pthread_mutex_unlock(&csa_mutex);
-    if (ok) output_packet(pkt);   /* sin CW: se descarta */
+  if (scram_count >= 64) flush_scrambled();
+  if (scram_count == SCRAM_MAX) {
+    /* Bounded startup/failure buffering. Never silently keep stale payload. */
+    service_drops += scram_count;
+    LOGV("TS: service queue full waiting for CW; dropped %d packets\n", scram_count);
+    scram_head = scram_count = 0;
   }
-  scram_count = 0;
+  int tail = (scram_head + scram_count) % SCRAM_MAX;
+  memcpy(scram_buf + tail * TS_PKT, pkt, TS_PKT);
+  scram_count++;
+}
+
+/* Input diagnostics, not a claim that CC errors can be repaired. Ignore
+ * adaptation-only packets for CC increments and honor discontinuity flags. */
+static void observe_transport(const uint8_t *pkt, unsigned pid)
+{
+  int afc = (pkt[3] >> 4) & 3;
+  if (pkt[1] & 0x80) {
+    input_tei++;
+    cc_seen[pid] = 0;
+    return;
+  }
+  if ((afc & 2) && pkt[4] >= 1 && pkt[4] <= 183 && (pkt[5] & 0x80))
+    cc_seen[pid] = 0;
+  if (!(afc & 1) || pid == 0x1fff) return;
+  unsigned cc = pkt[3] & 15;
+  if (cc_seen[pid] && cc != last_cc[pid] && cc != ((last_cc[pid] + 1) & 15))
+    input_cc_errors++;
+  last_cc[pid] = cc;
+  cc_seen[pid] = 1;
+}
+
+static void log_transport_stats(void)
+{
+  static uint64_t due;
+  uint64_t now = monotonic_ms();
+  if (now < due) return;
+  pthread_mutex_lock(&ecm_q_mutex);
+  int queued = ecm_q_count;
+  uint64_t dropped = ecm_queue_drops;
+  pthread_mutex_unlock(&ecm_q_mutex);
+  LOGV("TS stats: tei=%llu cc_errors=%llu service_drops=%llu pending=%d "
+       "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu\n",
+       (unsigned long long)input_tei, (unsigned long long)input_cc_errors,
+       (unsigned long long)service_drops, scram_count, queued,
+       (unsigned long long)dropped, (unsigned long long)csa_batches,
+       (unsigned long long)csa_packets);
+  due = now + 5000;
 }
 
 /* Hilo CA: envía ECMs y actualiza las CW (el bloqueo de red ocurre aquí) */
@@ -581,8 +650,11 @@ static void *ca_thread(void *arg)
       fprintf(stderr, "newcamd: connected (login + card data)\n");
     }
     uint8_t even[8], odd[8];
+    uint64_t requested = monotonic_ms();
     int result = newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
                                  r.sec, r.len, even, odd, 1500);
+    LOGV("ECM: sid=%u caid=%04X time_ms=%llu result=%d\n", r.sid, r.caid,
+         (unsigned long long)(monotonic_ms() - requested), result);
     if (result == 0) {
       pthread_mutex_lock(&csa_mutex);
       /* A zero half means unavailable; do not replace a valid CW with it. */
@@ -812,6 +884,8 @@ static void process_packet(uint8_t *pkt)
   emit_psi();
   int pusi = (pkt[1] & 0x40) != 0;
   uint16_t pid = ((uint16_t)(pkt[1] & 0x1F) << 8) | pkt[2];
+  observe_transport(pkt, pid);
+  if (pkt[1] & 0x80) return; /* corrupt input must not enter PSI/CSA */
   int afc = (pkt[3] >> 4) & 0x03;
 
   /* Demux de secciones PSI (PAT/PMT/ECM) */
@@ -825,27 +899,7 @@ static void process_packet(uint8_t *pkt)
     return;
   }
 
-  /* Reenvío de ES: descifrar + reenviar */
-  if (svc.ready && pid_forward(pid)) {
-    if (pkt[3] & 0x80) {                       /* scrambled */
-      int odd = (pkt[3] & 0x40) != 0;          /* 0=clave par, 1=clave impar */
-      int ok = 0;
-      pthread_mutex_lock(&csa_mutex);
-      if (odd ? have_cw_odd : have_cw_even) {
-        csa_descramble(csae, pkt, 1);
-        ok = 1;
-      }
-      pthread_mutex_unlock(&csa_mutex);
-      if (ok) {
-        flush_scrambled();   /* primero lo que estaba en espera (en orden) */
-        output_packet(pkt);
-      } else {
-        buffer_scrambled(pkt, odd);   /* aún sin CW: guardar en cola */
-      }
-      return;
-    }
-    output_packet(pkt);                        /* paquete claro */
-  }
+  if (svc.ready && pid_forward(pid)) buffer_service_packet(pkt);
 }
 
 /* DVR reads need not end at a TS boundary. Keep fragments across reads. */
@@ -872,6 +926,7 @@ static void process_buffer(const uint8_t *buf, int len)
       memmove(ts_pending, ts_pending + TS_PKT, ts_pending_len);
     }
   }
+  flush_scrambled();
 }
 
 static int parse_fec(const char *s)
@@ -1046,6 +1101,10 @@ int main(int argc, char **argv)
   snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", opts.adapter, opts.frontend);
   int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
   if (dmx >= 0) {
+    /* Larger kernel buffering absorbs short userspace scheduling stalls.
+     * Some vendor drivers do not implement this ioctl: keep running/log it. */
+    if (ioctl(dmx, DMX_SET_BUFFER_SIZE, 4 * 1024 * 1024) < 0)
+      LOGV("DMX_SET_BUFFER_SIZE unsupported/failed: %s\n", strerror(errno));
     struct dmx_pes_filter_params pes;
     memset(&pes, 0, sizeof(pes));
     pes.pid = 0x2000;
@@ -1076,14 +1135,19 @@ int main(int argc, char **argv)
     pthread_create(&ht, NULL, http_server, &opts.http_port);
 
   /* bucle */
-  uint8_t buf[TS_PKT * 32];
+  uint8_t buf[TS_PKT * 256];
   struct pollfd pfd = { .fd = dvr, .events = POLLIN };
   while (1) {
-    int r = poll(&pfd, 1, 1000);
-    if (r <= 0) continue;
+    int r = poll(&pfd, 1, 100);
+    if (r <= 0) {
+      flush_scrambled();
+      log_transport_stats();
+      continue;
+    }
     ssize_t n = read(dvr, buf, sizeof(buf));
     if (n <= 0) continue;
     process_buffer(buf, (int)n);
+    log_transport_stats();
 
   }
 

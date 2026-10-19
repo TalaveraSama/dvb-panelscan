@@ -77,6 +77,29 @@ class StreamingTests(unittest.TestCase):
         self.manager.stop_all()
         self.assertIsNotNone(a.process.poll())
 
+    def test_stop_pinned_channel_allows_another_sid(self):
+        a = self.acquire(pinned=True)
+        self.manager.release(a)
+        with self.assertRaises(StreamError) as error:
+            self.acquire("tp:2")
+        self.assertIn("tp:1", str(error.exception))
+        self.assertIn("manual fijo", str(error.exception))
+        self.assertTrue(self.manager.stop_channel("tp:1"))
+        self.assertIsNotNone(a.process.poll())
+        b = self.acquire("tp:2")
+        self.assertEqual(b.key, "tp:2")
+        self.assertFalse(self.manager.stop_channel("missing"))
+        self.manager.release(b)
+
+    def test_individual_stop_keeps_other_adapter(self):
+        a = self.acquire(pinned=True)
+        b = self.manager.acquire("other:2", 1, self.command,
+                                 os.path.join(self.tmp.name, "other.log"), timeout=2)
+        self.assertTrue(self.manager.stop_channel("tp:1"))
+        self.assertIsNone(b.process.poll())
+        self.manager.release(a)
+        self.manager.release(b)
+
     def test_start_failure_reaps_process(self):
         with self.assertRaises(StreamError):
             self.manager.acquire("tp:1", 0, [sys.executable, "-c", "raise SystemExit(1)"],
@@ -194,6 +217,20 @@ class HttpSubscriptionTests(unittest.TestCase):
                 self.assertEqual(status["clients"], 2)
                 with self.request.urlopen(self.base + "/api/stream/log?channel=tp-a:672") as log:
                     self.assertIn(b"New shared TS session", log.read())
+
+    def test_stop_specific_http_session_and_switch(self):
+        import json
+        tp = self.panel.STATE["transponders"][0]
+        tp["scan"]["services"].append({"sid": 643})
+        result = self.panel.stream_start(tp, None, [], 0, 672)
+        self.assertTrue(result["ok"])
+        request = self.request.Request(self.base + "/api/stream/stop",
+            data=b'{"channel_id":"tp-a:672"}', headers={"Content-Type":"application/json"})
+        with self.request.urlopen(request, timeout=2) as response:
+            self.assertTrue(json.load(response)["ok"])
+        with self.request.urlopen(self.base + "/stream/channel/tp-a:643", timeout=2) as stream:
+            self.assertEqual(stream.read(188)[0], 0x47)
+            self.assertEqual(self.panel.stream_status()["channel_id"], "tp-a:643")
 
     def test_failed_start_is_not_http_200(self):
         import urllib.error

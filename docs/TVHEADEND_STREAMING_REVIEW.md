@@ -215,3 +215,29 @@ arranque visibles, conservación de descriptores no CA y PSI multipaquete con
 emisión monotónica. La gestión temporal de CW, CSA por lotes, varios SID por
 tuner y métricas completas de continuidad siguen pendientes. Ver las notas
 de versión y el README principal para el comportamiento actual.
+
+### Segunda revisión: canal fijado, tirones y HLS (0.5.1)
+
+Se volvió a consultar el árbol y los puntos de entrada del mismo commit
+upstream. `http_m3u_playlist_add` genera metadatos y URLs; la ruta
+`http_stream_channel` abre una suscripción y `profile_mpegts_pass_open`
+selecciona MPEG-TS. No es una cadena de segmentos HLS.
+
+También se revisó [muxer_libav.c](https://github.com/tvheadend/tvheadend/blob/8837853a69aa822b0203eb3909c5912dc831312e/src/muxer/muxer_libav.c#L768-L820):
+la selección de formato de ese recorrido no demuestra un servicio HLS
+manifiesto/segmentos. No se atribuye a Tvheadend una estabilización mediante
+HLS por el hecho de que soporte playlists M3U o libav. El análisis se refiere
+al upstream y al perfil pass revisados, no a todos los forks o proxies externos.
+
+Para el descifrado se confirmaron `key_update`, `key_changed`, `key_late` y
+`key_flush`: ver [descrambler.c](https://github.com/tvheadend/tvheadend/blob/8837853a69aa822b0203eb3909c5912dc831312e/src/descrambler/descrambler.c#L893-L986).
+La 0.5.1 mejora el orden de la cola completa y usa CSA por lotes, pero no copia
+sin pruebas ese estado temporal a un cliente simplificado.
+
+El canal 672 puede quedar fijado por una sesión manual de 0.5.0. Se añadió
+parada individual y errores identificables; no se concluye que todos los demás
+canales fallen por esa razón sin consultar el 409/estado real. Si un canal
+sigue fallando con el adaptador libre, medir lock, CAID/ECM y resultados de
+Newcamd de ese SID. Si los tirones continúan, correlacionar captura TS, CC/TEI,
+latencia ECM, cambios de paridad, carga y red. No se garantiza resolverlos
+con un aumento de caché ni con segmentación HLS.

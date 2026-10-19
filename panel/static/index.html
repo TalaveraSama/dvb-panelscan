@@ -28,7 +28,7 @@
           <h2 id="pageTitle">Vista general</h2>
           <p>Administra tu señal. Conecta, escanea y distribuye.</p>
         </div>
-        <span class="version">v0.5.0 <span>● Sistema local</span></span>
+        <span class="version">v0.5.1 <span>● Sistema local</span></span>
       </div>
       <div
         id="notice"
@@ -259,11 +259,12 @@
             </button>
           </form>
           <div class="callout">
-            Varios reproductores del mismo canal comparten proceso. Un canal por
-            adaptador: otro SID o un escaneo se rechaza mientras esté ocupado.
-            Las sesiones manuales permanecen hasta detenerlas; las del M3U
-            cierran al salir el último cliente. Los bytes TS no certifican
-            descifrado.
+            Un canal por adaptador. Si solo abre el canal iniciado manualmente,
+            pulsa «Detener este canal» para liberar el tuner antes de abrir otro
+            desde el M3U. Cierra también el reproductor anterior. El inicio
+            manual fija la sesión aunque marque 0 clientes del panel; la URL
+            directa :9981 puede tener clientes no contados aquí. No es HLS y los
+            bytes TS no certifican descifrado.
           </div>
           <div class="adapters" id="stInfo" aria-live="polite"></div>
         </section>

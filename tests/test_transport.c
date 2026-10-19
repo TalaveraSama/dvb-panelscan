@@ -2,6 +2,7 @@
 #include "../tbsstream/main.c"
 #undef main
 #include <assert.h>
+#include <dvbcsa/dvbcsa.h>
 
 static void test_fragmented_reads(void)
 {
@@ -100,11 +101,84 @@ static void test_stdout_ts(void)
   close(pair[0]);
 }
 
+static void test_service_order_and_csa_batch(void)
+{
+  uint8_t cw[8] = {1,2,3,6,4,5,6,15};
+  uint8_t plain[3 * TS_PKT], encrypted[3 * TS_PKT];
+  for (int i = 0; i < 3; i++) {
+    memset(plain + i * TS_PKT, 0x55 + i, TS_PKT);
+    uint8_t *p = plain + i * TS_PKT;
+    p[0] = 0x47; p[1] = 1; p[2] = (uint8_t)i; p[3] = 0x10;
+  }
+  memcpy(encrypted, plain, sizeof(plain));
+  struct dvbcsa_key_s *key = dvbcsa_key_alloc();
+  dvbcsa_key_set(cw, key);
+  dvbcsa_encrypt(key, encrypted + 4, 184);
+  encrypted[3] |= 0x80;
+  dvbcsa_encrypt(key, encrypted + 2 * TS_PKT + 4, 184);
+  encrypted[2 * TS_PKT + 3] |= 0xc0;
+  csae = csa_create();
+  ring_seq = 0;
+  have_cw_even = have_cw_odd = 0;
+  scram_head = scram_count = 0;
+  for (int i = 0; i < 3; i++) buffer_service_packet(encrypted + i * TS_PKT);
+  flush_scrambled();
+  assert(ring_seq == 0 && scram_count == 3);
+  csa_set_key_even(csae, cw); have_cw_even = 1;
+  flush_scrambled();
+  assert(ring_seq == 2 && scram_count == 1);
+  assert(!memcmp(ring, plain, 2 * TS_PKT));
+  csa_set_key_odd(csae, cw); have_cw_odd = 1;
+  flush_scrambled();
+  assert(ring_seq == 3 && scram_count == 0);
+  assert(!memcmp(ring, plain, sizeof(plain)));
+
+  ring_seq = 0;
+  uint64_t before = csa_batches;
+  for (int i = 0; i < 64; i++) buffer_service_packet(encrypted);
+  flush_scrambled();
+  assert(ring_seq == 64 && csa_batches == before + 1);
+  for (int i = 0; i < 64; i++) assert(!memcmp(ring + i * TS_PKT, plain, TS_PKT));
+
+  have_cw_even = have_cw_odd = 0;
+  ring_seq = 0;
+  service_drops = 0;
+  for (int i = 0; i < SCRAM_MAX + 1; i++) buffer_service_packet(encrypted);
+  assert(service_drops == SCRAM_MAX && scram_count == 1 && ring_seq == 0);
+  scram_head = scram_count = 0;
+  dvbcsa_key_free(key);
+  csa_free(csae); csae = NULL;
+}
+
+static void test_input_error_counters(void)
+{
+  uint8_t pkt[TS_PKT] = {0x47, 1, 0, 0x10};
+  memset(cc_seen, 0, sizeof(cc_seen));
+  input_tei = input_cc_errors = 0;
+  observe_transport(pkt, 0x100);
+  pkt[3] = 0x12; observe_transport(pkt, 0x100); /* skipped payload CC */
+  assert(input_cc_errors == 1);
+  observe_transport(pkt, 0x100); /* same CC can be a duplicate */
+  pkt[3] = 0x20; pkt[4] = 183; pkt[5] = 0;
+  observe_transport(pkt, 0x100); /* adaptation only: no increment */
+  assert(input_cc_errors == 1);
+  pkt[3] = 0x37; pkt[4] = 1; pkt[5] = 0x80;
+  observe_transport(pkt, 0x100); /* declared discontinuity resets expectation */
+  pkt[3] = 0x18; observe_transport(pkt, 0x100);
+  assert(input_cc_errors == 1);
+  pkt[1] |= 0x80;
+  uint64_t previous = ring_seq;
+  process_packet(pkt);
+  assert(input_tei == 1 && ring_seq == previous);
+}
+
 int main(void)
 {
   test_fragmented_reads();
   test_http_writes();
   test_stdout_ts();
+  test_service_order_and_csa_batch();
+  test_input_error_counters();
   puts("TS fragmentation, PCR forwarding, ring batching and TCP tests passed");
   return 0;
 }
