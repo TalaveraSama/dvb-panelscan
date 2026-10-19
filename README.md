@@ -7,7 +7,21 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.6.0 · Multicanal por transpondedor
+## Actual: 0.7.0 · Estado ECM y perfiles por canal
+
+- Canal con brillo verde tras dos respuestas ECM/CW no nulas recientes; rojo
+  ante error/CW vacía o falta de respuestas durante 15 s en una sesión cifrada.
+  Amarillo al iniciar, azul para libres y gris para inactivos o sin telemetría.
+  Solo canales abiertos: recibir TS no equivale a descifrar vídeo correctamente.
+- Perfiles Newcamd múltiples, asignables por canal desde **Editar** en Dashboard.
+- Editor de nombre, grupo M3U, número, logo y habilitación; ajustes persistentes
+  e independientes del reescaneo. Se aplica también a M3U/XMLTV.
+- Guardar cambios detiene únicamente los canales afectados: reabrir sus URLs.
+  La cuenta anterior se conserva como perfil **Predeterminado**.
+
+Ver [operación, colores, perfiles y límites](docs/CHANNELS_AND_PROFILES.md).
+
+### Motor multicanal incorporado en 0.6.0
 
 El panel recibe **una sola vez cada transpondedor por adaptador** y abre varios
 canales simultáneamente, con worker/colas/claves independientes por servicio.

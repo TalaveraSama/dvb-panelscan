@@ -6,6 +6,7 @@ import tempfile
 import shutil
 import threading
 import time
+from health import ECMHealth
 
 
 class StreamError(Exception):
@@ -36,9 +37,11 @@ class Session:
         os.chmod(log_path, 0o600)
         with os.fdopen(fd, "ab", buffering=0) as log:
             log.write(b"\n--- New shared TS session ---\n")
+            self.health = ECMHealth(log_path, log.tell(), self.created)
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log,
                                             stdin=subprocess.PIPE if source else subprocess.DEVNULL,
                                             bufsize=0, start_new_session=True)
+        self.health.pid = self.process.pid
         self.worker = threading.Thread(target=self._drain, daemon=True)
         self.worker.start()
         if source:
@@ -163,7 +166,8 @@ class Session:
                     "ca_pid": self.broker.process.pid if self.broker else None,
                     "ca_running": self.broker.process.poll() is None if self.broker else None,
                     "mux_queue_bytes": self.source.buffered if self.source else None,
-                    "input_error": self.input_error}
+                    "input_error": self.input_error,
+                    "ecm": self.health.snapshot(self.process.poll() is None and not self.ended)}
 
 
 class Broker:

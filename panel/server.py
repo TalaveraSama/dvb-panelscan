@@ -45,6 +45,8 @@ STATE = {
         "host": "127.0.0.1", "port": 5000, "user": "",
         "pass": "", "deskey": "",
     },
+    "profiles": {},
+    "channels": {},
     "stream": {"running": False, "pid": None, "udp": "", "http_port": 0},
 }
 
@@ -56,7 +58,7 @@ _streams = StreamManager()
 # Persistencia
 # ---------------------------------------------------------------------------
 def _load():
-    for name in ("transponders", "newcamd"):
+    for name in ("transponders", "newcamd", "profiles", "channels"):
         path = os.path.join(DATA_DIR, name + ".json")
         if os.path.isfile(path):
             try:
@@ -207,6 +209,62 @@ def channel_id(tp, sid):
     return "%s:%d" % (tp["id"], int(sid))
 
 
+def channel_view(tp, service):
+    result = dict(service)
+    identity = channel_id(tp, service["sid"])
+    result.update(STATE["channels"].get(identity, {}))
+    result.update(channel_id=identity, sid=service["sid"])
+    result.setdefault("enabled", True)
+    result.setdefault("newcamd_profile", "default")
+    profile = (STATE["newcamd"] if result["newcamd_profile"] == "default" else
+               STATE["profiles"].get(result["newcamd_profile"], {}))
+    result["profile_name"] = profile.get("name") or ("Predeterminado" if result["newcamd_profile"] == "default" else result["newcamd_profile"])
+    return result
+
+
+def transponder_views():
+    result = copy.deepcopy(STATE["transponders"])
+    for tp in result:
+        if tp.get("scan"):
+            tp["scan"]["services"] = [channel_view(tp, s) for s in tp["scan"].get("services", [])]
+    return result
+
+
+def profile_config(identity="default"):
+    if not isinstance(identity, str):
+        raise StreamError("Identificador de perfil inválido", 400)
+    if identity == "default":
+        return STATE["newcamd"]
+    if identity not in STATE["profiles"]:
+        raise StreamError("Perfil Newcamd no encontrado", 400)
+    return STATE["profiles"][identity]
+
+
+def validate_profile(body, previous=None):
+    result = dict(previous or {})
+    for key in ("host", "user", "pass", "deskey", "name"):
+        if key in body:
+            if not isinstance(body[key], str) or len(body[key]) > (128 if key == "host" else 80):
+                raise ValueError("Campo Newcamd inválido: " + key)
+            result[key] = body[key].strip() if key in ("host", "name", "deskey") else body[key]
+    result["port"] = int(body.get("port", result.get("port", 5000)))
+    key = result.get("deskey", "").replace(":", "").replace(" ", "")
+    if not result.get("host") or not 1 <= result["port"] <= 65535:
+        raise ValueError("Servidor o puerto inválidos")
+    if len(key) != 28 or len(bytes.fromhex(key)) != 14:
+        raise ValueError("DES key debe contener 14 bytes (28 caracteres hex)")
+    if len(result.get("user", "")) > 63 or len(result.get("pass", "")) > 63:
+        raise ValueError("Usuario/contraseña: máximo 63 caracteres")
+    result["deskey"] = key
+    return result
+
+
+def stop_profile_channels(profile):
+    for session in _streams.status():
+        if STATE["channels"].get(session["channel_id"], {}).get("newcamd_profile", "default") == profile:
+            _streams.stop_channel(session["channel_id"])
+
+
 def resolve_channel(identity):
     """Canonical TP:SID; retain SID-only URLs only when unambiguous."""
     tid, sep, sid = str(identity).rpartition(":")
@@ -246,7 +304,7 @@ def epg_aggregate():
                 "freq_mhz": t.get("freq_mhz"),
                 "network": scan.get("network"),
                 "time": scan.get("time"),
-                "services": scan.get("services", []),
+                "services": [channel_view(t, s) for s in scan.get("services", [])],
             })
     return out
 
@@ -272,13 +330,18 @@ def build_m3u8(base_url=None, tid=None, profile="pass"):
         if not scan:
             continue
         adapter = t.get("adapter", 0)
-        for s in scan.get("services", []):
+        for raw in scan.get("services", []):
+            s = channel_view(t, raw)
+            if not s["enabled"]:
+                continue
             name = _m3u_text(s.get("name") or "Service %s" % s.get("sid"))
-            group = _m3u_text(s.get("provider") or scan.get("network") or t.get("name") or "DVB")
+            group = _m3u_text(s.get("group") or s.get("provider") or scan.get("network") or t.get("name") or "DVB")
             identity = channel_id(t, s["sid"])
             radio = ' radio="true"' if s.get("type") in (2, 0x0A) else ""
-            lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s" group-title="%s"%s,%s'
-                         % (identity, name, group, radio, name))
+            extras = (' tvg-logo="%s"' % _m3u_text(s["logo"]) if s.get("logo") else "")
+            extras += (' tvg-chno="%s"' % s["number"] if s.get("number") else "")
+            lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s" group-title="%s"%s%s,%s'
+                         % (identity, name, group, radio, extras, name))
             if base_url:
                 url = (base_url.replace("{sid}", str(s.get("sid")))
                        .replace("{channel_id}", urllib.parse.quote(identity, safe=":"))
@@ -315,7 +378,10 @@ def build_xmltv(tid=None):
         scan = t.get("scan")
         if not scan:
             continue
-        for s in scan.get("services", []):
+        for raw in scan.get("services", []):
+            s = channel_view(t, raw)
+            if not s["enabled"]:
+                continue
             sid = channel_id(t, s["sid"])
             name = _xml_esc(s.get("name") or "Service %s" % sid)
             lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (sid, name))
@@ -335,7 +401,7 @@ def build_xmltv(tid=None):
 # ---------------------------------------------------------------------------
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
-def _session_start(tp, nc, udp=(), http_port=0, sid=None, pinned=False):
+def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     binary = find_tbsstream(_cfg["tbsstream"])
     if not (is_linux() and binary):
         raise StreamError("tbsstream no disponible")
@@ -354,6 +420,11 @@ def _session_start(tp, nc, udp=(), http_port=0, sid=None, pinned=False):
     except (ValueError, TypeError):
         raise StreamError("SID o puerto HTTP inválido", 400)
     key = channel_id(tp, sid)
+    settings = STATE["channels"].get(key, {})
+    if not settings.get("enabled", True):
+        raise StreamError("Canal deshabilitado", 403)
+    if nc is None:
+        nc = profile_config(settings.get("newcamd_profile", "default"))
     tuning = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
               "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
               "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"])]
@@ -386,7 +457,7 @@ def _session_start(tp, nc, udp=(), http_port=0, sid=None, pinned=False):
 
 def stream_start(tp, newcamd, udp, http_port, sid=None):
     try:
-        session = _session_start(tp, newcamd or STATE["newcamd"], udp,
+        session = _session_start(tp, newcamd, udp,
                                  9981 if http_port is None else http_port, sid, True)
         result = {"ok": True, **session.status(),
                   "url": "/stream/channel/" + session.key + "?profile=pass"}
@@ -403,6 +474,11 @@ def stream_stop():
 
 def stream_status():
     sessions = _streams.status()
+    for session in sessions:
+        settings = STATE["channels"].get(session["channel_id"], {})
+        profile_id = settings.get("newcamd_profile", "default")
+        profile = STATE["newcamd"] if profile_id == "default" else STATE["profiles"].get(profile_id, {})
+        session.update(newcamd_profile=profile_id, profile_name=profile.get("name") or profile_id)
     active = [s for s in sessions if s["running"]]
     first = active[0] if active else {}
     return {**first, "running": bool(active), "sessions": sessions,
@@ -476,12 +552,23 @@ class Handler(BaseHTTPRequestHandler):
                 "stream": stream_status(),
             })
         if path == "/api/transponders":
-            return self._send(200, STATE["transponders"])
+            return self._send(200, transponder_views())
         if path == "/api/epg":
             return self._send(200, epg_aggregate())
         if path == "/api/epg.xml":
             tid = qs.get("transponder", [None])[0]
             return self._send(200, build_xmltv(tid), "application/xml; charset=utf-8")
+        if path == "/api/newcamd/profiles":
+            profiles = [{"id": "default", "name": "Predeterminado", **STATE["newcamd"]}] + [
+                {**config, "id": identity} for identity, config in STATE["profiles"].items()]
+            return self._send(200, [{k: v for k, v in profile.items() if k not in ("pass", "deskey")}
+                                    for profile in profiles])
+        if path.startswith("/api/newcamd/profiles/"):
+            identity = path.rsplit("/", 1)[-1]
+            try:
+                return self._send(200, {**profile_config(identity), "id": identity})
+            except StreamError as error:
+                return self._send(404, {"error": str(error)})
         if path == "/api/newcamd":
             return self._send(200, STATE["newcamd"])
         if path == "/api/stream/log":
@@ -529,7 +616,7 @@ class Handler(BaseHTTPRequestHandler):
             # handler observes its disconnect. Allow cleanup, never evict it.
             for attempt in range(6):
                 try:
-                    session = _session_start(tp, STATE["newcamd"], sid=sid)
+                    session = _session_start(tp, sid=sid)
                     break
                 except StreamError as e:
                     if e.status != 409 or attempt == 5:
@@ -589,20 +676,94 @@ class Handler(BaseHTTPRequestHandler):
             tid = path[len("/api/transponders/"):-len("/delete")]
             with _lock:
                 STATE["transponders"] = [t for t in STATE["transponders"] if t.get("id") != tid]
-                _save("transponders")
+                STATE["channels"] = {key: value for key, value in STATE["channels"].items() if not key.startswith(tid + ":")}
+                _save("transponders"); _save("channels")
+            for session in _streams.status():
+                if session["channel_id"].startswith(tid + ":"):
+                    _streams.stop_channel(session["channel_id"])
+            return self._send(200, {"ok": True})
+
+        if path.startswith("/api/channels/") and path.endswith("/edit"):
+            identity = urllib.parse.unquote(path[len("/api/channels/"):-len("/edit")])
+            try:
+                tp, sid = resolve_channel(identity)
+                identity = channel_id(tp, sid)
+                allowed = {"name", "group", "number", "logo", "enabled", "newcamd_profile"}
+                if set(body) - allowed:
+                    raise ValueError("Campo de canal no admitido; el SID no se modifica")
+                settings = dict(STATE["channels"].get(identity, {}))
+                for field in ("name", "group", "logo", "newcamd_profile"):
+                    if field in body:
+                        if not isinstance(body[field], str) or len(body[field]) > (2048 if field == "logo" else 120):
+                            raise ValueError("Campo inválido: " + field)
+                        settings[field] = body[field].strip()
+                if "name" in settings and not settings["name"]:
+                    raise ValueError("Nombre requerido")
+                if "enabled" in body:
+                    if not isinstance(body["enabled"], bool):
+                        raise ValueError("Habilitado debe ser booleano")
+                    settings["enabled"] = body["enabled"]
+                if "number" in body:
+                    number = body["number"]
+                    if number not in (None, "") and (isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 99999):
+                        raise ValueError("Número de canal inválido (1–99999)")
+                    settings["number"] = number or None
+                if settings.get("logo"):
+                    url = urllib.parse.urlsplit(settings["logo"])
+                    if url.scheme not in ("http", "https") or not url.netloc:
+                        raise ValueError("Logo debe ser URL http/https")
+                profile_config(settings.get("newcamd_profile", "default"))
+                with _lock:
+                    STATE["channels"][identity] = settings
+                    _save("channels")
+                _streams.stop_channel(identity)
+                return self._send(200, {"ok": True, "reopen_required": True})
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+
+        if path == "/api/newcamd/profiles":
+            identity = body.get("id") or uuid.uuid4().hex[:12]
+            try:
+                if not isinstance(identity, str) or not identity.isalnum() or len(identity) > 32:
+                    raise ValueError("Identificador de perfil inválido")
+                previous = profile_config(identity) if identity == "default" or identity in STATE["profiles"] else None
+                config = validate_profile(body, previous)
+                if not config.get("name"):
+                    config["name"] = "Predeterminado" if identity == "default" else "Newcamd"
+                with _lock:
+                    if identity == "default":
+                        STATE["newcamd"] = config; _save("newcamd")
+                    else:
+                        STATE["profiles"][identity] = config; _save("profiles")
+                stop_profile_channels(identity)
+                return self._send(200, {"ok": True, "id": identity, "reopen_required": True})
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+
+        if path.startswith("/api/newcamd/profiles/") and path.endswith("/delete"):
+            identity = path[len("/api/newcamd/profiles/"):-len("/delete")]
+            if identity == "default" or any(s.get("newcamd_profile", "default") == identity for s in STATE["channels"].values()):
+                return self._send(409, {"ok": False, "error": "Perfil predeterminado o asignado; reasigna sus canales primero"})
+            with _lock:
+                if identity not in STATE["profiles"]:
+                    return self._send(404, {"ok": False, "error": "Perfil no encontrado"})
+                del STATE["profiles"][identity]; _save("profiles")
             return self._send(200, {"ok": True})
 
         if path.startswith("/api/channels/") and path.endswith("/delete"):
-            sid = path[len("/api/channels/"):-len("/delete")]
+            identity = urllib.parse.unquote(path[len("/api/channels/"):-len("/delete")])
+            try:
+                tp, sid = resolve_channel(identity)
+                identity = channel_id(tp, sid)
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
             with _lock:
-                for t in STATE["transponders"]:
-                    scan = t.get("scan")
-                    if scan:
-                        before = len(scan.get("services", []))
-                        scan["services"] = [s for s in scan.get("services", [])
-                                            if str(s.get("sid")) != sid]
-                        if len(scan["services"]) != before:
-                            _save_transponder(t)
+                tp["scan"]["services"] = [s for s in tp["scan"].get("services", []) if int(s["sid"]) != sid]
+                STATE["channels"].pop(identity, None)
+                _save_transponder(tp); _save("channels")
+            _streams.stop_channel(identity)
             return self._send(200, {"ok": True})
 
         if path == "/api/scan":
@@ -620,7 +781,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, result)
 
         if path == "/api/newcamd/test":
-            nc = STATE["newcamd"]
+            try:
+                nc = profile_config(body.get("id", "default"))
+            except StreamError as error:
+                return self._send(400, {"ok": False, "error": str(error)})
             try:
                 with socket.create_connection((nc["host"], int(nc["port"])), timeout=3):
                     pass
@@ -629,24 +793,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": False, "error": "Conexión TCP: " + str(e)})
 
         if path == "/api/newcamd":
-            nc = dict(STATE["newcamd"])
-            for k in ("host", "user", "pass", "deskey"):
-                if k in body:
-                    nc[k] = str(body[k])
-            if "port" in body:
-                nc["port"] = body["port"]
             try:
-                nc["port"] = int(nc["port"])
-                key = nc["deskey"].replace(":", "").replace(" ", "")
-                if not nc["host"].strip() or not 1 <= nc["port"] <= 65535:
-                    raise ValueError("Servidor o puerto inválidos")
-                if len(key) != 28 or len(bytes.fromhex(key)) != 14:
-                    raise ValueError("DES key debe contener 14 bytes (28 caracteres hex)")
-                nc["deskey"] = key
-            except (ValueError, TypeError) as e:
-                return self._send(400, {"ok": False, "error": str(e)})
-            STATE["newcamd"] = nc
-            _save("newcamd")
+                nc = validate_profile(body, STATE["newcamd"])
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            with _lock:
+                STATE["newcamd"] = nc
+                _save("newcamd")
+            stop_profile_channels("default")
             return self._send(200, {"ok": True, "newcamd": nc})
 
         if path == "/api/stream/start":

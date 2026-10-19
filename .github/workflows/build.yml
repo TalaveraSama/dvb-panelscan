@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish verified v0.6.0 release
+        description: Publish verified v0.7.0 release
         type: boolean
         default: false
 permissions:
@@ -19,6 +19,10 @@ jobs:
       - run: make -C dvb2m3u8 && make -C tbsstream
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: |
+          node --check panel/static/app.js
+          npm install --prefix /tmp/dvb-panel-ui jsdom@26.1.0 --no-audit --no-fund
+          NODE_PATH=/tmp/dvb-panel-ui/node_modules node tests/test_ui.cjs
+      - run: |
           make -C dvb2m3u8
           make -C tbsstream
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-demux tests/test_demux.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
@@ -31,7 +35,7 @@ jobs:
           /tmp/test-broker
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-csa tests/test_csa.c tbsstream/csa.c -ldvbcsa
           /tmp/test-csa
-      - run: sh packaging/build-deb.sh 0.6.0
+      - run: sh packaging/build-deb.sh 0.7.0
       - run: |
           sudo apt-get install -y ./dist/*.deb
           sudo systemctl start dvb-panel
@@ -42,10 +46,10 @@ jobs:
           name: ubuntu-22.04-amd64
           path: dist/*.deb
       - name: Publish release
-        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.6.0'))
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v0.7.0'))
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
           sha256sum *.deb > SHA256SUMS
-          gh release create v0.6.0 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.6.0 · Multicanal por transpondedor y Newcamd compartido · Ubuntu" --notes-file ../RELEASE_NOTES.md
+          gh release create v0.7.0 *.deb SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v0.7.0 · Estado ECM, editor de canales y perfiles Newcamd · Ubuntu" --notes-file ../RELEASE_NOTES.md

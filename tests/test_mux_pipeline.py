@@ -90,6 +90,7 @@ while True:
                     self.assertEqual(os.stat(session.broker.directory).st_mode & 0o777, 0o700)
                     self.assertEqual(os.stat(session.broker.path).st_mode & 0o777, 0o600)
                 status = self.panel.stream_status()["sessions"]
+                self.assertTrue(all(s["ecm"]["state"] == "clear" for s in status))
                 self.assertEqual(len({s["mux_pid"] for s in status}), 1)
                 self.assertEqual(len({s["ca_pid"] for s in status}), 1)
                 for response, expected, foreign in ((a, 0x101, 0x111), (b, 0x111, 0x101)):

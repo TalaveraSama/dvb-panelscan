@@ -481,3 +481,82 @@ tbody tr:hover {
     transition: none !important;
   }
 }
+
+/* ECM state is textual as well as colored; green is fresh CW activity, not
+   a claim that the video decoder has validated frames. */
+.ecm-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ecm-idle {
+  color: #9aa8bc;
+  background: #1d2736;
+}
+.ecm-waiting {
+  color: #ffdc82;
+  background: #392f17;
+}
+.ecm-clear {
+  color: #84d9ef;
+  background: #153440;
+}
+.ecm-error {
+  color: #ffb1b1;
+  background: #481f29;
+  box-shadow: 0 0 8px #dc35454d;
+}
+.ecm-ok {
+  color: #a4ffc3;
+  background: #16412d;
+  animation: ecm-glow 1.8s ease-in-out infinite alternate;
+}
+@keyframes ecm-glow {
+  to {
+    box-shadow: 0 0 12px #38ef8673;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ecm-ok {
+    animation: none;
+    box-shadow: 0 0 8px #38ef8659;
+  }
+}
+.channel-disabled {
+  opacity: 0.6;
+}
+dialog {
+  color: var(--text, #dce6f6);
+  background: #111c2d;
+  border: 1px solid #41536b;
+  border-radius: 12px;
+  width: min(700px, 92vw);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 24px;
+}
+dialog::backdrop {
+  background: #0009;
+}
+dialog h2,
+dialog p,
+dialog .actions {
+  grid-column: 1 / -1;
+}
+
+.channel-live {
+  box-shadow: inset 3px 0 #51e495;
+}
+.channel-live [data-channel-name] {
+  color: #a4ffc3;
+  text-shadow: 0 0 8px #38ef8673;
+}
+.channel-fault {
+  box-shadow: inset 3px 0 #ff7373;
+}
+.channel-fault [data-channel-name] {
+  color: #ffb1b1;
+}

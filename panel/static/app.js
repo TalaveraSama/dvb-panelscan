@@ -12,7 +12,10 @@ function esc(s) {
   );
 }
 async function getJSON(u) {
-  return (await fetch(u)).json();
+  const response = await fetch(u);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+  return data;
 }
 async function postJSON(u, b) {
   const r = await fetch(u, {
@@ -92,6 +95,7 @@ async function loadTransponders() {
   );
   renderTransponders();
   renderSelects();
+  updateHealthBadges();
   // el formulario "Agregar" apunta por defecto al primer adapter libre
   const used = new Set(transponders.map((t) => t.adapter));
   const free = (adapters.find((a) => !used.has(a.adapter)) || { adapter: 0 })
@@ -102,13 +106,17 @@ async function loadTransponders() {
 function channelsTable(services, showTpCol) {
   if (!services || !services.length) return "";
   return `<div class="table-wrap"><table>
-    <thead><tr>${showTpCol ? "<th>TP</th>" : ""}<th>SID</th><th>Canal</th><th>Prov.</th><th>Tipo</th><th>Ahora</th><th>Después</th></tr></thead>
+    <thead><tr>${showTpCol ? "<th>TP</th>" : ""}<th>SID</th><th>Canal</th><th>Prov.</th><th>Tipo</th><th>Ahora</th><th>Después</th><th>ECM/CW</th><th>Acciones</th></tr></thead>
     <tbody>${services
       .map(
-        (s) => `<tr>
+        (s) => `<tr class="${s.enabled === false ? "channel-disabled" : ""}">
       ${showTpCol ? `<td>${esc(s._tp || "")}</td>` : ""}
-      <td>${esc(s.sid)}</td><td>${esc(s.name)}</td><td>${esc(s.provider || "—")}</td>
+      <td>${esc(s.sid)}</td><td data-channel-name>${esc(s.name)}</td><td>${esc(s.provider || "—")}</td>
       <td>${typeTag(s.type)}</td><td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td>
+      <td><span class="ecm-badge ecm-idle" data-health="${esc(s.channel_id)}">Inactivo</span><br><small>Perfil: ${esc(s.profile_name || "Predeterminado")}</small></td>
+      <td><button class="btn small" data-edit-channel="${esc(s.channel_id)}">Editar</button>
+      <a class="btn small" href="/stream/channel/${encodeURIComponent(s.channel_id)}?profile=pass" target="_blank" rel="noopener">Abrir</a>
+      <button class="btn small danger" data-stop-single="${esc(s.channel_id)}">Detener</button></td>
     </tr>`,
       )
       .join("")}</tbody></table></div>`;
@@ -248,7 +256,7 @@ function renderEpg() {
         <td>${esc(tp.transponder)}</td><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>
         <td>${esc(s.provider || "—")}</td><td>${typeTag(s.type)}</td>
         <td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td>
-        <td><button class="btn small danger" data-delch="${esc(s.sid)}" title="Borrar canal">🗑</button></td></tr>`);
+        <td><button class="btn small danger" data-delch="${esc(tp.transponder_id + ":" + s.sid)}" title="Borrar canal">🗑</button></td></tr>`);
     }
   }
   $("epgCount").textContent = rows.length ? `(${rows.length})` : "";
@@ -262,37 +270,160 @@ function renderEpg() {
 }
 
 async function deleteChannel(sid) {
-  if (!confirm("¿Eliminar este canal del EPG?")) return;
+  if (!confirm("¿Eliminar este canal de la lista y detener su sesión?")) return;
   await postJSON("/api/channels/" + sid + "/delete", {});
   loadTransponders();
   loadEpg();
 }
 
 /* ----------------------------- Newcamd ----------------------------- */
-async function loadNewcamd() {
-  const nc = await getJSON("/api/newcamd");
+let newcamdProfiles = [];
+let editingProfile = "default";
+let editingChannel = null;
+let streamHealth = new Map();
+
+async function loadProfileForm(identity) {
+  editingProfile = identity;
+  const nc = identity
+    ? await getJSON("/api/newcamd/profiles/" + encodeURIComponent(identity))
+    : {};
+  $("nc_name").value =
+    nc.name || (identity === "default" ? "Predeterminado" : "");
   $("nc_host").value = nc.host || "";
   $("nc_port").value = nc.port || 5000;
   $("nc_user").value = nc.user || "";
   $("nc_pass").value = nc.pass || "";
   $("nc_deskey").value = nc.deskey || "";
-  $("ncInfo").textContent = `Guardado: ${nc.host}:${nc.port} · ${nc.user}`;
+  $("ncDelete").disabled = !identity || identity === "default";
+  $("ncInfo").textContent = identity
+    ? "Perfil guardado: " + (nc.name || identity)
+    : "Perfil nuevo, pendiente de guardar";
+}
+async function loadNewcamd() {
+  newcamdProfiles = await getJSON("/api/newcamd/profiles");
+  $("nc_profile").innerHTML = newcamdProfiles
+    .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
+    .join("");
+  if (!newcamdProfiles.some((p) => p.id === editingProfile))
+    editingProfile = "default";
+  $("nc_profile").value = editingProfile;
+  await loadProfileForm(editingProfile);
 }
 async function saveNewcamd(e) {
   e.preventDefault();
-  const r = await postJSON("/api/newcamd", {
+  if (
+    !confirm(
+      "Guardar el perfil detendrá los canales que lo utilizan. Reabre sus URLs para aplicar. ¿Continuar?",
+    )
+  )
+    return;
+  const r = await postJSON("/api/newcamd/profiles", {
+    id: editingProfile,
+    name: $("nc_name").value,
     host: $("nc_host").value,
-    port: parseInt($("nc_port").value, 10) || 5000,
+    port: Number($("nc_port").value),
     user: $("nc_user").value,
     pass: $("nc_pass").value,
     deskey: $("nc_deskey").value.trim(),
   });
-  if (!r.ok) {
-    alert("Error: " + r.error);
-    return;
-  }
-  loadNewcamd();
+  if (!r.ok) throw new Error(r.error);
+  editingProfile = r.id;
+  await loadNewcamd();
+  await loadTransponders();
+  await loadEpg();
+  await loadStream();
 }
+function updateHealthBadges(offline = false) {
+  document.querySelectorAll("[data-health]").forEach((badge) => {
+    const health = streamHealth.get(badge.dataset.health)?.ecm;
+    badge.className = "ecm-badge ecm-" + (health?.state || "idle");
+    const row = badge.closest("tr");
+    if (row) {
+      row.classList.toggle("channel-live", health?.state === "ok");
+      row.classList.toggle("channel-fault", health?.state === "error");
+    }
+    badge.textContent =
+      health?.label || (offline ? "Sin telemetría" : "Inactivo");
+    badge.title = health
+      ? `CW válidas en ${health.window_seconds}s: ${health.successes_15s} · Último resultado: ${health.last_result ?? "—"} · Latencia: ${health.latency_ms ?? "—"} ms. No certifica vídeo decodificado.`
+      : "No hay una sesión activa. No se monitoriza sin abrir el canal.";
+  });
+}
+async function editChannel(identity) {
+  const channel = transponders
+    .flatMap((tp) => tp.scan?.services || [])
+    .find((s) => s.channel_id === identity);
+  if (!channel) return;
+  newcamdProfiles = await getJSON("/api/newcamd/profiles");
+  editingChannel = identity;
+  $("channelIdentity").textContent = identity + " · SID " + channel.sid;
+  $("ch_name").value = channel.name || "";
+  $("ch_group").value = channel.group || channel.provider || "";
+  $("ch_number").value = channel.number || "";
+  $("ch_logo").value = channel.logo || "";
+  $("ch_enabled").checked = channel.enabled !== false;
+  $("ch_profile").innerHTML = newcamdProfiles
+    .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
+    .join("");
+  $("ch_profile").value = channel.newcamd_profile || "default";
+  $("channelEditor").showModal();
+}
+$("channelForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (
+    !confirm("Se detendrá solo este canal para aplicar sus cambios. ¿Guardar?")
+  )
+    return;
+  const r = await postJSON(
+    "/api/channels/" + encodeURIComponent(editingChannel) + "/edit",
+    {
+      name: $("ch_name").value,
+      group: $("ch_group").value,
+      logo: $("ch_logo").value,
+      number: $("ch_number").value ? Number($("ch_number").value) : null,
+      enabled: $("ch_enabled").checked,
+      newcamd_profile: $("ch_profile").value,
+    },
+  );
+  if (!r.ok) throw new Error(r.error);
+  $("channelEditor").close();
+  await loadTransponders();
+  await loadEpg();
+  await loadStream();
+});
+$("chCancel").addEventListener("click", () => $("channelEditor").close());
+$("nc_profile").addEventListener("change", () =>
+  loadProfileForm($("nc_profile").value),
+);
+$("ncNew").addEventListener("click", async () => {
+  $("nc_profile").value = "";
+  await loadProfileForm(null);
+  $("nc_name").focus();
+});
+$("ncDelete").addEventListener("click", async () => {
+  if (
+    !editingProfile ||
+    editingProfile === "default" ||
+    !confirm("¿Eliminar este perfil? No se permite si tiene canales asignados.")
+  )
+    return;
+  const r = await postJSON(
+    "/api/newcamd/profiles/" + encodeURIComponent(editingProfile) + "/delete",
+    {},
+  );
+  if (!r.ok) throw new Error(r.error);
+  editingProfile = "default";
+  await loadNewcamd();
+});
+document.addEventListener("click", async (e) => {
+  const edit = e.target.closest("[data-edit-channel]");
+  if (edit) return editChannel(edit.dataset.editChannel);
+  const stop = e.target.closest("[data-stop-single]");
+  if (stop && confirm("¿Detener solo este canal?")) {
+    await postJSON("/api/stream/stop", { channel_id: stop.dataset.stopSingle });
+    await loadStream();
+  }
+});
 
 /* --------------------------- M3U8 / Stream --------------------------- */
 function renderSelects() {
@@ -318,6 +449,8 @@ async function downloadM3u8(e) {
 
 async function loadStream() {
   const st = await getJSON("/api/stream/status");
+  streamHealth = new Map((st.sessions || []).map((s) => [s.channel_id, s]));
+  updateHealthBadges();
   $("metricStream").textContent = st.running ? "Activo" : "Detenido";
   $("stStart").disabled = false;
   $("stStop").disabled = !st.running;
@@ -327,8 +460,10 @@ async function loadStream() {
         .map(
           (session) => `
     <div class="adapter">
+      <span data-health="${esc(session.channel_id)}" class="ecm-badge ecm-${esc(session.ecm?.state || "idle")}">${esc(session.ecm?.label || "Sin telemetría")}</span>
       <strong>${esc(session.channel_id)}</strong> · adaptador ${esc(session.adapter)}
       <span class="${session.running ? "ok" : "err"}">${session.running ? "● Activo" : "○ Finalizado"}</span><br>
+      Perfil: ${esc(session.profile_name || "Predeterminado")} · ECM: ${esc(session.ecm?.latency_ms ?? "—")} ms · CW recientes: ${esc(session.ecm?.successes_15s ?? 0)}/15 s<br>
       Mux PID ${esc(session.mux_pid)} · CA PID ${esc(session.ca_pid || "—")}<br>
       ${esc(session.clients)} clientes · ${session.pinned ? "Inicio manual" : "Bajo demanda"} ·
       TS recibido: ${(session.bytes_received / 1048576).toFixed(2)} MiB ·
@@ -372,7 +507,11 @@ async function loadStream() {
 }
 async function startStream(e) {
   e.preventDefault();
-  if (!confirm("¿Fijar este canal? Puede compartir el adaptador con otros canales del mismo transpondedor."))
+  if (
+    !confirm(
+      "¿Fijar este canal? Puede compartir el adaptador con otros canales del mismo transpondedor.",
+    )
+  )
     return;
   const r = await postJSON("/api/stream/start", {
     sid: $("st_sid").value ? Number($("st_sid").value) : null,
@@ -414,7 +553,15 @@ $("toggleTpForm").addEventListener("click", () => {
   await loadNewcamd();
   await loadStream();
 })().catch(showError);
-setInterval(() => loadStream().catch(showError), 5000);
+setInterval(
+  () =>
+    loadStream().catch((error) => {
+      streamHealth.clear();
+      updateHealthBadges(true);
+      showError(error);
+    }),
+  2000,
+);
 
 function showError(error) {
   $("notice").classList.remove("hidden");
@@ -430,7 +577,9 @@ $("ncTest").addEventListener("click", async () => {
   b.disabled = true;
   $("ncInfo").textContent = "Comprobando configuración guardada…";
   try {
-    const result = await postJSON("/api/newcamd/test", {});
+    const result = await postJSON("/api/newcamd/test", {
+      id: editingProfile || "default",
+    });
     $("ncInfo").textContent = result.message || result.error;
   } catch (e) {
     showError(e);

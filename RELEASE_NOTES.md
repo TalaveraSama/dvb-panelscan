@@ -1,3 +1,51 @@
+## DVB PanelScan 0.7.0 · Estado ECM, canales y perfiles Newcamd
+
+- Indicadores por canal en Dashboard y Streaming: verde brillante con dos CW no
+  nulas recientes, rojo ante error o ausencia de ECM/CW en canal cifrado activo,
+  amarillo comprobando continuidad, azul libre y gris inactivo/sin telemetría.
+- Telemetría por proceso, con timestamp monotónico y PID; caduca tras 15 s y no
+  confunde bytes TS, logs antiguos, otro worker ni éxito sin CW con descifrado.
+  Al fallar la consulta HTTP desaparece el verde anterior. Respeta movimiento reducido.
+- Múltiples perfiles Newcamd y asignación por canal, conservando la cuenta actual
+  como Predeterminado. TCP test del perfil seleccionado; sin fallback automático.
+- Editor de nombre, grupo, número, logo y habilitación. Ajustes TP:SID persistentes
+  separados del escaneo; aplicados a Dashboard, EPG, M3U y XMLTV.
+- Deshabilitar bloquea la URL y retira el canal de las exportaciones. Guardar el
+  canal/perfil detiene solo los canales afectados: reabrir sus URLs para aplicar.
+- Borrado de canal inequívoco por TP:SID; perfiles asignados protegidos de borrado.
+- Se conserva la captura compartida y el multicanal de 0.6.0.
+
+### Actualizar Ubuntu 22.04 amd64
+
+```sh
+wget -O /tmp/dvb-panelscan_0.7.0_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.7.0/dvb-panelscan_0.7.0_amd64.deb
+sudo systemctl stop dvb-panel
+sudo apt install /tmp/dvb-panelscan_0.7.0_amd64.deb
+sudo systemctl start dvb-panel
+```
+
+Se conservan configuración, canales y overrides. Cerrar reproductores antiguos y
+recargar con Ctrl+F5. En Acceso condicional crear perfiles; en Dashboard → Editar
+asignarlos. El color cambia solo mientras el canal esté abierto.
+
+### Validación y límites
+
+41 pruebas Python/HTTP, regresiones C con ASan/UBSan y prueba DOM JavaScript para
+editor, perfil seleccionado, metadatos numéricos, luces verde/roja y apagado del
+verde ante pérdida de telemetría. Integración con workers C reales y multiplex
+simulado comprueba además el estado de canales libres. Actions instala y arranca
+el paquete Ubuntu antes de publicar.
+
+**Verde indica actividad ECM/CW reciente, no imagen decodificada correcta.** No
+hay validación con hardware TBS en este entorno. Los ajustes de paridad/épocas CW,
+CAID/simulcrypt, EMM, HLS y transcodificación siguen fuera de este cambio. El panel
+sigue sin autenticación y los registros sin rotación: no exponer a Internet.
+Ver `docs/CHANNELS_AND_PROFILES.md` para semántica y API.
+
+---
+
+# Historial 0.6.0
+
 ## DVB PanelScan 0.6.0 · Multicanal por transpondedor y Newcamd compartido
 
 ### Varios canales simultáneos

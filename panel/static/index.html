@@ -28,7 +28,7 @@
           <h2 id="pageTitle">Vista general</h2>
           <p>Administra tu señal. Conecta, escanea y distribuye.</p>
         </div>
-        <span class="version">v0.6.0 <span>● Sistema local</span></span>
+        <span class="version">v0.7.0 <span>● Sistema local</span></span>
       </div>
       <div
         id="notice"
@@ -156,7 +156,27 @@
       <section id="tab-newcamd" class="hidden">
         <section class="card">
           <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
+          <div class="connection-tools">
+            <label
+              >Perfil
+              <select id="nc_profile">
+                <option value="default">Predeterminado</option>
+              </select></label
+            >
+            <button class="btn" type="button" id="ncNew">Nuevo perfil</button>
+            <button class="btn danger" type="button" id="ncDelete">
+              Eliminar perfil
+            </button>
+          </div>
           <form id="ncForm" class="grid-form">
+            <label
+              >Nombre del perfil
+              <input
+                id="nc_name"
+                maxlength="80"
+                required
+                value="Predeterminado"
+            /></label>
             <label>Servidor <input id="nc_host" value="127.0.0.1" /></label>
             <label
               >Puerto
@@ -189,9 +209,13 @@
             ><span class="muted small" id="ncInfo" role="status"></span>
           </div>
           <div class="callout">
-            Solo acceso autorizado. Una conexión TCP correcta no confirma el
-            login ni la recepción de CW. Verifica CAID, permisos de la tarjeta y
-            los registros de OSCam.
+            Verde brillante: al menos dos CW no nulas recientes en 15 s. Rojo:
+            error o falta de ECM/CW reciente en un canal cifrado activo.
+            Amarillo: esperando continuidad; azul: libre; gris: inactivo o sin
+            telemetría. Solo se monitorizan los canales abiertos. Esto no
+            certifica vídeo decodificado. Una conexión TCP correcta no confirma
+            el login ni la recepción de CW. Verifica CAID, permisos de la
+            tarjeta y los registros de OSCam.
           </div>
         </section>
       </section>
@@ -261,10 +285,11 @@
           <div class="callout">
             Multicanal: varios servicios del mismo transpondedor comparten una
             sola captura por adaptador. Transpondedores distintos requieren
-            adaptadores distintos. El inicio manual fija solo ese canal; detenerlo
-            no interrumpe los demás. Usa puerto 0 para las URLs del panel, o un
-            puerto directo distinto por canal. Los clientes directos no se cuentan
-            aquí. No es HLS y los bytes TS no certifican descifrado.
+            adaptadores distintos. El inicio manual fija solo ese canal;
+            detenerlo no interrumpe los demás. Usa puerto 0 para las URLs del
+            panel, o un puerto directo distinto por canal. Los clientes directos
+            no se cuentan aquí. No es HLS y los bytes TS no certifican
+            descifrado.
           </div>
           <div class="adapters" id="stInfo" aria-live="polite"></div>
         </section>
@@ -272,6 +297,38 @@
     </main>
 
     <footer class="footer" id="footer">—</footer>
+    <dialog id="channelEditor" aria-labelledby="channelEditorTitle">
+      <form id="channelForm" class="grid-form">
+        <h2 id="channelEditorTitle">Editar canal</h2>
+        <p id="channelIdentity" class="muted"></p>
+        <label>Nombre <input id="ch_name" maxlength="120" required /></label>
+        <label>Grupo M3U <input id="ch_group" maxlength="120" /></label>
+        <label
+          >Número de canal
+          <input id="ch_number" type="number" min="1" max="99999"
+        /></label>
+        <label
+          >Logo (URL http/https)
+          <input id="ch_logo" type="url" maxlength="2048"
+        /></label>
+        <label
+          >Perfil Newcamd
+          <select id="ch_profile"></select
+        ></label>
+        <label
+          ><input id="ch_enabled" type="checkbox" /> Canal habilitado</label
+        >
+        <p class="callout">
+          Guardar detiene solo este canal si está activo. Reabre su URL para
+          aplicar. La identidad TP:SID y los PIDs detectados no se modifican.
+          Los ajustes sobreviven al reescaneo.
+        </p>
+        <div class="actions">
+          <button class="btn primary" type="submit">Guardar canal</button>
+          <button class="btn" type="button" id="chCancel">Cancelar</button>
+        </div>
+      </form>
+    </dialog>
     <script src="/static/app.js"></script>
   </body>
 </html>

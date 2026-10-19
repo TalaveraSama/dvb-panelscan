@@ -662,8 +662,12 @@ static void *ca_thread(void *arg)
     uint64_t requested = monotonic_ms();
     int result = newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
                                  r.sec, r.len, even, odd, 5000);
-    LOGV("ECM: sid=%u caid=%04X time_ms=%llu result=%d\n", r.sid, r.caid,
-         (unsigned long long)(monotonic_ms() - requested), result);
+    const uint8_t empty_cw[8] = {0};
+    unsigned cw_mask = result == 0 ?
+      ((memcmp(even, empty_cw, 8) ? 1 : 0) | (memcmp(odd, empty_cw, 8) ? 2 : 0)) : 0;
+    LOGV("ECM: sid=%u caid=%04X time_ms=%llu result=%d cw_mask=%u at_ms=%llu pid=%ld\n",
+         r.sid, r.caid, (unsigned long long)(monotonic_ms() - requested), result,
+         cw_mask, (unsigned long long)monotonic_ms(), (long)getpid());
     if (result == 0) {
       pthread_mutex_lock(&csa_mutex);
       /* A zero half means unavailable; do not replace a valid CW with it. */
@@ -765,8 +769,8 @@ static void parse_pmt(const uint8_t *b, int len)
     svc = next;
     refresh_playlist(svc.sid);
     psi_due_ms = 0;
-    LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d\n",
-         svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes);
+    LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld\n",
+         svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes, (long)getpid());
   }
 }
 
