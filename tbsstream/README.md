@@ -95,23 +95,31 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
    periódicamente; reenvía los ES descifrados y descarta los ECM.
 7. **Salida**: UDP (con `sendto`) y HTTP (ring buffer + servidor mínimo).
 
-## Avisos importantes
+## Avisos importantes (0.5.1)
 
-- ⚠️ **Sin probar en este entorno** (no hay Linux ni hardware DVB ni servidor
-  newcamd aquí). Compílalo en Linux y pruébalo con hardware real.
-- La conexión newcamd es **asíncrona** (hilo CA + cola de ECM), así que el hilo
-  principal no se detiene esperando la CW. Si falla el servidor newcamd, se
-  sigue reenviando el TS pero sin descifrar (paquetes scrambled en cola).
-- El **cambio de clave** (crypto period, cada ~10 s en CSA) se amortigua con la
-  cola de paquetes scrambled, pero no llega a la precisión de TVHeadend
-  (que predice el cambio y hace switchover exacto). Para un headend es
-  suficiente; para una precisión total haría falta rastrear el crypto period.
-- El **formato del ECM enviado** (sección privada completa) es la
-  convención más común, pero puede variar entre servidores newcamd; si un
-  servidor no responde CW, es el primer punto a ajustar en `enqueue_ecm()`.
-- DVB-S: la frecuencia se pasa ya convertida por el LNB (sin DiSEqC/rotor).
-- Para multicast fuera de la LAN hay que ajustar el TTL del socket
-  (`IP_MULTICAST_TTL`) — aquí se deja el valor por defecto (1).
+- Compilación y regresiones con ASan/UBSan verificadas en Ubuntu mediante
+  Actions. Falta validación end-to-end de esta versión con hardware y acceso
+  condicional autorizados.
+- Un servicio por proceso. La cola guarda en orden todos los paquetes del
+  servicio, incluido PCR/audio claros, mientras espera una CW. Su límite es
+  4096 paquetes; un desbordamiento se registra y contabiliza.
+- CSA descifra en lotes de hasta 64 paquetes disponibles. No se añade espera
+  para llenar el lote; se drena al terminar cada lectura y durante pausas DVR.
+- No se implementa el seguimiento temporal completo de generaciones de CW
+  de Tvheadend. No se garantiza resolver cortes de período criptográfico.
+- Los ECM pendientes idénticos se deduplican; `ECM: ... time_ms=... result=...`
+  informa latencia/resultado sin imprimir claves. La sección privada se envía
+  completa, no se trunca arbitrariamente ni se elude autorización del servidor.
+- `TS stats` cada 5 s informa contadores acumulados de TEI y saltos CC del
+  mux de entrada, descartes/pendientes de servicio/ECM y trabajo CSA. No
+  repara pérdidas ni certifica vídeo correcto por recibir CW.
+- Se solicita un buffer demux de 4 MiB si el driver admite el ioctl; de lo
+  contrario se registra el error y se conserva su configuración por defecto.
+- `--stdout` entrega TS al panel, manteniendo diagnósticos en stderr.
+- HTTP entrega TS continuo; su playlist M3U de canales **no es HLS**. Un
+  empaquetador HLS externo no corrige claves fuera de período o datos perdidos.
+- Para multicast fuera de la LAN hace falta configurar el TTL adecuadamente.
+
 
 ## Licencia
 
