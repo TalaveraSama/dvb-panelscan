@@ -1,3 +1,54 @@
+## DVB PanelScan 0.8.0 · EPG real de uno o varios días
+
+- Canales y EPG: botón **Editar** para escoger perfil Newcamd por canal, también
+  cuando dos satélites tienen SIDs iguales. Los perfiles y metadatos previos se conservan.
+- Selector global de 1 a 14 días (próximas N×24 horas) y botón **Programas** por
+  canal. La ventana incluye programas en curso y futuros, no un archivo histórico.
+- Captura EIT 0x4E y schedule 0x50–0x5F del mux actual, validación CRC/TSID/fechas
+  BCD, secciones multipaquete de hasta 4096 bytes, títulos y descripciones.
+- Recibe EPG al escanear y desde la captura compartida del adaptador, sin otro
+  proceso de sintonización ni bloquear canales por una escritura en disco.
+- Persistencia privada 0600 en epg.json, escritura atómica cada 30 s y al apagar
+  normalmente el servicio. Limpieza de vencidos, deduplicación y máximo 50 000
+  eventos. Reducir días descarta datos fuera de ventana; ampliar requiere volver
+  a recibir los eventos que no estaban guardados.
+- XMLTV con horas UTC/duraciones emitidas, sin horarios inventados para títulos
+  antiguos de ahora/después. Los canales siguen exportándose aun sin programas.
+- Se mantienen **Eventos en vivo** sin archivos ni historial. EPG persistente
+  es programación de televisión, no una grabación de los eventos del sistema.
+
+### Actualizar Ubuntu 22.04 amd64
+
+```sh
+wget -O /tmp/dvb-panelscan_0.8.0_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.8.0/dvb-panelscan_0.8.0_amd64.deb
+sudo systemctl stop dvb-panel
+sudo apt install /tmp/dvb-panelscan_0.8.0_amd64.deb
+sudo systemctl start dvb-panel
+```
+
+Recargar con Ctrl+F5. En Canales y EPG elegir días y guardar; dejar un canal del
+transpondedor abierto o escanearlo cuando no tenga streaming para recoger EIT.
+Consultar Programas y descargar XMLTV. Para dos satélites, crear perfiles en
+Acceso condicional y asignarlos con Editar en los canales de cada TP.
+
+### Verificación y límites
+
+55 pruebas Python/HTTP (dos integraciones C requieren compilar tbsstream), prueba
+DOM y regresiones C con ASan/UBSan. EIT sintético verifica horarios UTC, UTF-8,
+CRC, aislamiento entre mux/satélites, sección grande, TEI/saltos CC, retención,
+persistencia, XMLTV real y selector/editor. El escáner C prueba secciones de
+4096 bytes, schedule y horarios/descriptores reales con sanitizadores.
+
+El usuario confirmó multicanal TBS real en versiones anteriores; el nuevo EPG
+requiere comprobación en sus emisiones. Solo se guarda lo que emite el proveedor,
+no se prometen 14 días completos. No se sintonizan adaptadores de fondo sin permiso,
+no se importan guías externas ni se usan tablas EIT de otros transpondedores.
+Ver docs/EPG.md. Sigue siendo un panel local sin autenticación.
+
+---
+
+# Historial 0.7.1
+
 ## DVB PanelScan 0.7.1 · Eventos en vivo, sin grabación
 
 - Nueva pestaña **Eventos en vivo** con arranque/parada, resultados ECM/CW,

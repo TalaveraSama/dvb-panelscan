@@ -40,7 +40,10 @@ def multiplex():
     pat = section(0, bytes.fromhex("0001 c1 0000 02a0 e100 0283 e110"))
     pmt_a = section(2, bytes.fromhex("02a0 c1 0000 e101 f000 1b e101 f000"))
     pmt_b = section(2, bytes.fromhex("0283 c1 0000 e111 f000 1b e111 f000"))
-    return (packet(0, pat, True) + packet(0x100, pmt_a, True) + packet(0x110, pmt_b, True) +
+    from test_epg import eit, packets
+    import time
+    guide = b''.join(packets(18, eit(int(time.time())+3600,tsid=1)))
+    return guide + (packet(0, pat, True) + packet(0x100, pmt_a, True) + packet(0x110, pmt_b, True) +
             packet(0x101, b"service-A" * 20)[:188] + packet(0x111, b"service-B" * 20)[:188])
 
 
@@ -98,6 +101,10 @@ while True:
                 self.assertTrue(all(s["ecm"]["state"] == "clear" for s in status))
                 self.assertEqual(len({s["mux_pid"] for s in status}), 1)
                 self.assertEqual(len({s["ca_pid"] for s in status}), 1)
+                deadline = time.monotonic() + 1
+                while not self.panel._epg.events_for("mux-a:672") and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(self.panel._epg.events_for("mux-a:672")[0]["title"], "Película")
                 for response, expected, foreign in ((a, 0x101, 0x111), (b, 0x111, 0x101)):
                     data = response.read(188 * 200)
                     self.assertEqual(len(data), 188 * 200)

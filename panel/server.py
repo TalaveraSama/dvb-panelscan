@@ -33,6 +33,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from streaming import StreamManager, StreamError
+from epg import EPGStore, EITCollector, clean_text
 
 DATA_DIR = os.environ.get("DVB_PANEL_DATA_DIR", BASE_DIR)
 os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
@@ -52,6 +53,7 @@ STATE = {
 
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
 _streams = StreamManager()
+_epg = EPGStore(os.path.join(DATA_DIR, "epg.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +220,14 @@ def channel_view(tp, service):
     result.setdefault("newcamd_profile", "default")
     profile = (STATE["newcamd"] if result["newcamd_profile"] == "default" else
                STATE["profiles"].get(result["newcamd_profile"], {}))
+    events = _epg.events_for(identity)
+    result["epg_events"] = len(events)
+    current = next((e for e in events if e["start"] <= time.time() < e["stop"]), None)
+    following = next((e for e in events if e["start"] > time.time()), None)
+    if current:
+        result["now"] = current["title"]
+    if following:
+        result["next"] = following["title"]
     result["profile_name"] = profile.get("name") or ("Predeterminado" if result["newcamd_profile"] == "default" else result["newcamd_profile"])
     return result
 
@@ -356,14 +366,13 @@ def build_m3u8(base_url=None, tid=None, profile="pass"):
 
 
 def _xml_esc(s):
-    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+    return (clean_text(s or "").replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def build_xmltv(tid=None):
     """XMLTV (EPG) para XUI.one / Xtream Codes (xcode)."""
     import datetime
-    now = datetime.datetime.now().astimezone()
 
     def fmt(dt):
         return dt.strftime("%Y%m%d%H%M%S %z")
@@ -384,16 +393,12 @@ def build_xmltv(tid=None):
                 continue
             sid = channel_id(t, s["sid"])
             name = _xml_esc(s.get("name") or "Service %s" % sid)
-            lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (sid, name))
-            if s.get("now"):
-                start, stop = now, now + datetime.timedelta(hours=1)
-                lines.append('<programme start="%s" stop="%s" channel="%s"><title lang="es">%s</title></programme>'
-                             % (fmt(start), fmt(stop), sid, _xml_esc(s.get("now"))))
-            if s.get("next"):
-                start = now + datetime.timedelta(hours=1)
-                stop = now + datetime.timedelta(hours=2)
-                lines.append('<programme start="%s" stop="%s" channel="%s"><title lang="es">%s</title></programme>'
-                             % (fmt(start), fmt(stop), sid, _xml_esc(s.get("next"))))
+            lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (_xml_esc(sid), name))
+            for event in _epg.events_for(sid):
+                start = datetime.datetime.fromtimestamp(event["start"], datetime.timezone.utc)
+                stop = datetime.datetime.fromtimestamp(event["stop"], datetime.timezone.utc)
+                lines.append('<programme start="%s" stop="%s" channel="%s"><title>%s</title><desc>%s</desc></programme>'
+                             % (fmt(start), fmt(stop), _xml_esc(sid), _xml_esc(event["title"]), _xml_esc(event["description"])))
     lines.append('</tv>')
     return "\n".join(lines) + "\n"
 
@@ -401,6 +406,21 @@ def build_xmltv(tid=None):
 # ---------------------------------------------------------------------------
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
+def epg_collector(tp):
+    tuning = _norm_tp(tp)
+    def receive(events):
+        with _lock:
+            targets = [(candidate["id"], {int(s["sid"]) for s in (candidate.get("scan") or {}).get("services", [])})
+                       for candidate in STATE["transponders"]
+                       if all(_norm_tp(candidate)[key] == tuning[key] for key in
+                              ("adapter", "type", "freq_mhz", "symbol_rate", "pol", "lnb_lo"))]
+        for tid, services in targets:
+            for event in events:
+                if event["sid"] in services:
+                    _epg.put("%s:%d" % (tid, event["sid"]), event)
+    return EITCollector(receive)
+
+
 def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     binary = find_tbsstream(_cfg["tbsstream"])
     if not (is_linux() and binary):
@@ -452,7 +472,7 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
                             http_port=http_port, udp=udp, mux_id=mux_id,
                             mux_command=capture, mux_log=mux_log,
                             broker_command=ca, broker_id=tuple(ca),
-                            broker_log=os.path.join(DATA_DIR, "ca.log"))
+                            broker_log=os.path.join(DATA_DIR, "ca.log"), mux_callback=epg_collector(tp).feed)
 
 
 def stream_start(tp, newcamd, udp, http_port, sid=None):
@@ -553,6 +573,14 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/transponders":
             return self._send(200, transponder_views())
+        if path == "/api/epg/settings":
+            return self._send(200, {"days": _epg.days, "max_days": 14})
+        if path == "/api/epg/channel":
+            try:
+                tp, sid = resolve_channel(qs.get("channel", [""])[0])
+                return self._send(200, {"days": _epg.days, "events": _epg.events_for(channel_id(tp, sid))})
+            except StreamError as error:
+                return self._send(error.status, {"error": str(error)})
         if path == "/api/epg":
             return self._send(200, epg_aggregate())
         if path == "/api/epg.xml":
@@ -677,6 +705,15 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             return self._send(400, {"ok": False, "error": "Se requiere un objeto JSON"})
 
+        if path == "/api/epg/settings":
+            try:
+                _epg.set_days(body.get("days"))
+                return self._send(200, {"ok": True, "days": _epg.days})
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            except OSError:
+                return self._send(500, {"ok": False, "error": "No se pudo guardar el EPG"})
+
         if path == "/api/transponders":
             tp = _norm_tp(body)
             tp["id"] = uuid.uuid4().hex[:8]
@@ -791,8 +828,12 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     t = _find_tp(tid)
                     if t:
+                        for service in result.get("services", []):
+                            for event in service.pop("events", []):
+                                _epg.put(channel_id(t, service["sid"]), event)
                         t["scan"] = result
                         _save_transponder(t)
+                _epg.flush()
             return self._send(200, result)
 
         if path == "/api/newcamd/test":
@@ -851,15 +892,23 @@ def main():
     _cfg["dvb2m3u8"] = args.dvb2m3u8
     _cfg["tbsstream"] = args.tbsstream
     _load()
+    _epg.start()
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("Mini panel DVB-Scan en http://%s:%d" % (args.host, args.port))
+    def handle_stop(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, handle_stop)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         stream_stop()
+        try:
+            _epg.stop()
+        except OSError:
+            pass
         srv.server_close()
 
 

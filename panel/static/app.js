@@ -38,6 +38,7 @@ function tpInfo(t) {
 let activeTab = "dashboard";
 function switchTab(tab) {
   activeTab = tab;
+  if (tab === "epg") loadEpg().catch(showError);
   if (tab === "events" && !document.hidden) startEvents();
   else stopEvents();
   $("pageTitle").textContent = {
@@ -241,6 +242,10 @@ let epg = [];
 
 async function loadEpg() {
   epg = await getJSON("/api/epg");
+  const settings = await getJSON("/api/epg/settings");
+  $("epgDays").value = settings.days;
+  $("epgSettingsInfo").textContent =
+    `Ventana: próximos ${settings.days} día(s), según emisión`;
   renderEpg();
 }
 
@@ -261,7 +266,9 @@ function renderEpg() {
         <td>${esc(tp.transponder)}</td><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>
         <td>${esc(s.provider || "—")}</td><td>${typeTag(s.type)}</td>
         <td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td>
-        <td><button class="btn small danger" data-delch="${esc(tp.transponder_id + ":" + s.sid)}" title="Borrar canal">🗑</button></td></tr>`);
+        <td><button class="btn small" data-edit-channel="${esc(tp.transponder_id + ":" + s.sid)}">Editar</button>
+        <button class="btn small" data-epg-channel="${esc(tp.transponder_id + ":" + s.sid)}">Programas (${esc(s.epg_events || 0)})</button>
+        <button class="btn small danger" data-delch="${esc(tp.transponder_id + ":" + s.sid)}" title="Borrar canal">🗑</button></td></tr>`);
     }
   }
   $("epgCount").textContent = rows.length ? `(${rows.length})` : "";
@@ -273,6 +280,38 @@ function renderEpg() {
       b.addEventListener("click", () => deleteChannel(b.dataset.delch)),
     );
 }
+
+$("epgRefresh").addEventListener("click", () => loadEpg().catch(showError));
+$("epgSettingsForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await postJSON("/api/epg/settings", {
+    days: Number($("epgDays").value),
+  });
+  if (!result.ok) throw new Error(result.error);
+  await loadEpg();
+});
+$("epgScheduleClose").addEventListener("click", () => $("epgSchedule").close());
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-epg-channel]");
+  if (!button) return;
+  const data = await getJSON(
+    "/api/epg/channel?channel=" + encodeURIComponent(button.dataset.epgChannel),
+  );
+  $("epgScheduleTitle").textContent =
+    "Programación · " + button.dataset.epgChannel;
+  $("epgScheduleBody").innerHTML = data.events.length
+    ? '<div class="table-wrap"><table><thead><tr><th>Inicio</th><th>Fin</th><th>Programa</th><th>Descripción</th></tr></thead><tbody>' +
+      data.events
+        .slice(0, 500)
+        .map(
+          (e) => `<tr><td>${esc(new Date(e.start * 1000).toLocaleString())}</td>
+      <td>${esc(new Date(e.stop * 1000).toLocaleString())}</td><td>${esc(e.title || "Sin título")}</td><td>${esc(e.description)}</td></tr>`,
+        )
+        .join("") +
+      `</tbody></table></div><p>Mostrando ${Math.min(500, data.events.length)} de ${data.events.length} eventos recibidos.</p>`
+    : "<p>Sin programación con horarios recibida. Escanea o deja abierto un canal de este transpondedor para captar EIT.</p>";
+  $("epgSchedule").showModal();
+});
 
 async function deleteChannel(sid) {
   if (!confirm("¿Eliminar este canal de la lista y detener su sesión?")) return;

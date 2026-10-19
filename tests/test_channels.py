@@ -108,3 +108,26 @@ class ChannelSettingsTests(unittest.TestCase):
         self.assertEqual(self.call("/api/transponders/a/delete",{})[0],200)
         self.assertEqual(self.call("/api/newcamd/profiles/"+identity+"/delete",{})[0],200)
         self.assertEqual(self.call("/api/newcamd/test",{"id":{}})[0],400)
+
+    def test_epg_settings_real_xmltv_and_same_sid_isolation(self):
+        import time
+        import datetime
+        import xml.etree.ElementTree as ET
+        self.assertEqual(self.call("/api/epg/settings",{"days":7})[0],200)
+        self.assertEqual(self.call("/api/epg/settings")[1]["days"],7)
+        for days in (0,15,"7",True):
+            self.assertEqual(self.call("/api/epg/settings",{"days":days})[0],400)
+        start=int(time.time())+2*86400
+        self.panel._epg.put("a:672",{"event_id":12,"start":start,"stop":start+3600,"title":"Real & recibido"})
+        self.panel._epg.flush()
+        data=self.call("/api/epg/channel?channel=a:672")[1]
+        self.assertEqual(data["events"][0]["start"],start)
+        self.assertEqual(self.call("/api/epg/channel?channel=b:672")[1]["events"],[])
+        xml=ET.fromstring(self.panel.build_xmltv())
+        events=xml.findall("programme")
+        self.assertEqual(len(events),1)
+        self.assertEqual(events[0].attrib["channel"],"a:672")
+        self.assertEqual(datetime.datetime.strptime(events[0].attrib["start"],"%Y%m%d%H%M%S %z").timestamp(),start)
+        self.assertEqual(events[0].find("title").text,"Real & recibido")
+        self.assertEqual(self.call("/api/epg/settings",{"days":1})[0],200)
+        self.assertFalse(ET.fromstring(self.panel.build_xmltv()).findall("programme"))

@@ -254,7 +254,7 @@ class PlaylistTests(unittest.TestCase):
         self.assertEqual(len(playlist.splitlines()), 5)
         xml = self.panel.build_xmltv()
         self.assertIn('channel id="tp-a:672"', xml)
-        self.assertIn('channel="tp-b:672"', xml)
+        self.assertIn('channel id="tp-b:672"', xml)
         with self.assertRaises(StreamError) as error: self.panel.resolve_channel("672")
         self.assertEqual(error.exception.status, 409)
         self.assertEqual(self.panel.resolve_channel("tp-b:672")[0]["adapter"], 1)

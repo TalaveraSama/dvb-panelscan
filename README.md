@@ -7,7 +7,22 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.7.1 · Eventos en vivo sin grabación
+## Actual: 0.8.0 · EPG real de uno o varios días
+
+En **Canales y EPG** se puede elegir entre **1 y 14 días** de programación y
+consultar los eventos recibidos por canal. El EPG se guarda en `epg.json` privado,
+sobrevive al reinicio y elimina los eventos vencidos/fuera del período. Se recoge
+EIT present/following y schedule del transpondedor actual al escanear y mientras
+su adaptador esté recibiendo. XMLTV usa los inicios y duraciones reales; ya no
+asigna horas artificiales a títulos sin horario. Disponibilidad según el satélite:
+seleccionar siete días no garantiza que los emita ni descarga datos de Internet.
+
+La tabla **Canales y EPG** también tiene **Editar** para asignar un perfil
+Newcamd por TP:SID (por ejemplo, una cuenta por satélite), sin mezclar SIDs iguales.
+Se mantienen los eventos en vivo sin grabación: guardar EPG no guarda logs.
+Ver [operación y límites EPG](docs/EPG.md).
+
+### Eventos en vivo incorporados en 0.7.1
 
 Nueva pestaña **Eventos en vivo**: arranque/parada de canales, ECM/CW y latencia,
 conexiones/reconexiones, señal/lock y estadísticas TS. Filtro por canal/nombre,

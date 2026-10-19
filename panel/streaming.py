@@ -17,7 +17,7 @@ class StreamError(Exception):
 
 
 class Session:
-    def __init__(self, key, adapter, command, log_path, http_port=0, udp=(), max_bytes=8 * 1024 * 1024, source=None, events=None):
+    def __init__(self, key, adapter, command, log_path, http_port=0, udp=(), max_bytes=8 * 1024 * 1024, source=None, events=None, ts_callback=None):
         self.key, self.adapter = key, adapter
         self.source = source
         self.broker = None
@@ -36,6 +36,7 @@ class Session:
         self.stopping = False
         self.created = time.monotonic()
         self.events = events
+        self.ts_callback = ts_callback
         self.diagnostic_lock = threading.Lock()
         self.health = ECMHealth(None, created=self.created)
         self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -88,6 +89,11 @@ class Session:
                 self.buffered -= len(self.blocks.popleft())
                 self.first += 1
             self.condition.notify_all()
+        if self.ts_callback:
+            try:
+                self.ts_callback(data)
+            except Exception:
+                self._event("epg", "Se omitió un bloque EPG no válido", "warning")
 
     def _drain(self):
         pending = b""
@@ -251,7 +257,7 @@ class StreamManager:
 
     def acquire(self, key, adapter, command, log_path, timeout=35, pinned=False,
                 http_port=0, udp=(), mux_id=None, mux_command=None, mux_log=None,
-                broker_command=None, broker_id=None, broker_log=None):
+                broker_command=None, broker_id=None, broker_log=None, mux_callback=None):
         identity = (adapter, key)
         with self.lock:
             self._reap()
@@ -288,7 +294,7 @@ class StreamManager:
                     if mux_command is not None:
                         if adapter not in self.muxes:
                             source = Session("mux", adapter, mux_command, mux_log,
-                                             max_bytes=32 * 1024 * 1024, events=self.events)
+                                             max_bytes=32 * 1024 * 1024, events=self.events, ts_callback=mux_callback)
                             self.muxes[adapter] = (mux_id, source)
                         source = self.muxes[adapter][1]
                     previous = Session(key, adapter, command, log_path, http_port, udp, source=source, events=self.events)
