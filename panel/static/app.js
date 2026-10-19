@@ -246,6 +246,10 @@ async function loadEpg() {
   $("epgDays").value = settings.days;
   $("epgSettingsInfo").textContent =
     `Ventana: próximos ${settings.days} día(s), según emisión`;
+  if (!epg.some((tp) => (tp.services || []).some((s) => s.epg_events > 0))) {
+    $("epgSettingsInfo").textContent +=
+      ". Sin programas recibidos: abre un canal del TP y espera la emisión EIT; los logos no aportan horarios.";
+  }
   renderEpg();
 }
 
@@ -263,7 +267,7 @@ function renderEpg() {
       )
         continue;
       rows.push(`<tr>
-        <td>${esc(tp.transponder)}</td><td>${esc(s.sid)}</td><td>${esc(s.name)}</td>
+        <td>${esc(tp.transponder)}</td><td>${esc(s.sid)}</td><td>${s.logo ? `<img src="${esc(s.logo)}" alt="" width="56" height="32" loading="lazy" style="object-fit:contain;vertical-align:middle"> ` : ""}${esc(s.name)}</td>
         <td>${esc(s.provider || "—")}</td><td>${typeTag(s.type)}</td>
         <td>${esc(s.now || "—")}</td><td>${esc(s.next || "—")}</td>
         <td><button class="btn small" data-edit-channel="${esc(tp.transponder_id + ":" + s.sid)}">Editar</button>

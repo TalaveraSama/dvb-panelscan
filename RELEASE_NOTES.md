@@ -1,3 +1,23 @@
+## DVB PanelScan 0.8.1 · Logos locales y diagnóstico de EPG vacío
+
+- Descarga e incluye 12 logos identificados del listado comunicado, con coincidencias
+  explícitas por nombre y variantes HD. Se sirven localmente sin Internet en el receptor.
+  No se asignan logos dudosos a Golden Premiere 2, canales locales ESA/HN/CR o TVChile.
+- Logos en Canales y EPG, M3U y elementos icon de XMLTV con URL absoluta del panel.
+  Se conservan los logos personalizados y pueden desactivarse dejando el campo vacío.
+- Recepción EPG: GET /api/epg/status muestra adaptadores activos, TSID de PAT, paquetes
+  PID 0x12, tablas, CRC inválidos, eventos parseados, últimas fechas y hora del servidor.
+  Los contadores son solo RAM durante la captura; no hay archivos de logs ni historial.
+- Explicación visible cuando no se reciben programas. XMLTV solo con channel significa
+  que aún no hay eventos aceptados en la ventana, no que un logo pueda completar la guía.
+- 58 pruebas Python/HTTP, DOM y sanitizadores C. No se afirma corregido el EPG real
+  del proveedor sin revisar recepción; podría requerir otra fuente/formato no EIT estándar.
+
+Fuentes, revisión y atribución de imágenes: panel/static/LOGOS-SOURCES.txt, incluida
+junto con las imágenes en el paquete. Marcas de sus respectivos titulares; sin afiliación.
+
+---
+
 ## DVB PanelScan 0.8.0 · EPG real de uno o varios días
 
 - Canales y EPG: botón **Editar** para escoger perfil Newcamd por canal, también

@@ -7,7 +7,7 @@ import threading
 import unittest
 import urllib.request
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 
 class ChannelSettingsTests(unittest.TestCase):
@@ -131,3 +131,31 @@ class ChannelSettingsTests(unittest.TestCase):
         self.assertEqual(events[0].find("title").text,"Real & recibido")
         self.assertEqual(self.call("/api/epg/settings",{"days":1})[0],200)
         self.assertFalse(ET.fromstring(self.panel.build_xmltv()).findall("programme"))
+
+    def test_catalogue_logos_in_view_m3u_xml_and_http(self):
+        self.panel.STATE['transponders'][0]['scan']['services'][0]['name']='Discovery Kids HD'
+        view=self.panel.transponder_views()[0]['scan']['services'][0]
+        self.assertEqual(view['logo'],'/static/logo-discovery-kids.png')
+        self.assertIn('tvg-logo="http://host/static/logo-discovery-kids.png"',self.panel.build_m3u8('http://host/stream/{channel_id}'))
+        xml=self.panel.build_xmltv(base_url=self.base)
+        self.assertIn('<icon src="'+self.base+'/static/logo-discovery-kids.png"/>',xml)
+        self.assertNotIn('<programme',xml)
+        with urllib.request.urlopen(self.base+'/api/playlist.m3u8?base_url=http://other/stream/{channel_id}') as response:
+            self.assertIn('tvg-logo="'+self.base+'/static/logo-discovery-kids.png"',response.read().decode())
+        with urllib.request.urlopen(self.base+view['logo']) as response:
+            self.assertEqual(response.headers.get_content_type(),'image/png')
+            self.assertTrue(response.read().startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertEqual(self.call('/api/channels/a:672/edit',{'logo':view['logo']})[0],200)
+        self.call('/api/channels/a:672/edit',{'logo':'https://example.com/custom.png'})
+        self.assertEqual(self.panel.transponder_views()[0]['scan']['services'][0]['logo'],'https://example.com/custom.png')
+        self.assertEqual(self.panel.transponder_views()[1]['scan']['services'][0]['logo'],'')
+
+    def test_epg_status_only_active_receivers_and_no_history(self):
+        self.assertEqual(self.call('/api/epg/status')[1]['receivers'],[])
+        collector=self.panel.EITCollector(lambda events: None)
+        with patch.dict(self.panel._streams.muxes,{0:('mux',Mock(ts_callback=collector.feed))}):
+            reception=self.call('/api/epg/status')[1]
+            self.assertEqual(reception['receivers'][0]['adapter'],0)
+            self.assertEqual(reception['receivers'][0]['eit_packets'],0)
+            self.assertEqual(reception['stored_events'],0)
+        self.assertEqual(self.call('/api/epg/status')[1]['receivers'],[])

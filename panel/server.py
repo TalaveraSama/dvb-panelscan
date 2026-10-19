@@ -30,6 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+with open(os.path.join(STATIC_DIR, "logos.json"), encoding="utf-8") as _logos_file:
+    LOGOS = json.load(_logos_file)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from streaming import StreamManager, StreamError
@@ -216,6 +218,7 @@ def channel_view(tp, service):
     identity = channel_id(tp, service["sid"])
     result.update(STATE["channels"].get(identity, {}))
     result.update(channel_id=identity, sid=service["sid"])
+    result.setdefault("logo", LOGOS.get(" ".join(str(result.get("name", "")).casefold().split()), ""))
     result.setdefault("enabled", True)
     result.setdefault("newcamd_profile", "default")
     profile = (STATE["newcamd"] if result["newcamd_profile"] == "default" else
@@ -326,7 +329,7 @@ def _m3u_text(value):
     return str(value).replace("\r", " ").replace("\n", " ").replace('"', "'")
 
 
-def build_m3u8(base_url=None, tid=None, profile="pass"):
+def build_m3u8(base_url=None, tid=None, profile="pass", logo_base=None):
     """Genera M3U8 estilo TVHeadend: cada canal -> URL de stream TS.
     base_url acepta el placeholder {sid} (p. ej. http://host:9981/stream/channelid/{sid}).
     Si no se da base_url, se usa el host del request (self.headers Host)."""
@@ -348,7 +351,7 @@ def build_m3u8(base_url=None, tid=None, profile="pass"):
             group = _m3u_text(s.get("group") or s.get("provider") or scan.get("network") or t.get("name") or "DVB")
             identity = channel_id(t, s["sid"])
             radio = ' radio="true"' if s.get("type") in (2, 0x0A) else ""
-            extras = (' tvg-logo="%s"' % _m3u_text(s["logo"]) if s.get("logo") else "")
+            extras = (' tvg-logo="%s"' % _m3u_text(urllib.parse.urljoin(logo_base or base_url or "", s["logo"])) if s.get("logo") else "")
             extras += (' tvg-chno="%s"' % s["number"] if s.get("number") else "")
             lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s" group-title="%s"%s%s,%s'
                          % (identity, name, group, radio, extras, name))
@@ -370,7 +373,7 @@ def _xml_esc(s):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def build_xmltv(tid=None):
+def build_xmltv(tid=None, base_url=""):
     """XMLTV (EPG) para XUI.one / Xtream Codes (xcode)."""
     import datetime
 
@@ -393,7 +396,9 @@ def build_xmltv(tid=None):
                 continue
             sid = channel_id(t, s["sid"])
             name = _xml_esc(s.get("name") or "Service %s" % sid)
-            lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (_xml_esc(sid), name))
+            icon = ('<icon src="%s"/>' % _xml_esc(urllib.parse.urljoin(base_url, s["logo"]))
+                    if s.get("logo") else "")
+            lines.append('<channel id="%s"><display-name lang="es">%s</display-name>%s</channel>' % (_xml_esc(sid), name, icon))
             for event in _epg.events_for(sid):
                 start = datetime.datetime.fromtimestamp(event["start"], datetime.timezone.utc)
                 stop = datetime.datetime.fromtimestamp(event["stop"], datetime.timezone.utc)
@@ -512,6 +517,7 @@ MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
     ".m3u8": "application/vnd.apple.mpegurl",
 }
 
@@ -573,6 +579,13 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/transponders":
             return self._send(200, transponder_views())
+        if path == "/api/epg/status":
+            with _streams.lock:
+                receivers = [(adapter, getattr(source.ts_callback, "__self__", None))
+                             for adapter, (_, source) in _streams.muxes.items()]
+            return self._send(200, {"server_time": int(time.time()), "days": _epg.days, "stored_events": _epg.count,
+                                   "receivers": [dict(collector.status(), adapter=adapter)
+                                                 for adapter, collector in receivers if isinstance(collector, EITCollector)]})
         if path == "/api/epg/settings":
             return self._send(200, {"days": _epg.days, "max_days": 14})
         if path == "/api/epg/channel":
@@ -585,7 +598,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, epg_aggregate())
         if path == "/api/epg.xml":
             tid = qs.get("transponder", [None])[0]
-            return self._send(200, build_xmltv(tid), "application/xml; charset=utf-8")
+            return self._send(200, build_xmltv(tid, "http://" + self.headers.get("Host", "127.0.0.1:8081")), "application/xml; charset=utf-8")
         if path == "/api/newcamd/profiles":
             profiles = [{"id": "default", "name": "Predeterminado", **STATE["newcamd"]}] + [
                 {**config, "id": identity} for identity, config in STATE["profiles"].items()]
@@ -614,7 +627,7 @@ class Handler(BaseHTTPRequestHandler):
                 base = "http://%s/stream/channel/{channel_id}" % host
             if profile != "pass":
                 return self._send(400, {"error": "Solo se admite el perfil pass (TS sin transcodificar)"})
-            return self._send(200, build_m3u8(base, tid, profile), "application/vnd.apple.mpegurl")
+            return self._send(200, build_m3u8(base, tid, profile, logo_base="http://" + self.headers.get("Host", "127.0.0.1:8081")), "application/vnd.apple.mpegurl")
         for prefix in ("/stream/channel/", "/stream/channelid/"):
             if path.startswith(prefix):
                 if qs.get("profile", ["pass"])[0] != "pass":
@@ -762,7 +775,7 @@ class Handler(BaseHTTPRequestHandler):
                     settings["number"] = number or None
                 if settings.get("logo"):
                     url = urllib.parse.urlsplit(settings["logo"])
-                    if url.scheme not in ("http", "https") or not url.netloc:
+                    if settings["logo"] not in LOGOS.values() and (url.scheme not in ("http", "https") or not url.netloc):
                         raise ValueError("Logo debe ser URL http/https")
                 profile_config(settings.get("newcamd_profile", "default"))
                 with _lock:

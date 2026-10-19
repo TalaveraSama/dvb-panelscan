@@ -66,3 +66,31 @@ La vista de programas muestra como máximo 500 filas; XMLTV usa todos los evento
 que entren en la ventana. No se añaden un programador de grabaciones, un selector
 de satélite/DiSEqC, ni recopilación de guías de muxes que el hardware no recibe.
 Las pruebas usan EIT sintético: el EPG real depende de las tablas del proveedor.
+
+## Guía vacía: diagnóstico de recepción (0.8.1)
+
+Si XMLTV solo tiene `<channel>` sin `<programme>`, no hay eventos con horarios
+aceptados; no se arregla añadiendo imágenes. Con un reproductor abierto en un canal
+del TP, consultar `curl -s http://IP:8081/api/epg/status`:
+
+- `receivers: []`: no existe captura compartida activa; abrir el canal primero.
+- `eit_packets: 0`: la captura no está viendo PID 0x12; no prueba por sí solo que
+  falte EPG en todo el satélite ni autoriza a resintonizar otro adaptador.
+- `tsid: null`: todavía no se recibió PAT válida para vincular los eventos.
+- `tables`: identifica tablas realmente recibidas. Las tablas de otros muxes o
+  formatos propietarios no se importan como si fueran guía del mux actual.
+- `bad_crc`: secciones corruptas; pueden requerir revisar la recepción.
+- `parsed_events > 0` pero `stored_events: 0`: revisar la hora del servidor, días
+  seleccionados, fechas de los últimos eventos y servicios conocidos del mux.
+
+Los contadores son de recepción activa y viven solo en RAM. La API no contiene
+CW ni credenciales. Compartir la respuesta junto con satélite/proveedor y tiempo
+de recepción permite investigar sin adivinar ni inventar programas.
+
+### Logos
+
+12 imágenes locales de catálogo externo, no extraídas del satélite. Coincidencias
+explícitas por nombre, sin aproximación para canales desconocidos. Un logo manual
+tiene prioridad; vaciar el campo lo desactiva. XMLTV exporta `<icon src="...">` y
+M3U `tvg-logo`, con URL del panel, independientemente del servidor de streaming.
+Fuentes y condiciones en `/static/LOGOS-SOURCES.txt`; marcas de sus titulares.

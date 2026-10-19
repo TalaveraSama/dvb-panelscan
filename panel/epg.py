@@ -191,6 +191,28 @@ class EITCollector:
         self.tsid = None
         self.buffers = {}
         self.counters = {}
+        self.eit_packets = 0
+        self.sections = 0
+        self.bad_crc = 0
+        self.tables = {}
+        self.parsed_events = 0
+        self.last_eit_packet = None
+        self.last_event_start = None
+        self.last_event_stop = None
+
+    def status(self):
+        # Reception diagnostics only: RAM counters, never saved to EPG/log files.
+        return {
+            "tsid": self.tsid,
+            "eit_packets": self.eit_packets,
+            "sections": self.sections,
+            "bad_crc": self.bad_crc,
+            "tables": dict(self.tables),
+            "parsed_events": self.parsed_events,
+            "last_eit_packet": self.last_eit_packet,
+            "last_event_start": self.last_event_start,
+            "last_event_stop": self.last_event_stop,
+        }
 
     def feed(self, data):
         for off in range(0, len(data) - 187, 188):
@@ -200,6 +222,9 @@ class EITCollector:
             pid = ((packet[1] & 31) << 8) | packet[2]
             if pid not in (0, 18):
                 continue
+            if pid == 18:
+                self.eit_packets += 1
+                self.last_eit_packet = int(time.time())
             afc = (packet[3] >> 4) & 3
             cc = packet[3] & 15
             if packet[1] & 0x80 or packet[3] & 0xC0 or afc == 0:
@@ -253,6 +278,12 @@ class EITCollector:
                 return
             section = bytes(buf[:size])
             del buf[:size]
+            if pid == 18:
+                self.sections += 1
+                key = "0x%02X" % section[0]
+                self.tables[key] = self.tables.get(key, 0) + 1
+                if crc32(section):
+                    self.bad_crc += 1
             if (
                 pid == 0
                 and section[0] == 0
@@ -264,6 +295,9 @@ class EITCollector:
             elif pid == 18 and self.tsid is not None:
                 events = parse_eit(section, self.tsid)
                 if events:
+                    self.parsed_events += len(events)
+                    self.last_event_start = events[-1]["start"]
+                    self.last_event_stop = events[-1]["stop"]
                     self.callback(events)
 
 

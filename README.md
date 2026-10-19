@@ -7,7 +7,19 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.8.0 · EPG real de uno o varios días
+## Actual: 0.8.1 · Logos locales y diagnóstico EPG
+
+Incluye 12 logos del listado comunicado, con asignación explícita por nombre,
+prioridad a logos personalizados y exportación de iconos XMLTV/M3U. Los canales
+sin coincidencia segura quedan sin imagen, no se adivina la marca. Fuentes y
+condiciones en `panel/static/LOGOS-SOURCES.txt` (marcas de sus titulares).
+
+Si XMLTV solo contiene `<channel>` y ningún `<programme>`, abrir un canal del
+transpondedor, esperar unos minutos y consultar `/api/epg/status`. Devuelve la hora
+del servidor, recepción PID 0x12, tablas y eventos parseados. No prueba por sí solo
+que el proveedor emita guía estándar; logos y programación son independientes.
+
+### EPG real de uno o varios días (0.8.0)
 
 En **Canales y EPG** se puede elegir entre **1 y 14 días** de programación y
 consultar los eventos recibidos por canal. El EPG se guarda en `epg.json` privado,

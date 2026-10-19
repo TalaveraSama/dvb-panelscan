@@ -120,6 +120,29 @@ class EITTests(unittest.TestCase):
         collector.feed(b"".join(packets(18, eit(self.now + 3600), cc=14)))
         self.assertEqual(len(output), 1)
 
+    def test_reception_counters_distinguish_crc_tables_and_real_events(self):
+        collector = EITCollector(lambda events: None)
+        collector.feed(b"".join(packets(0, section(0, b"\x00\x2a\xc1\x00\x00"))))
+        bad = bytearray(eit(self.now + 3600))
+        bad[-1] ^= 1
+        for cc, data in enumerate(
+            (
+                bytes(bad),
+                eit(self.now + 3600),
+                eit(self.now + 3600, tsid=43),
+                eit(self.now + 3600, tid=0x60),
+            )
+        ):
+            collector.feed(b"".join(packets(18, data, cc=cc)))
+        status = collector.status()
+        self.assertEqual(status["tsid"], 42)
+        self.assertEqual(status["eit_packets"], 4)
+        self.assertEqual(status["sections"], 4)
+        self.assertEqual(status["bad_crc"], 1)
+        self.assertEqual(status["tables"], {"0x50": 3, "0x60": 1})
+        self.assertEqual(status["parsed_events"], 1)
+        self.assertEqual(status["last_event_start"], self.now + 3600)
+
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
