@@ -147,7 +147,7 @@ class StreamingTests(unittest.TestCase):
     def test_command_not_in_status(self):
         a = self.acquire()
         self.assertNotIn("command", a.status())
-        self.assertEqual(os.stat(self.log).st_mode & 0o777, 0o600)
+        self.assertFalse(os.path.exists(self.log))
         self.manager.release(a)
 
 
@@ -311,8 +311,10 @@ class HttpSubscriptionTests(unittest.TestCase):
                 self.assertEqual(len(status["sessions"]), 1)
                 self.assertEqual(status["pid"], result["pid"])
                 self.assertEqual(status["clients"], 2)
-                with self.request.urlopen(self.base + "/api/stream/log?channel=tp-a:672") as log:
-                    self.assertIn(b"New shared TS session", log.read())
+                import urllib.error
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    self.request.urlopen(self.base + "/api/stream/log?channel=tp-a:672")
+                self.assertEqual(error.exception.code, 410)
 
     def test_stop_specific_http_session_and_switch(self):
         import json

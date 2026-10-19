@@ -17,6 +17,7 @@
         <a href="#" data-tab="epg">▤ &nbsp; Canales y EPG</a>
         <a href="#" data-tab="newcamd">◇ &nbsp; Acceso condicional</a>
         <a href="#" data-tab="m3u8">▷ &nbsp; Streaming</a>
+        <a href="#" data-tab="events">≋ &nbsp; Eventos en vivo</a>
       </nav>
       <div class="status-badge" id="statusBadge">cargando…</div>
     </header>
@@ -28,7 +29,7 @@
           <h2 id="pageTitle">Vista general</h2>
           <p>Administra tu señal. Conecta, escanea y distribuye.</p>
         </div>
-        <span class="version">v0.7.0 <span>● Sistema local</span></span>
+        <span class="version">v0.7.1 <span>● Sistema local</span></span>
       </div>
       <div
         id="notice"
@@ -54,6 +55,59 @@
           ><small>Estado del proceso, no del descifrado</small>
         </div>
       </div>
+      <section id="tab-events" class="hidden">
+        <section class="card">
+          <div class="card-head">
+            <h2>Eventos de canales en vivo</h2>
+            <span id="eventsState" role="status">Desconectado</span>
+          </div>
+          <p class="callout">
+            Sin archivos ni historial. Solo se reciben eventos desde que abres
+            esta vista. Al salir o esconder la pestaña se desconecta y se vacía.
+            Máximo 500 eventos en pantalla. Los colores de canales siguen
+            funcionando sin guardar registros.
+          </p>
+          <div class="connection-tools">
+            <label
+              >Canal / adaptador / mensaje
+              <input
+                id="eventsFilter"
+                type="search"
+                placeholder="672, adapter 0, ECM…"
+            /></label>
+            <label
+              >Nivel
+              <select id="eventsLevel">
+                <option value="">Todos</option>
+                <option value="error">Errores</option>
+                <option value="warning">Avisos</option>
+                <option value="info">Información</option>
+              </select></label
+            >
+            <button class="btn" id="eventsClear" type="button">
+              Limpiar pantalla
+            </button>
+          </div>
+          <div class="table-wrap live-events">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hora</th>
+                  <th>Nivel</th>
+                  <th>Canal / origen</th>
+                  <th>Evento</th>
+                  <th>Detalle</th>
+                </tr>
+              </thead>
+              <tbody id="eventsBody">
+                <tr>
+                  <td colspan="5">Abre esta vista para conectar.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
       <!-- ===================== DASHBOARD ===================== -->
       <section id="tab-dashboard">
         <section class="card">

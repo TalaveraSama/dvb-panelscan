@@ -35,17 +35,22 @@ function tpInfo(t) {
 }
 
 /* ------------------------------ Tabs ------------------------------ */
+let activeTab = "dashboard";
 function switchTab(tab) {
+  activeTab = tab;
+  if (tab === "events" && !document.hidden) startEvents();
+  else stopEvents();
   $("pageTitle").textContent = {
     dashboard: "Vista general",
     epg: "Canales y programación",
     newcamd: "Acceso condicional",
     m3u8: "Distribución de señal",
+    events: "Eventos en vivo · sin historial",
   }[tab];
   document
     .querySelectorAll("#menu a")
     .forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
-  ["dashboard", "epg", "newcamd", "m3u8"].forEach((t) => {
+  ["dashboard", "epg", "newcamd", "m3u8", "events"].forEach((t) => {
     $("tab-" + t).classList.toggle("hidden", t !== tab);
   });
 }
@@ -470,9 +475,7 @@ async function loadStream() {
       Cola: ${Math.round(session.queue_bytes / 1024)} KiB · Clientes lentos: ${esc(session.slow_clients)}<br>
       ${session.input_error ? `<span class="err">${esc(session.input_error)}</span><br>` : ""}
       <a class="btn small" href="/stream/channel/${encodeURIComponent(session.channel_id)}?profile=pass" target="_blank">URL TS</a>
-      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}" target="_blank">Registro del canal</a>
-      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}&scope=mux" target="_blank">Registro del mux</a>
-      <a class="btn small" href="/api/stream/log?channel=${encodeURIComponent(session.channel_id)}&scope=ca" target="_blank">Registro Newcamd</a>
+      <button class="btn small" data-events-channel="${esc(session.channel_id)}">Eventos en vivo</button>
       <button class="btn small danger" data-stop-channel="${esc(session.channel_id)}">Detener este canal</button>
     </div>`,
         )
@@ -531,6 +534,122 @@ async function stopStream() {
   await postJSON("/api/stream/stop", {});
   loadStream();
 }
+
+/* Live-only event viewer. Never localStorage, sessionStorage or download. */
+let eventSource = null;
+let liveEvents = [];
+let eventRenderTimer = null;
+function renderEvents() {
+  const channelNames = new Map(
+    transponders.flatMap((tp) =>
+      (tp.scan?.services || []).map((s) => [s.channel_id, s.name]),
+    ),
+  );
+  const filter = $("eventsFilter").value.toLowerCase();
+  const level = $("eventsLevel").value;
+  const rows = liveEvents.filter(
+    (event) =>
+      (!level || event.level === level) &&
+      (!filter ||
+        `${event.channel || ""} ${channelNames.get(event.channel) || ""} adapter ${event.adapter ?? ""} ${event.message}`
+          .toLowerCase()
+          .includes(filter)),
+  );
+  $("eventsBody").innerHTML =
+    rows
+      .slice()
+      .reverse()
+      .map((event) => {
+        const detail =
+          event.kind === "ecm"
+            ? `${event.latency_ms} ms · resultado ${event.result} · CW ${event.cw_available ? "disponible" : "no disponible"}`
+            : event.kind === "stats"
+              ? Object.entries(event.stats || {})
+                  .map(([key, value]) => `${key}=${value}`)
+                  .join(" · ")
+              : "";
+        return `<tr class="event-${esc(event.level)}"><td>${esc(new Date(event.time * 1000).toLocaleTimeString())}</td>
+      <td>${esc(event.level)}</td><td>${esc(channelNames.has(event.channel) ? channelNames.get(event.channel) + " (" + event.channel + ")" : event.channel || event.kind)}${event.adapter != null ? " · adapter " + esc(event.adapter) : ""}</td>
+      <td>${esc(event.message)}</td><td>${esc(detail)}</td></tr>`;
+      })
+      .join("") ||
+    '<tr><td colspan="5">Esperando eventos nuevos (sin historial).</td></tr>';
+}
+function stopEvents() {
+  if (eventRenderTimer !== null) clearTimeout(eventRenderTimer);
+  eventRenderTimer = null;
+  if (eventSource) eventSource.close();
+  eventSource = null;
+  liveEvents = [];
+  $("eventsBody").replaceChildren();
+  $("eventsState").textContent = "Desconectado · sin historial";
+}
+function startEvents() {
+  if (eventSource) return;
+  if (!window.EventSource) {
+    $("eventsState").textContent = "Tu navegador no admite eventos en vivo";
+    return;
+  }
+  liveEvents = [];
+  renderEvents();
+  $("eventsState").textContent = "Conectando…";
+  const source = new EventSource("/api/events");
+  eventSource = source;
+  source.addEventListener("ready", () => {
+    if (source !== eventSource) return;
+    liveEvents = [];
+    renderEvents();
+    $("eventsState").textContent = "En vivo · sin grabación";
+  });
+  source.onmessage = (message) => {
+    if (source !== eventSource || document.hidden || activeTab !== "events")
+      return;
+    try {
+      const event = JSON.parse(message.data);
+      if (
+        !event ||
+        typeof event.message !== "string" ||
+        !["info", "warning", "error"].includes(event.level)
+      )
+        return;
+      liveEvents.push(event);
+      if (liveEvents.length > 500) liveEvents.shift();
+      if (eventRenderTimer === null)
+        eventRenderTimer = setTimeout(() => {
+          eventRenderTimer = null;
+          renderEvents();
+        }, 100);
+    } catch (_) {
+      /* discard invalid data */
+    }
+  };
+  source.onerror = () => {
+    if (source !== eventSource) return;
+    liveEvents = [];
+    renderEvents();
+    $("eventsState").textContent =
+      "Reconectando… eventos durante el corte no se recuperan";
+  };
+}
+$("eventsFilter").addEventListener("input", renderEvents);
+$("eventsLevel").addEventListener("change", renderEvents);
+$("eventsClear").addEventListener("click", () => {
+  liveEvents = [];
+  renderEvents();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopEvents();
+  else if (activeTab === "events") startEvents();
+});
+window.addEventListener("pagehide", stopEvents);
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-events-channel]");
+  if (button) {
+    $("eventsFilter").value = button.dataset.eventsChannel;
+    switchTab("events");
+    renderEvents();
+  }
+});
 
 /* ------------------------------ Init ------------------------------ */
 $("tpForm").addEventListener("submit", addTransponder);

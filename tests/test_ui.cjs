@@ -6,6 +6,14 @@ const dom = new JSDOM(fs.readFileSync('panel/static/index.html', 'utf8'), {
   url: 'http://panel.test/', runScripts: 'outside-only',
 });
 const w = dom.window;
+const sources = [];
+let hidden = false;
+Object.defineProperty(w.document, 'hidden', {get:()=>hidden});
+w.EventSource = class {
+  constructor(url) { this.url=url; this.listeners={}; this.closed=false; sources.push(this); }
+  addEventListener(type, callback) { this.listeners[type]=callback; }
+  close() { this.closed=true; }
+};
 const poll = [];
 w.setInterval = callback => { poll.push(callback); return poll.length; };
 w.confirm = () => true;
@@ -59,6 +67,22 @@ const tick = () => new Promise(resolve=>setTimeout(resolve,10));
   assert(w.document.querySelector('[data-health]').classList.contains('ecm-idle'));
   assert.equal(w.document.querySelector('[data-health]').textContent,'Sin telemetría');
   assert(!w.document.querySelector('.ecm-ok'));
-  console.log('UI: editor, profile selection, numeric metadata, green/red and stale telemetry reset passed');
+  assert.equal(sources.length,0);
+  w.document.querySelector('[data-tab="events"]').click();
+  assert.equal(sources.length,1);
+  sources[0].listeners.ready();
+  sources[0].onmessage({data:JSON.stringify({time:Date.now()/1000,kind:'ecm',level:'info',channel:'tp:672',message:'ECM/CW recibida',latency_ms:185,result:0,cw_available:true})});
+  await new Promise(resolve=>setTimeout(resolve,150));
+  assert(w.document.getElementById('eventsBody').textContent.includes('ECM/CW recibida'));
+  hidden=true; w.document.dispatchEvent(new w.Event('visibilitychange'));
+  assert(sources[0].closed);
+  assert.equal(w.document.getElementById('eventsBody').textContent,'');
+  hidden=false; w.document.dispatchEvent(new w.Event('visibilitychange'));
+  assert.equal(sources.length,2); sources[1].listeners.ready();
+  assert(!w.document.getElementById('eventsBody').textContent.includes('ECM/CW recibida'));
+  w.document.querySelector('[data-tab="dashboard"]').click();
+  assert(sources[1].closed);
+  assert.equal(w.document.getElementById('eventsBody').textContent,'');
+  console.log('UI: editor, profile selection, numeric metadata, green/red and stale telemetry reset and live-only events lifecycle passed');
   dom.window.close();
 })().catch(error=>{console.error(error);dom.window.close();process.exitCode=1;});

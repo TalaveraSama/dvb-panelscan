@@ -560,3 +560,17 @@ dialog .actions {
 .channel-fault [data-channel-name] {
   color: #ffb1b1;
 }
+
+.live-events {
+  max-height: 60vh;
+  overflow: auto;
+}
+.event-error {
+  color: #ffb1b1;
+}
+.event-warning {
+  color: #ffdc82;
+}
+.live-events td {
+  overflow-wrap: anywhere;
+}

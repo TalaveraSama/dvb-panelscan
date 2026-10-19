@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 from health import ECMHealth
+from events import EventBus, DiagnosticReader
 
 
 class StreamError(Exception):
@@ -16,7 +17,7 @@ class StreamError(Exception):
 
 
 class Session:
-    def __init__(self, key, adapter, command, log_path, http_port=0, udp=(), max_bytes=8 * 1024 * 1024, source=None):
+    def __init__(self, key, adapter, command, log_path, http_port=0, udp=(), max_bytes=8 * 1024 * 1024, source=None, events=None):
         self.key, self.adapter = key, adapter
         self.source = source
         self.broker = None
@@ -32,21 +33,29 @@ class Session:
         self.overruns = 0
         self.max_bytes = max_bytes
         self.ended = False
+        self.stopping = False
         self.created = time.monotonic()
-        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        os.chmod(log_path, 0o600)
-        with os.fdopen(fd, "ab", buffering=0) as log:
-            log.write(b"\n--- New shared TS session ---\n")
-            self.health = ECMHealth(log_path, log.tell(), self.created)
-            self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log,
-                                            stdin=subprocess.PIPE if source else subprocess.DEVNULL,
-                                            bufsize=0, start_new_session=True)
+        self.events = events
+        self.diagnostic_lock = threading.Lock()
+        self.health = ECMHealth(None, created=self.created)
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        stdin=subprocess.PIPE if source else subprocess.DEVNULL,
+                                        bufsize=0, start_new_session=True)
         self.health.pid = self.process.pid
+        self.diagnostics = DiagnosticReader(self.process, events,
+            "mux" if key == "mux" else "channel", None if key == "mux" else key,
+            adapter, self.health, self.diagnostic_lock)
+        self._event("start", "Captura iniciada" if key == "mux" else "Canal iniciado")
         self.worker = threading.Thread(target=self._drain, daemon=True)
         self.worker.start()
         if source:
             self.input_worker = threading.Thread(target=self._feed, args=(source_cursor,), daemon=True)
             self.input_worker.start()
+
+    def _event(self, kind, message, level="info"):
+        if self.events:
+            self.events.publish(kind, message, level,
+                                None if self.key == "mux" else self.key, self.adapter)
 
     def _feed(self, cursor):
         try:
@@ -61,7 +70,9 @@ class Session:
                         raise OSError("closed input")
                     view = view[n:]
         except (OSError, StreamError) as error:
-            self.input_error = str(error)
+            if not self.stopping:
+                self.input_error = str(error)
+                self._event("input", "Entrada del canal interrumpida", "warning")
         finally:
             self.process.stdin.close()
             if self.process.poll() is None:
@@ -104,6 +115,10 @@ class Session:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+            self.diagnostics.join()
+            self._event("stop", ("Captura finalizada" if self.key == "mux" else "Canal finalizado") +
+                        " (código %s)" % self.process.returncode,
+                        "error" if self.process.returncode not in (0, -15) else "info")
             with self.condition:
                 self.ended = True
                 self.condition.notify_all()
@@ -114,10 +129,10 @@ class Session:
             while not self.bytes_received and not self.ended:
                 left = deadline - time.monotonic()
                 if left <= 0:
-                    raise StreamError("Sin TS a tiempo; consulta el registro del servicio", 504)
+                    raise StreamError("Sin TS a tiempo; abre Eventos en vivo y reintenta", 504)
                 self.condition.wait(left)
             if not self.bytes_received or self.ended:
-                raise StreamError("tbsstream terminó antes de iniciar; consulta el registro del servicio")
+                raise StreamError("tbsstream terminó antes de iniciar; abre Eventos en vivo y reintenta")
 
     def cursor(self):
         with self.condition:
@@ -135,12 +150,14 @@ class Session:
                 self.condition.wait(min(left, .1) if cancelled else left)
             if cursor < self.first:
                 self.overruns += 1
+                self._event("overflow", "Consumidor lento: cola TS desbordada", "warning")
                 raise StreamError("Cliente lento: cola TS desbordada; reconecta", 503)
             if self.ended:
                 raise StreamError("El servicio TS terminó")
             return cursor + 1, self.blocks[cursor - self.first]
 
     def stop(self):
+        self.stopping = True
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -154,6 +171,8 @@ class Session:
             self.input_worker.join(timeout=1)
 
     def status(self):
+        with self.diagnostic_lock:
+            health = self.health.snapshot(self.process.poll() is None and not self.ended)
         with self.condition:
             return {"channel_id": self.key, "adapter": self.adapter,
                     "pid": self.process.pid, "running": self.process.poll() is None and not self.ended,
@@ -161,31 +180,29 @@ class Session:
                     "http_port": self.http_port, "udp": ", ".join(self.udp),
                     "bytes_received": self.bytes_received, "queue_bytes": self.buffered,
                     "slow_clients": self.overruns, "exit_code": self.process.poll(),
-                    "log": os.path.basename(self.log_path),
+                    "log": None,
                     "mux_pid": self.source.process.pid if self.source else self.process.pid,
                     "ca_pid": self.broker.process.pid if self.broker else None,
                     "ca_running": self.broker.process.poll() is None if self.broker else None,
                     "mux_queue_bytes": self.source.buffered if self.source else None,
                     "input_error": self.input_error,
-                    "ecm": self.health.snapshot(self.process.poll() is None and not self.ended)}
+                    "ecm": health}
 
 
 class Broker:
     """Private local IPC; exactly one upstream Newcamd connection per config."""
-    def __init__(self, command, log_path):
+    def __init__(self, command, log_path, events=None):
         self.directory = tempfile.mkdtemp(prefix="dvb-ca-")
         self.path = os.path.join(self.directory, "cam.sock")
         try:
-            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            os.chmod(log_path, 0o600)
-            with os.fdopen(fd, "ab", buffering=0) as log:
-                self.process = subprocess.Popen(command + ["--ca-broker", self.path],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=log, start_new_session=True)
+            self.process = subprocess.Popen(command + ["--ca-broker", self.path],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, start_new_session=True)
+            self.diagnostics = DiagnosticReader(self.process, events, "ca")
             deadline = time.monotonic() + 3
             while not os.path.exists(self.path):
                 if self.process.poll() is not None or time.monotonic() >= deadline:
-                    raise StreamError("No se pudo iniciar el broker Newcamd; consulta ca.log")
+                    raise StreamError("No se pudo iniciar el broker Newcamd; abre Eventos en vivo y reintenta")
                 time.sleep(.01)
         except Exception:
             self.stop()
@@ -200,12 +217,15 @@ class Broker:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        if hasattr(self, "diagnostics"):
+            self.diagnostics.join()
         shutil.rmtree(self.directory, ignore_errors=True)
 
 
 class StreamManager:
     def __init__(self):
         self.lock = threading.RLock()
+        self.events = EventBus()
         self.sessions = {}  # (adapter, channel identity), never just adapter
         self.muxes = {}  # adapter -> (tuning identity, capture)
         self.brokers = {}  # private configuration tuple -> broker
@@ -262,22 +282,22 @@ class StreamManager:
                             # same endpoint only by restarting affected channels.
                             raise StreamError("Broker Newcamd finalizado; detén sus canales y reintenta")
                         if not broker:
-                            broker = Broker(broker_command, broker_log)
+                            broker = Broker(broker_command, broker_log, self.events)
                             self.brokers[broker_id] = broker
                         command = command + ["--cam-socket", broker.path]
                     if mux_command is not None:
                         if adapter not in self.muxes:
                             source = Session("mux", adapter, mux_command, mux_log,
-                                             max_bytes=32 * 1024 * 1024)
+                                             max_bytes=32 * 1024 * 1024, events=self.events)
                             self.muxes[adapter] = (mux_id, source)
                         source = self.muxes[adapter][1]
-                    previous = Session(key, adapter, command, log_path, http_port, udp, source=source)
+                    previous = Session(key, adapter, command, log_path, http_port, udp, source=source, events=self.events)
                     previous.broker = broker
                     self.sessions[identity] = previous
                 except Exception as error:
                     self._collect()
                     if isinstance(error, OSError):
-                        raise StreamError("No se pudo iniciar el motor o abrir su registro") from None
+                        raise StreamError("No se pudo iniciar el motor") from None
                     raise
             previous.clients += 1
         try:

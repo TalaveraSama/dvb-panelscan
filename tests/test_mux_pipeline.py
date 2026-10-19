@@ -90,6 +90,11 @@ while True:
                     self.assertEqual(os.stat(session.broker.directory).st_mode & 0o777, 0o700)
                     self.assertEqual(os.stat(session.broker.path).st_mode & 0o777, 0o600)
                 status = self.panel.stream_status()["sessions"]
+                import time
+                deadline = time.monotonic() + 1
+                while not all(s["ecm"]["state"] == "clear" for s in status) and time.monotonic() < deadline:
+                    time.sleep(.01)
+                    status = self.panel.stream_status()["sessions"]
                 self.assertTrue(all(s["ecm"]["state"] == "clear" for s in status))
                 self.assertEqual(len({s["mux_pid"] for s in status}), 1)
                 self.assertEqual(len({s["ca_pid"] for s in status}), 1)

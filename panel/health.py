@@ -40,20 +40,21 @@ class ECMHealth:
 
     def snapshot(self, running=True, now=None):
         now = time.monotonic() if now is None else now
-        try:
-            size = os.path.getsize(self.path)
-            if size < self.offset or size - self.offset > 131072:
-                self.offset, self.partial = max(0, size - 131072), b""
-            with open(self.path, "rb") as log:
-                log.seek(self.offset)
-                data = log.read(131072)
-                self.offset = log.tell()
-            lines = (self.partial + data).split(b"\n")
-            self.partial = lines.pop()
-            for line in lines:
-                self.ingest(line.decode("utf-8", errors="replace"))
-        except OSError:
-            pass
+        if self.path is not None:
+            try:
+                size = os.path.getsize(self.path)
+                if size < self.offset or size - self.offset > 131072:
+                    self.offset, self.partial = max(0, size - 131072), b""
+                with open(self.path, "rb") as log:
+                    log.seek(self.offset)
+                    data = log.read(131072)
+                    self.offset = log.tell()
+                lines = (self.partial + data).split(b"\n")
+                self.partial = lines.pop()
+                for line in lines:
+                    self.ingest(line.decode("utf-8", errors="replace"))
+            except OSError:
+                pass
         while self.recent and now - self.recent[0] > 15:
             self.recent.popleft()
         age = None if self.last_success is None else max(0, now - self.last_success)

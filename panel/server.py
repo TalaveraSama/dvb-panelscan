@@ -571,24 +571,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": str(error)})
         if path == "/api/newcamd":
             return self._send(200, STATE["newcamd"])
+        if path == "/api/events":
+            return self._live_events()
         if path == "/api/stream/log":
-            identity = qs.get("channel", [""])[0]
-            session = next((s for s in _streams.status() if s["channel_id"] == identity), None)
-            if not session:
-                return self._send(404, {"error": "Sesión no encontrada"})
-            try:
-                scope = qs.get("scope", ["service"])[0]
-                if scope not in ("service", "mux", "ca"):
-                    return self._send(400, {"error": "Registro inválido"})
-                filename = ("ca.log" if scope == "ca" else
-                            "mux-%d.log" % session["adapter"] if scope == "mux" else session["log"])
-                with open(os.path.join(DATA_DIR, filename), "rb") as log:
-                    log.seek(0, os.SEEK_END)
-                    log.seek(max(0, log.tell() - 32768))
-                    text = log.read().decode("utf-8", errors="replace")
-                return self._send(200, text, "text/plain; charset=utf-8")
-            except OSError:
-                return self._send(404, {"error": "Registro no disponible"})
+            return self._send(410, {"error": "No se guardan registros; utiliza Eventos en vivo"})
         if path == "/api/stream/status":
             return self._send(200, stream_status())
         if path == "/api/playlist.m3u8":
@@ -607,6 +593,35 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "Solo se admite profile=pass"})
                 return self._stream_channel(urllib.parse.unquote(path[len(prefix):]))
         return self._send(404, {"error": "not found"})
+
+    def _live_events(self):
+        try:
+            subscription = _streams.events.subscribe()
+        except ValueError as error:
+            return self._send(503, {"error": str(error)})
+        try:
+            self.connection.settimeout(5)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"event: ready\ndata: {}\n\n")
+            self.wfile.flush()
+            while not subscription.closed:
+                batch = subscription.read(timeout=1)
+                if not batch:
+                    self.wfile.write(b": keepalive\n\n")
+                for event in batch:
+                    payload = json.dumps(event, ensure_ascii=False).encode("utf-8")
+                    self.wfile.write(b"data: " + payload + b"\n\n")
+                self.wfile.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            subscription.close()
+            self.close_connection = True
 
     def _stream_channel(self, identity):
         session = None
@@ -821,7 +836,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[panel] %s\n" % (fmt % args))
+        # No persistent channel/access event log (including systemd stderr).
+        pass
 
 
 def main():

@@ -7,7 +7,22 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.7.0 · Estado ECM y perfiles por canal
+## Actual: 0.7.1 · Eventos en vivo sin grabación
+
+Nueva pestaña **Eventos en vivo**: arranque/parada de canales, ECM/CW y latencia,
+conexiones/reconexiones, señal/lock y estadísticas TS. Filtro por canal/nombre,
+adaptador, mensaje y nivel; botón para limpiar pantalla. Sin archivos nuevos ni
+historial: solo se reciben eventos mientras se ve la pestaña. Al salir o esconder
+el navegador se desconecta y se vacía. Las colas de transporte y pantalla tienen
+límites para no bloquear el streaming. Los indicadores ECM siguen funcionando
+con métricas en RAM, sin leer/escribir archivos de diagnóstico.
+
+El usuario confirmó recepción simultánea de varios canales en su TBS real con
+la versión anterior. Esta nueva vista se valida con pruebas automatizadas.
+Los archivos de log de versiones anteriores no se borran automáticamente, pero
+ya no se crean ni amplían. Ver [eventos y migración](docs/LIVE_EVENTS.md).
+
+### Estado ECM y perfiles incorporados en 0.7.0
 
 - Canal con brillo verde tras dos respuestas ECM/CW no nulas recientes; rojo
   ante error/CW vacía o falta de respuestas durante 15 s en una sesión cifrada.

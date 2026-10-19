@@ -1,3 +1,47 @@
+## DVB PanelScan 0.7.1 · Eventos en vivo, sin grabación
+
+- Nueva pestaña **Eventos en vivo** con arranque/parada, resultados ECM/CW,
+  latencia, conexión/reconexión, señal/lock y estadísticas TS acumuladas.
+- Filtros por canal/nombre, adaptador, mensaje y nivel; limpiar pantalla.
+- Solo eventos nuevos: sin archivos, base de datos ni historial. Al salir de
+  la vista o esconder el navegador se cierra la suscripción y se borra la pantalla.
+- Colas acotadas por visor (500 eventos); un visor lento no bloquea canales.
+  No se imprimen claves, credenciales ni contenido ECM; solo eventos estructurados.
+- Los procesos continúan drenando stderr para mantener métricas de salud en RAM,
+  sin guardar transcripciones. No se generan/amplían stream-*.log, mux-*.log o
+  ca.log, ni se envían los eventos a journald. Los archivos antiguos no se eliminan.
+- Los botones de registros históricos se sustituyen por Eventos en vivo.
+  El endpoint antiguo /api/stream/log devuelve 410. /api/events usa SSE sin caché
+  ni replay; reconectar comienza de nuevo, sin recuperar eventos del corte.
+- Se mantienen multicanal y perfiles. Usuario confirmó varios canales simultáneos
+  en TBS real en la versión anterior; la vista nueva aún requiere prueba allí.
+
+### Actualizar Ubuntu 22.04 amd64
+
+```sh
+wget -O /tmp/dvb-panelscan_0.7.1_amd64.deb https://github.com/TalaveraSama/dvb-panelscan/releases/download/v0.7.1/dvb-panelscan_0.7.1_amd64.deb
+sudo systemctl stop dvb-panel
+sudo apt install /tmp/dvb-panelscan_0.7.1_amd64.deb
+sudo systemctl start dvb-panel
+```
+
+Se conservan perfiles, canales y overrides. Recargar con Ctrl+F5. Abrir Eventos
+antes de abrir/cerrar canales para observar los eventos. No expongas el panel
+sin autenticación a Internet. Verde ECM sigue sin certificar vídeo decodificado.
+
+### Validación
+
+46 pruebas Python/HTTP (dos de integración C requieren compilar tbsstream), más
+prueba DOM de interfaz y regresiones C en CI. Nuevas comprobaciones: sin replay,
+sin eventos retenidos sin espectadores, colas acotadas, consumidor lento,
+exclusión de secretos, drenaje de stderr sin archivo, salud ECM en memoria,
+SSE sin caché y limpieza al desconectar. La UI comprueba conexión solo en la
+vista visible, desconexión al salir/esconderla y ausencia de eventos anteriores.
+
+---
+
+# Historial 0.7.0
+
 ## DVB PanelScan 0.7.0 · Estado ECM, canales y perfiles Newcamd
 
 - Indicadores por canal en Dashboard y Streaming: verde brillante con dos CW no
