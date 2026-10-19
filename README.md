@@ -228,3 +228,11 @@ grep -E 'TS stats|ECM:|ECM sin|queue full|newcamd:' /var/lib/dvb-panelscan/strea
 pass no son HLS segmentado. Un empaquetador HLS con búfer puede reducir jitter
 percibido, pero no reconstruye paquetes perdidos ni corrige CW fuera de período.
 La actualización conserva datos y overrides. Ver RELEASE_NOTES.md.
+
+### Newcamd: conexión compartida y arranque
+
+Ver [revisión específica del cliente Newcamd de Tvheadend](docs/TVHEADEND_NEWCAMD_REVIEW.md):
+cola de ECM, correlación por secuencia, contextos por servicio, marcas de CW,
+paridad inicial y diferencias pendientes respecto a 0.5.1. El intervalo base
+observado de 10 segundos no equivale a una espera fija de arranque; no se
+atribuye el síntoma del usuario a ese valor sin medirlo.
