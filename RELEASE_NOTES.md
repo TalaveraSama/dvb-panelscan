@@ -1,3 +1,21 @@
+## DVB PanelScan 0.16.1 · Sincronización TS / continuidad PSI
+
+- Adquisición de sincronía por tres cabeceras TS plausibles a 188 bytes; no basta
+  con encontrar 0x47 dentro del payload. Valida AFC y longitud de adaptación.
+- Pérdida de alineación/TEI reinicia ensambladores parciales; discontinuidad o
+  salto de CC PSI espera un nuevo PUSI. Los duplicados PSI no concatenan datos.
+- Corrige pointer_field: descarta parciales incompletos al llegar una nueva sección,
+  valida límites, respeta continuación de 1–3 bytes y el caso de solo pointer.
+- Nuevos contadores en Eventos en vivo: sync_losses, sync_bytes, invalid_ts,
+  psi_discontinuities. Sin archivos de registro ni reescritura de PCR/PTS/DTS.
+- Pruebas de fragmentación, falsas cabeceras, readquisición, pérdida/duplicado PSI,
+  TEI, adaptación inválida, límite de pointer y varias secciones por paquete.
+
+No recupera bytes perdidos ni añade jitter buffer/pacing/transcodificación. Falta
+validación de la sincronía A/V y de señal real con el servidor del usuario.
+
+---
+
 ## DVB PanelScan 0.16.0 · Correcciones TS / descifrado
 
 - Las claves disponibles se versionan por paridad. Al regresar a una paridad

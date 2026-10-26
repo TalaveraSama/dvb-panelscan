@@ -307,11 +307,13 @@ static void feed_section(uint16_t pid, const uint8_t *data, int len, int pusi)
       memcpy(sb->buf, data + 1 + pointer, remaining);
       sb->len = remaining;
       process_sections(sb);
+      if (!sb->len) sb->wait_pusi = 1;
     }
-  } else if (!sb->wait_pusi && sb->len && sb->len + len <= (int)sizeof(sb->buf)) {
+  } else if (!sb->wait_pusi && sb->len + len <= (int)sizeof(sb->buf)) {
     memcpy(sb->buf + sb->len, data, len);
     sb->len += len;
     process_sections(sb);
+    if (!sb->len) sb->wait_pusi = 1;
   } else if (sb->len + len > (int)sizeof(sb->buf)) {
     sb->len = 0; sb->wait_pusi = 1;
   }

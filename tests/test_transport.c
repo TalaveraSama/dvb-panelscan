@@ -294,6 +294,19 @@ static void test_psi_continuity_and_pointer(void)
   psi_packet(packet, 0x123, 7, 1, start, sizeof(start)); process_packet(packet);
   packet[1] |= 0x80; process_packet(packet); /* TEI destroys partial PSI */
   assert(!assembly->len && assembly->wait_pusi);
+  /* A PUSI payload containing only pointer=0 may start its section next packet. */
+  select_ca(0);
+  uint8_t pointer_only[] = {0};
+  feed_section(0x123, pointer_only, sizeof(pointer_only), 1);
+  feed_section(0x123, ecm, sizeof(ecm), 0);
+  assert(ecm_q_count == 1 && !memcmp(ecm_q[0].sec, ecm, sizeof(ecm)));
+  /* Pointer bytes finish an old section; the rest starts a distinct new section. */
+  select_ca(0);
+  feed_section(0x123, start, sizeof(start), 1);
+  uint8_t finish_and_start[] = {3,3,4,5,0x81,0x70,5,9,8,7,6,5};
+  feed_section(0x123, finish_and_start, sizeof(finish_and_start), 1);
+  assert(ecm_q_count == 2);
+  assert(ecm_q[0].sec[0] == 0x80 && ecm_q[1].sec[0] == 0x81);
   uint64_t before = invalid_ts;
   packet[1] &= 0x7f; packet[4] = 184; process_packet(packet);
   assert(invalid_ts == before + 1);

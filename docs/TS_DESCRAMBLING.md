@@ -73,3 +73,31 @@ AddressSanitizer/UBSan en CI junto con las pruebas de transporte y broker.
 `tests/test_events.py` verifica que los diagnósticos se muestran en vivo sin
 reenviar líneas arbitrarias ni secretos. La prueba real con TBS/Newcamd del usuario
 sigue pendiente; no se ha accedido por SSH a su servidor desde este entorno.
+
+## Sincronización de transporte (0.16.1)
+
+La sincronía de bytes y la sincronía temporal A/V no son la misma cosa:
+
+- El lector C busca tres cabeceras plausibles separadas por 188 bytes antes de
+  adquirir alineación. Conserva fragmentos entre lecturas y vuelve a buscar al
+  perder la cabecera. No soporta TS de 192/204 bytes en esta entrada.
+- Se rechazan AFC reservado y campos de adaptación que no caben en el paquete.
+- Al perder alineación se descartan las secciones parciales. TEI invalida la
+  sección de ese PID; salto de continuidad o discontinuity_indicator PSI también
+  reinicia el ensamblado y espera PUSI. Una copia con el mismo CC no se concatena.
+- pointer_field solo completa la sección anterior. Después comienza otra sección
+  desde cero; un resto viejo incompleto nunca se concatena con la nueva. Se
+  aceptan payloads de continuación pequeños y PUSI con solo pointer=0.
+- No se cambian PCR/PTS/DTS, la cadencia del emisor ni el orden de servicio.
+  Las pruebas verifican conservación byte a byte del PCR y payload reenviado.
+  Esto no mide ni corrige jitter PCR ni deriva de reloj A/V.
+
+Los contadores acumulados `sync_losses`, `sync_bytes`, `invalid_ts` y
+`psi_discontinuities` se publican en **Eventos en vivo** junto a los anteriores.
+`sync_bytes` incluye basura inicial descartada, no solo pérdidas durante emisión.
+No hay registro histórico. Una pérdida de payload ya recibida no se puede
+reconstruir; si el paquete conserva una cabecera válida pero su contenido está
+corrupto, esta comprobación no valida la imagen ni todos los errores del códec.
+
+La salida stdout del motor sigue siendo exclusivamente TS alineado; el panel
+rechaza una salida no alineada en vez de adivinar cómo reparar un binario incompatible.

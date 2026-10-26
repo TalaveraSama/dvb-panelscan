@@ -7,7 +7,7 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.16.0 · Correcciones TS / descifrado
+## Actual: 0.16.1 · Sincronización TS y continuidad PSI
 
 Protección de claves por paridad, claves asociadas a paquetes en cola y
 alternativas CAID/PID ECM anunciadas en PMT. [Guía de diagnóstico](docs/TS_DESCRAMBLING.md).
