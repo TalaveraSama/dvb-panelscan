@@ -1,3 +1,26 @@
+## DVB PanelScan 0.16.0 · Correcciones TS / descifrado
+
+- Las claves disponibles se versionan por paridad. Al regresar a una paridad
+  usada, una repetición de la CW anterior no se trata como una clave nueva.
+- Los paquetes encolados que ya tenían CW guardan su clave/revisión: una respuesta
+  posterior no los descifra con la clave nueva. Batches separados por paridad/revisión.
+- Conserva el orden de paquetes claros, audio y PCR detrás del vídeo que espera CW.
+- Retiene hasta 16 pares CAID/PID ECM distintos de la PMT. Tras dos respuestas
+  sin CW válida o 12 s sin progreso intenta el siguiente; no queda fijado al primero.
+- Generaciones de contexto CA: descarta respuestas tardías de otra selección o PMT.
+  Cambiar selección invalida claves, limpia ECM pendientes y descarta payload en espera.
+- Eventos en vivo de selección CAID/PID y espera de clave. Sin claves/contraseñas,
+  sin historial ni archivos de eventos. Conserva usuarios, perfiles, TP y permisos.
+- Pruebas CSA con claves reales sintéticas, rotación tardía, cola con claves distintas,
+  PMT multi-CA, fallback, rechazo tardío y eventos seguros. Python/DOM/C sanitizados
+  y paquete/install en CI. Falta validación con la señal real del usuario.
+
+No repara recepción RF ni paquetes perdidos; no añade AES/CSA3 ni derechos Newcamd.
+Protección conservadora: un sistema que reutiliza exactamente la misma CW entre
+ciclos de paridad puede quedar esperando; ver docs/TS_DESCRAMBLING.md.
+
+---
+
 ## DVB PanelScan 0.15.1 · Pantalla dedicada de usuarios
 
 - Usuarios muestra primero la tabla de cuentas, sin formulario abierto.

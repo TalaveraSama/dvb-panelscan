@@ -247,6 +247,13 @@ static secbuf_t *secbuf_get(uint16_t pid)
 {
   for (int i = 0; i < nsecbufs; i++)
     if (secbufs[i].pid == pid) return &secbufs[i];
+  for (int i = 0; i < nsecbufs; i++) {
+    if (secbufs[i].pid == 0x1fff) {
+      memset(&secbufs[i], 0, sizeof(secbufs[i]));
+      secbufs[i].pid = pid;
+      return &secbufs[i];
+    }
+  }
   if (nsecbufs >= 4) return NULL;
   secbuf_t *sb = &secbufs[nsecbufs++];
   memset(sb, 0, sizeof(*sb));
@@ -839,6 +846,14 @@ static void select_ca(int selected)
   pthread_mutex_lock(&ecm_q_mutex);
   ecm_q_count = ecm_q_head = ecm_q_tail = 0;
   pthread_mutex_unlock(&ecm_q_mutex);
+  /* Reuse obsolete ECM assemblers without moving PAT/PMT buffers: parse_pmt
+   * may be executing through a pointer to one of those buffers right now. */
+  for (int i = 0; i < nsecbufs; i++) {
+    if (secbufs[i].pid != PID_PAT && secbufs[i].pid != svc.pmt_pid) {
+      secbufs[i].pid = 0x1fff;
+      secbufs[i].len = 0;
+    }
+  }
   /* Payload waiting for an incompatible CA must not leak into the new context. */
   service_drops += scram_count;
   scram_head = scram_count = 0;
@@ -886,7 +901,9 @@ static void parse_pmt(const uint8_t *b, int len)
     refresh_playlist(svc.sid);
     psi_due_ms = 0;
     LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld\n",
-         svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes, (long)getpid());
+         svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid,
+         svc.ca_count ? svc.ca[ca_selected].pid : -1,
+         svc.ca_count ? svc.ca[ca_selected].caid : 0, svc.nes, (long)getpid());
   }
 }
 

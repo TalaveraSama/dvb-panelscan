@@ -91,6 +91,20 @@ int main(void) {
   uint64_t due = psi_due_ms;
   emit_psi();
   assert(ring_seq == 2 && psi_due_ms == due);
+  /* Fallback across many PIDs must not exhaust the four section assemblers. */
+  nsecbufs = 0;
+  secbuf_get(PID_PAT);
+  secbuf_t *pmt_assembly = secbuf_get(svc.pmt_pid);
+  pmt_assembly->len = 7;
+  svc.ca_count = 16;
+  for (int i = 0; i < 16; i++) {
+    svc.ca[i].caid = 0x100 + i;
+    svc.ca[i].pid = 0x200 + i;
+    select_ca(i);
+    assert(secbuf_get(svc.ca[i].pid) != NULL);
+    assert(secbuf_get(svc.pmt_pid) == pmt_assembly && pmt_assembly->len == 7);
+  }
+  assert(nsecbufs <= 4);
   puts("demux/descriptor/PSI regression tests passed");
   return 0;
 }
