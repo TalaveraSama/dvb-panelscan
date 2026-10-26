@@ -193,6 +193,29 @@ static void test_late_rotating_cw(void)
   dvbcsa_key_free(key); csa_free(csae); csae = NULL;
 }
 
+static void test_buffer_keeps_its_key(void)
+{
+  uint8_t key1[8] = {1,2,3,6,4,5,6,15};
+  uint8_t key2[8] = {3,4,5,12,6,7,8,21};
+  uint8_t plain[TS_PKT], packet[TS_PKT];
+  memset(plain, 0x55, sizeof(plain));
+  plain[0] = 0x47; plain[1] = 1; plain[2] = 0; plain[3] = 0x10;
+  memcpy(packet, plain, sizeof(packet));
+  struct dvbcsa_key_s *key = dvbcsa_key_alloc();
+  dvbcsa_key_set(key1, key); dvbcsa_encrypt(key, packet + 4, 184); packet[3] |= 0x80;
+  csae = csa_create(); memset(&svc, 0, sizeof(svc)); select_ca(0); ring_seq = 0;
+  install_cw(0, key1);
+  buffer_service_packet(packet);
+  install_cw(0, key2); /* response arrives before the queued packet is flushed */
+  dvbcsa_key_set(key2, key); memcpy(packet, plain, TS_PKT);
+  dvbcsa_encrypt(key, packet + 4, 184); packet[3] |= 0x80;
+  buffer_service_packet(packet); flush_scrambled();
+  assert(!memcmp(ring, plain, TS_PKT));
+  assert(!memcmp(cw_value[0], key2, 8));
+  assert(ring_seq == 2 && !memcmp(ring + TS_PKT, plain, TS_PKT));
+  dvbcsa_key_free(key); csa_free(csae); csae = NULL;
+}
+
 static void test_ca_failure_and_late_response(void)
 {
   uint8_t key[8] = {1,2,3,6,4,5,6,15}, zero[8] = {0};
@@ -256,6 +279,7 @@ int main(void)
   test_stdout_ts();
   test_service_order_and_csa_batch();
   test_late_rotating_cw();
+  test_buffer_keeps_its_key();
   test_ca_failure_and_late_response();
   test_input_error_counters();
   puts("TS fragmentation, PCR forwarding, ring batching and TCP tests passed");

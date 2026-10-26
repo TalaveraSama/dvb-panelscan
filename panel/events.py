@@ -71,6 +71,19 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
                     "info" if success else "error", channel, adapter,
                     latency_ms=latency, result=result, cw_available=bool(mask))
         return
+    selection = re.fullmatch(r"CA select: sid=(\d+) caid=([0-9A-Fa-f]{4}) ecm=(\d+) candidate=(\d+)/(\d+)", line.strip())
+    if selection:
+        sid, caid, pid, candidate, total = selection.groups()
+        bus.publish("ca_select", "Acceso condicional: CAID %s · ECM PID %s · opción %s/%s" %
+                    (caid, pid, candidate, total), "info", channel, adapter,
+                    sid=int(sid), caid=caid, ecm_pid=int(pid))
+        return
+    waiting = re.fullmatch(r"CW wait: parity=([01]) stale=([01]) pending=(\d+)", line.strip())
+    if waiting:
+        parity, stale, pending = map(int, waiting.groups())
+        bus.publish("cw_wait", "Esperando clave nueva para cambio de paridad" if stale else "Esperando clave de descifrado",
+                    "warning", channel, adapter, parity=parity, pending=pending)
+        return
     if line.startswith("TS stats:"):
         stats = {key: int(value) for key, value in re.findall(
             r"\b(tei|cc_errors|service_drops|pending|ecm_drops)=(\d+)", line)}

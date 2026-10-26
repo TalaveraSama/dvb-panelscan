@@ -522,6 +522,10 @@ static pthread_cond_t ecm_q_cond = PTHREAD_COND_INITIALIZER;
 #define SCRAM_MAX 65536 /* 12 MiB per active service; bounded, not a latency target */
 static uint8_t scram_buf[SCRAM_MAX * TS_PKT];
 static int scram_head = 0, scram_count = 0;
+/* Keep an already available key with its queued packet: a later ECM must not
+ * decrypt older buffered payload with a newly installed same-parity key. */
+static uint8_t scram_cw[SCRAM_MAX][8];
+static uint64_t scram_revision[SCRAM_MAX];
 static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
 static uint64_t ecm_queue_drops;
 static uint8_t cc_seen[8192], last_cc[8192];
@@ -573,33 +577,54 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
 static void flush_scrambled(void)
 {
   uint8_t batch[64 * TS_PKT];
+  static uint64_t wait_due;
   while (scram_count) {
     int count = 0, encrypted = 0;
     pthread_mutex_lock(&csa_mutex);
     int batch_parity = -1;
+    uint8_t batch_key[8] = {0};
+    uint64_t batch_revision = 0;
     while (count < scram_count && count < 64) {
-      const uint8_t *pkt = scram_buf + ((scram_head + count) % SCRAM_MAX) * TS_PKT;
+      int slot = (scram_head + count) % SCRAM_MAX;
+      const uint8_t *pkt = scram_buf + slot * TS_PKT;
       if (pkt[3] & 0x80) {
         int parity = !!(pkt[3] & 0x40);
         int available = parity ? have_cw_odd : have_cw_even;
-        if (!available) break;
-        if (batch_parity >= 0 && parity != batch_parity) break;
+        uint64_t revision = scram_revision[slot] ? scram_revision[slot] : cw_revision[parity];
+        const uint8_t *key = scram_revision[slot] ? scram_cw[slot] : cw_value[parity];
+        int stale = parity != output_parity && cw_used[parity] &&
+                    revision <= cw_used[parity];
+        if (!available || stale) {
+          uint64_t now = monotonic_ms();
+          if (now >= wait_due) {
+            LOGV("CW wait: parity=%d stale=%d pending=%d\n", parity, stale, scram_count);
+            wait_due = now + 5000;
+          }
+          break;
+        }
+        if (batch_parity >= 0 && (parity != batch_parity || revision != batch_revision ||
+                                 memcmp(key, batch_key, 8))) break;
         /* Returning to a previously used parity requires a different CW.
          * Repeated ECM replies must not revalidate a key from an old period. */
-        if (parity != output_parity && cw_used[parity] &&
-            cw_revision[parity] <= cw_used[parity]) break;
         batch_parity = parity;
+        batch_revision = revision;
+        memcpy(batch_key, key, 8);
         encrypted++;
       }
       memcpy(batch + count * TS_PKT, pkt, TS_PKT);
       count++;
     }
     if (encrypted) {
+      if (batch_parity) csa_set_key_odd(csae, batch_key);
+      else csa_set_key_even(csae, batch_key);
       csa_descramble(csae, batch, count);
+      /* Restore the latest key for the next batch. */
+      if (batch_parity) csa_set_key_odd(csae, cw_value[1]);
+      else csa_set_key_even(csae, cw_value[0]);
       csa_batches++;
       csa_packets += encrypted;
       output_parity = batch_parity;
-      cw_used[batch_parity] = cw_revision[batch_parity];
+      cw_used[batch_parity] = batch_revision;
     }
     pthread_mutex_unlock(&csa_mutex);
     if (!count) break;
@@ -620,6 +645,18 @@ static void buffer_service_packet(const uint8_t *pkt)
   }
   int tail = (scram_head + scram_count) % SCRAM_MAX;
   memcpy(scram_buf + tail * TS_PKT, pkt, TS_PKT);
+  scram_revision[tail] = 0;
+  if (pkt[3] & 0x80) {
+    int parity = !!(pkt[3] & 0x40);
+    pthread_mutex_lock(&csa_mutex);
+    int available = parity ? have_cw_odd : have_cw_even;
+    if (available && (parity == output_parity || !cw_used[parity] ||
+                      cw_revision[parity] > cw_used[parity])) {
+      memcpy(scram_cw[tail], cw_value[parity], 8);
+      scram_revision[tail] = cw_revision[parity];
+    }
+    pthread_mutex_unlock(&csa_mutex);
+  }
   scram_count++;
 }
 

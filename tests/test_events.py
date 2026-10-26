@@ -52,6 +52,18 @@ class EventTests(unittest.TestCase):
         self.assertEqual(events[-1]["latency_ms"], 184)
         viewer.close()
 
+    def test_ca_selection_and_key_wait_are_safe_live_events(self):
+        bus = EventBus(); viewer = bus.subscribe()
+        diagnostic_event(bus, "CA select: sid=1874 caid=1802 ecm=100 candidate=2/3", "channel", "tp:1874", 8)
+        diagnostic_event(bus, "CW wait: parity=0 stale=1 pending=20", "channel", "tp:1874", 8)
+        records = viewer.read(timeout=0)
+        self.assertEqual([r["kind"] for r in records], ["ca_select", "cw_wait"])
+        self.assertEqual(records[0]["caid"], "1802")
+        self.assertEqual(records[1]["pending"], 20)
+        diagnostic_event(bus, "CA select: sid=1874 caid=1802 ecm=100 candidate=2/3 password=secret", "channel")
+        self.assertEqual(viewer.read(timeout=0), [])
+        viewer.close()
+
     def test_session_drains_stderr_and_health_without_creating_log(self):
         with tempfile.TemporaryDirectory() as folder:
             manager = StreamManager(); viewer = manager.events.subscribe()
