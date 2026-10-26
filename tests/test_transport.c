@@ -239,7 +239,7 @@ static void test_ca_failure_and_late_response(void)
   assert(accept_ecm_result(&request, 0, key, zero));
   assert(have_cw_even && !have_cw_odd && !ca_rotate);
   /* No usable ECM on this candidate: try the next, not a permanent black screen. */
-  ca_last_progress = monotonic_ms() - 12001;
+  ca_last_progress = monotonic_ms() - 20001;
   process_packet(packet);
   assert(ca_selected == 0);
   request.generation = ca_generation;
@@ -248,6 +248,38 @@ static void test_ca_failure_and_late_response(void)
   assert(!ca_rotate); /* transport errors do not select an unrelated CA */
   csa_free(csae); csae = NULL;
   memset(&svc, 0, sizeof(svc));
+}
+
+static void test_working_ca_grace_and_lock(void)
+{
+  uint8_t key[8] = {1,2,3,6,4,5,6,15}, zero[8] = {0};
+  csae = csa_create(); memset(&svc, 0, sizeof(svc));
+  svc.ca_count = 2; svc.ca[0].caid = 0xb00; svc.ca[0].pid = 5169;
+  svc.ca[1].caid = 0x1867; svc.ca[1].pid = 6507;
+  select_ca(0);
+  ecm_req_t request = {.generation = ca_generation};
+  accept_ecm_result(&request, 0, key, key);
+  for (int i = 0; i < 4; i++) accept_ecm_result(&request, -2, zero, zero);
+  assert(!ca_rotate && !have_cw_even && !have_cw_odd); /* wait safely, no old keys */
+  ca_last_progress = monotonic_ms() - 15001;
+  accept_ecm_result(&request, -2, zero, zero);
+  assert(ca_rotate);
+  opts.preferred_caid = 0xb00; opts.preferred_ecm_pid = 5169;
+  select_ca(0); request.generation = ca_generation;
+  for (int i = 0; i < 4; i++) accept_ecm_result(&request, -2, zero, zero);
+  ca_last_progress = monotonic_ms() - 30001;
+  uint8_t packet[TS_PKT] = {0x47,0x1f,0xff,0x10};
+  process_packet(packet);
+  assert(ca_selected == 0 && !ca_rotate);
+  assert(preferred_ca_index(&svc) == 0);
+  opts.preferred_ecm_pid = 100;
+  assert(preferred_ca_index(&svc) == -1);
+  select_ca(-1);
+  process_packet(packet); /* absent locked pair must not index ca[-1] or fall back */
+  assert(ca_selected == -1);
+  opts.preferred_caid = opts.preferred_ecm_pid = 0;
+  memset(&svc, 0, sizeof(svc)); select_ca(0);
+  csa_free(csae); csae = NULL;
 }
 
 static void psi_packet(uint8_t *packet, unsigned pid, int cc, int start,
@@ -364,6 +396,7 @@ int main(void)
   test_late_rotating_cw();
   test_buffer_keeps_its_key();
   test_ca_failure_and_late_response();
+  test_working_ca_grace_and_lock();
   test_psi_continuity_and_pointer();
   test_false_sync_headers();
   test_input_error_counters();

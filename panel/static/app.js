@@ -672,6 +672,8 @@ async function editChannel(identity) {
   $("ch_number").value = channel.number || "";
   $("ch_logo").value = channel.logo || "";
   $("ch_enabled").checked = channel.enabled !== false;
+  $("ch_caid").value = channel.caid || "";
+  $("ch_ecm_pid").value = channel.ecm_pid || "";
   $("ch_profile").innerHTML =
     '<option value="">Heredar del transpondedor</option>' +
     newcamdProfiles
@@ -697,6 +699,8 @@ $("channelForm").addEventListener("submit", async (e) => {
       number: $("ch_number").value ? Number($("ch_number").value) : null,
       enabled: $("ch_enabled").checked,
       newcamd_profile: $("ch_profile").value,
+      caid: $("ch_caid").value.trim().toUpperCase(),
+      ecm_pid: $("ch_ecm_pid").value ? Number($("ch_ecm_pid").value) : null,
     },
   );
   if (!r.ok) throw new Error(r.error);

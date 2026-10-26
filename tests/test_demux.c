@@ -25,6 +25,12 @@ int main(void) {
   parse_pmt(multi_ca, sizeof(multi_ca));
   assert(ca_selected == 1 && ca_generation == generation);
   assert(svc.ca[ca_selected].pid == 0x124);
+  uint8_t reordered[sizeof(multi_ca)];
+  memcpy(reordered, multi_ca, sizeof(multi_ca));
+  memcpy(reordered + 9, multi_ca + 15, 6);
+  memcpy(reordered + 15, multi_ca + 9, 6);
+  parse_pmt(reordered, sizeof(reordered));
+  assert(ca_selected == 0 && svc.ca[0].pid == 0x124 && ca_generation == generation);
   /* ECM private sections have no MPEG long-section CRC. */
   secbuf_t sb = {0};
   sb.pid = svc.ca[ca_selected].pid;

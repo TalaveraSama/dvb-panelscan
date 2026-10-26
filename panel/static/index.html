@@ -633,6 +633,27 @@
           <select id="ch_profile"></select
         ></label>
         <label
+          >CAID fijo (hexadecimal; vacío = automático)<input
+            id="ch_caid"
+            maxlength="4"
+            pattern="[0-9a-fA-F]{4}"
+            placeholder="0B00"
+        /></label>
+        <label
+          >ECM PID fijo (decimal)<input
+            id="ch_ecm_pid"
+            type="number"
+            min="1"
+            max="8190"
+            placeholder="5169"
+        /></label>
+        <p class="callout">
+          Completa ambos para fijar el acceso condicional, o deja ambos vacíos
+          para automático. Si la combinación no está anunciada en la PMT no se
+          probarán otras. Estos valores dependen del canal; no los copies a
+          todos.
+        </p>
+        <label
           ><input id="ch_enabled" type="checkbox" /> Canal habilitado</label
         >
         <p class="callout">

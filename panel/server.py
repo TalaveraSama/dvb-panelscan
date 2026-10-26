@@ -517,6 +517,8 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     # single broker, not in every service process.
     cmd = [binary, "--stdin", "--sid", str(sid), "--stdout", "--verbose",
            "--http-port", str(http_port)]
+    if settings.get("caid") and settings.get("ecm_pid"):
+        cmd += ["--caid", settings["caid"], "--ecm-pid", str(settings["ecm_pid"])]
     if not isinstance(udp, (list, tuple)) or any(not isinstance(u, str) for u in udp):
         raise StreamError("Destinos UDP inválidos", 400)
     for destination in udp:
@@ -1036,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 tp, sid = resolve_channel(identity)
                 identity = channel_id(tp, sid)
-                allowed = {"name", "group", "number", "logo", "enabled", "newcamd_profile"}
+                allowed = {"name", "group", "number", "logo", "enabled", "newcamd_profile", "caid", "ecm_pid"}
                 if set(body) - allowed:
                     raise ValueError("Campo de canal no admitido; el SID no se modifica")
                 settings = dict(STATE["channels"].get(identity, {}))
@@ -1056,6 +1058,17 @@ class Handler(BaseHTTPRequestHandler):
                     if number not in (None, "") and (isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 99999):
                         raise ValueError("Número de canal inválido (1–99999)")
                     settings["number"] = number or None
+                if "caid" in body or "ecm_pid" in body:
+                    caid = body.get("caid", settings.get("caid", ""))
+                    pid = body.get("ecm_pid", settings.get("ecm_pid"))
+                    if caid in (None, "") and pid in (None, ""):
+                        settings.pop("caid", None); settings.pop("ecm_pid", None)
+                    else:
+                        if (not isinstance(caid, str) or len(caid) != 4 or
+                            any(c not in "0123456789abcdefABCDEF" for c in caid) or int(caid, 16) == 0 or
+                            isinstance(pid, bool) or not isinstance(pid, int) or not 1 <= pid <= 8190):
+                            raise ValueError("CAID: 4 dígitos hex; ECM PID: 1–8190. Ambos requeridos, o ambos vacíos para automático")
+                        settings["caid"] = caid.upper(); settings["ecm_pid"] = pid
                 if settings.get("logo"):
                     url = urllib.parse.urlsplit(settings["logo"])
                     if settings["logo"] not in LOGOS.values() and (url.scheme not in ("http", "https") or not url.netloc):

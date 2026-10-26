@@ -120,6 +120,7 @@ typedef struct {
   int mod, fec, fec_hp, fec_lp, tx_mode, guard, hier, rolloff;
   char pol;
 
+  unsigned preferred_caid, preferred_ecm_pid;
   uint16_t want_sid;   /* 0 = auto (primer servicio) */
 
   char nc_host[128];
@@ -515,6 +516,7 @@ static int output_parity = -1;
 static uint64_t ca_generation = 1;
 static int ca_selected, ca_failures, ca_rotate;
 static uint64_t ca_last_progress;
+static int ca_worked;
 
 static void install_cw(int parity, const uint8_t key[8])
 {
@@ -545,7 +547,7 @@ static int scram_head = 0, scram_count = 0;
 static uint8_t scram_cw[SCRAM_MAX][8];
 static uint64_t scram_revision[SCRAM_MAX];
 static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
-static uint64_t ecm_queue_drops;
+static uint64_t ecm_queue_drops, ca_switch_drops, queue_full_drops;
 static uint64_t sync_losses, sync_bytes, invalid_ts, psi_discontinuities;
 
 static void reset_sections(void)
@@ -667,6 +669,7 @@ static void buffer_service_packet(const uint8_t *pkt)
   if (scram_count == SCRAM_MAX) {
     /* Bounded startup/failure buffering. Never silently keep stale payload. */
     service_drops += scram_count;
+    queue_full_drops += scram_count;
     LOGV("TS: service queue full waiting for CW; dropped %d packets\n", scram_count);
     scram_head = scram_count = 0;
   }
@@ -718,13 +721,15 @@ static void log_transport_stats(void)
   pthread_mutex_unlock(&ecm_q_mutex);
   LOGV("TS stats: tei=%llu cc_errors=%llu service_drops=%llu pending=%d "
        "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu "
-       "sync_losses=%llu sync_bytes=%llu invalid_ts=%llu psi_discontinuities=%llu\n",
+       "sync_losses=%llu sync_bytes=%llu invalid_ts=%llu psi_discontinuities=%llu "
+       "ca_switch_drops=%llu queue_full_drops=%llu\n",
        (unsigned long long)input_tei, (unsigned long long)input_cc_errors,
        (unsigned long long)service_drops, scram_count, queued,
        (unsigned long long)dropped, (unsigned long long)csa_batches,
        (unsigned long long)csa_packets, (unsigned long long)sync_losses,
        (unsigned long long)sync_bytes, (unsigned long long)invalid_ts,
-       (unsigned long long)psi_discontinuities);
+       (unsigned long long)psi_discontinuities, (unsigned long long)ca_switch_drops,
+       (unsigned long long)queue_full_drops);
   due = now + 5000;
 }
 
@@ -750,10 +755,17 @@ static int accept_ecm_result(const ecm_req_t *request, int result,
     install_cw(0, even);
     install_cw(1, odd);
     ca_failures = 0;
+    ca_worked = 1;
     ca_last_progress = monotonic_ms();
   } else {
     have_cw_even = have_cw_odd = 0;
-    if (result != -1 && ++ca_failures >= 2) ca_rotate = 1;
+    if (result != -1) {
+      ca_failures++;
+      /* A known-working CA deserves a recovery window, not a carousel after
+       * two transient NOKs. Never rotate away from an explicit user lock. */
+      if (!opts.preferred_caid && ca_failures >= (ca_worked ? 3 : 2) &&
+          (!ca_worked || monotonic_ms() - ca_last_progress >= 15000)) ca_rotate = 1;
+    }
   }
   pthread_mutex_unlock(&csa_mutex);
   return 1;
@@ -858,7 +870,7 @@ static void select_ca(int selected)
   pthread_mutex_lock(&csa_mutex);
   ca_selected = selected;
   ca_generation++;
-  ca_failures = ca_rotate = 0;
+  ca_failures = ca_rotate = ca_worked = 0;
   ca_last_progress = monotonic_ms();
   have_cw_even = have_cw_odd = 0;
   memset(cw_revision, 0, sizeof(cw_revision));
@@ -880,10 +892,23 @@ static void select_ca(int selected)
   }
   /* Payload waiting for an incompatible CA must not leak into the new context. */
   service_drops += scram_count;
+  ca_switch_drops += scram_count;
   scram_head = scram_count = 0;
-  if (svc.ca_count)
+  if (svc.ca_count && selected >= 0)
     LOGV("CA select: sid=%u caid=%04X ecm=%u candidate=%d/%d\n",
          svc.sid, svc.ca[selected].caid, svc.ca[selected].pid, selected + 1, svc.ca_count);
+  else if (opts.preferred_caid)
+    LOGV("CA locked missing: sid=%u caid=%04X ecm=%u\n", svc.sid,
+         opts.preferred_caid, opts.preferred_ecm_pid);
+}
+
+static int preferred_ca_index(const service_t *service)
+{
+  if (!opts.preferred_caid) return 0;
+  for (int i = 0; i < service->ca_count; i++)
+    if (service->ca[i].caid == opts.preferred_caid &&
+        service->ca[i].pid == opts.preferred_ecm_pid) return i;
+  return -1;
 }
 
 static void parse_pmt(const uint8_t *b, int len)
@@ -920,14 +945,26 @@ static void parse_pmt(const uint8_t *b, int len)
   if (memcmp(&svc, &next, sizeof(next))) {
     int ca_changed = svc.sid != next.sid || svc.ca_count != next.ca_count ||
                      memcmp(svc.ca, next.ca, sizeof(svc.ca));
+    int selected = preferred_ca_index(&next);
+    /* Retain a working choice across descriptor reordering when still present. */
+    if (!opts.preferred_caid && ca_selected >= 0 && ca_selected < svc.ca_count) {
+      for (int i = 0; i < next.ca_count; i++)
+        if (next.ca[i].caid == svc.ca[ca_selected].caid &&
+            next.ca[i].pid == svc.ca[ca_selected].pid) selected = i;
+    }
+    int same_ca = svc.sid == next.sid && ca_selected >= 0 && ca_selected < svc.ca_count &&
+                  selected >= 0 && selected < next.ca_count &&
+                  svc.ca[ca_selected].caid == next.ca[selected].caid &&
+                  svc.ca[ca_selected].pid == next.ca[selected].pid;
     svc = next;
-    if (ca_changed) select_ca(0);
+    if (ca_changed && !same_ca) select_ca(selected);
+    else if (same_ca) ca_selected = selected;
     refresh_playlist(svc.sid);
     psi_due_ms = 0;
     LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld\n",
          svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid,
-         svc.ca_count ? svc.ca[ca_selected].pid : -1,
-         svc.ca_count ? svc.ca[ca_selected].caid : 0, svc.nes, (long)getpid());
+         svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].pid : -1,
+         svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].caid : 0, svc.nes, (long)getpid());
   }
 }
 
@@ -956,7 +993,7 @@ static void handle_section(uint16_t pid, const uint8_t *s, int slen)
     parse_pat(body, blen);
   } else if (pid == svc.pmt_pid && tid == TID_PMT) {
     parse_pmt(body, blen);
-  } else if (svc.ca_count && pid == svc.ca[ca_selected].pid &&
+  } else if (svc.ca_count && ca_selected >= 0 && pid == svc.ca[ca_selected].pid &&
              (tid == 0x80 || tid == 0x81)) {
     /* ECM uses private short sections: preserve the entire section. */
     enqueue_ecm(svc.sid, svc.ca[ca_selected].caid, svc.provid, s, slen + 3);
@@ -1067,8 +1104,8 @@ static void process_packet(uint8_t *pkt)
 {
   if (!valid_ts_packet(pkt)) { invalid_ts++; reset_sections(); return; }
   pthread_mutex_lock(&csa_mutex);
-  int rotate = ca_rotate || (svc.ca_count > 1 &&
-               monotonic_ms() - ca_last_progress >= 12000);
+  int rotate = !opts.preferred_caid && (ca_rotate || (svc.ca_count > 1 &&
+               monotonic_ms() - ca_last_progress >= (ca_worked ? 20000 : 12000)));
   ca_rotate = 0;
   pthread_mutex_unlock(&csa_mutex);
   if (rotate && svc.ca_count > 1) select_ca((ca_selected + 1) % svc.ca_count);
@@ -1087,7 +1124,7 @@ static void process_packet(uint8_t *pkt)
 
   /* Demux de secciones PSI (PAT/PMT/ECM) */
   if (pid == PID_PAT || (svc.pmt_pid && pid == svc.pmt_pid) ||
-      (svc.ca_count && pid == svc.ca[ca_selected].pid)) {
+      (svc.ca_count && ca_selected >= 0 && pid == svc.ca[ca_selected].pid)) {
     secbuf_t *sb = secbuf_get(pid);
     if (!sb) return;
     if ((afc & 2) && pkt[4] && (pkt[5] & 0x80)) {
@@ -1178,7 +1215,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE, OPT_LNBUNIVERSAL, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER };
+         OPT_BASE, OPT_LNBUNIVERSAL, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER, OPT_CAID, OPT_ECM_PID };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -1193,6 +1230,8 @@ int main(int argc, char **argv)
     {"fec-lp", required_argument, 0, OPT_FEC_LP},
     {"pol", required_argument, 0, OPT_POL},
     {"sid", required_argument, 0, 's'},
+    {"caid", required_argument, 0, OPT_CAID},
+    {"ecm-pid", required_argument, 0, OPT_ECM_PID},
     {"newcamd", required_argument, 0, OPT_NEWCAMD},
     {"deskey", required_argument, 0, OPT_DESKEY},
     {"user", required_argument, 0, OPT_USER},
@@ -1220,6 +1259,19 @@ int main(int argc, char **argv)
       case 'F': opts.frontend = atoi(optarg); break;
       case 't': type = optarg; break;
       case 's': opts.want_sid = (uint16_t)atoi(optarg); break;
+      case OPT_CAID:
+      case OPT_ECM_PID: {
+        char *end = NULL;
+        errno = 0;
+        unsigned long value = strtoul(optarg, &end, c == OPT_CAID ? 16 : 10);
+        if (errno || !optarg[0] || *end || value == 0 ||
+            value > (c == OPT_CAID ? 0xffffUL : 8190UL)) {
+          fprintf(stderr, "invalid --caid (hex) / --ecm-pid (decimal)\n"); return 1;
+        }
+        if (c == OPT_CAID) opts.preferred_caid = (unsigned)value;
+        else opts.preferred_ecm_pid = (unsigned)value;
+        break;
+      }
       case OPT_FREQ: opts.freq_hz = (int64_t)strtoll(optarg, NULL, 10); break;
       case OPT_FREQ_MHZ: freq_mhz = atof(optarg); break;
       case OPT_BW: opts.bandwidth_hz = (uint32_t)strtoul(optarg, NULL, 10); break;
@@ -1288,6 +1340,9 @@ int main(int argc, char **argv)
     }
   }
 
+  if (!!opts.preferred_caid != !!opts.preferred_ecm_pid) {
+    fprintf(stderr, "--caid and --ecm-pid must be supplied together\n"); return 1;
+  }
   if (opts.ca_broker[0])
     return newcamd_broker(opts.ca_broker, opts.nc_host, opts.nc_port,
                          opts.nc_deskey, opts.nc_user, opts.nc_pass);

@@ -40,6 +40,22 @@ class ChannelSettingsTests(unittest.TestCase):
             return response.code, json.load(response)
         with response: return response.status, json.load(response)
 
+    def test_fixed_caid_ecm_settings_validation_and_command(self):
+        code, response = self.call("/api/channels/a%3A672/edit", {"caid": "0b00", "ecm_pid": 5169})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.panel.STATE["channels"]["a:672"]["caid"], "0B00")
+        self.assertEqual(self.panel.transponder_views()[0]["scan"]["services"][0]["ecm_pid"], 5169)
+        with patch.object(self.panel, "find_tbsstream", return_value="/test/tbsstream"), patch.object(self.panel._streams, "acquire", return_value="session") as acquire:
+            self.assertEqual(self.panel._session_start(self.panel.STATE["transponders"][0], nc=self.config, sid=672), "session")
+            command = acquire.call_args.args[2]
+            self.assertEqual(command[command.index("--caid") + 1], "0B00")
+            self.assertEqual(command[command.index("--ecm-pid") + 1], "5169")
+        for body in ({"caid": "GGGG", "ecm_pid": 100}, {"caid": "0000", "ecm_pid": 100}, {"caid": "0B00", "ecm_pid": True}, {"caid": "0B00", "ecm_pid": 8191}, {"caid": "", "ecm_pid": 100}):
+            self.assertEqual(self.call("/api/channels/a%3A672/edit", body)[0], 400)
+        self.assertEqual(self.call("/api/channels/a%3A672/edit", {"caid": "", "ecm_pid": None})[0], 200)
+        self.assertNotIn("caid", self.panel.STATE["channels"]["a:672"])
+        self.assertNotIn("ecm_pid", self.panel.STATE["channels"]["a:672"])
+
     def profile(self):
         code, response = self.call("/api/newcamd/profiles", self.config)
         self.assertEqual(code,200); return response["id"]

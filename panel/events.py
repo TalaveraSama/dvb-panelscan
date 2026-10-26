@@ -78,6 +78,12 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
                     (caid, pid, candidate, total), "info", channel, adapter,
                     sid=int(sid), caid=caid, ecm_pid=int(pid))
         return
+    missing = re.fullmatch(r"CA locked missing: sid=(\d+) caid=([0-9A-Fa-f]{4}) ecm=(\d+)", line.strip())
+    if missing:
+        sid, caid, pid = missing.groups()
+        bus.publish("ca_missing", "CAID/PID fijado no anunciado en la PMT; revisa Editar canal", "error",
+                    channel, adapter, sid=int(sid), caid=caid, ecm_pid=int(pid))
+        return
     waiting = re.fullmatch(r"CW wait: parity=([01]) stale=([01]) pending=(\d+)", line.strip())
     if waiting:
         parity, stale, pending = map(int, waiting.groups())
@@ -86,7 +92,7 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
         return
     if line.startswith("TS stats:"):
         stats = {key: int(value) for key, value in re.findall(
-            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities)=(\d+)", line)}
+            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities|ca_switch_drops|queue_full_drops)=(\d+)", line)}
         if stats:
             level = "warning" if any(value for key, value in stats.items() if key != "pending") else "info"
             bus.publish("stats", "Estadísticas TS (acumuladas)", level, channel, adapter, stats=stats)

@@ -60,16 +60,20 @@ class EventTests(unittest.TestCase):
         self.assertEqual([r["kind"] for r in records], ["ca_select", "cw_wait"])
         self.assertEqual(records[0]["caid"], "1802")
         self.assertEqual(records[1]["pending"], 20)
+        diagnostic_event(bus, "CA locked missing: sid=1874 caid=0B00 ecm=5169", "channel")
+        self.assertEqual(viewer.read(timeout=0)[0]["kind"], "ca_missing")
         diagnostic_event(bus, "CA select: sid=1874 caid=1802 ecm=100 candidate=2/3 password=secret", "channel")
         self.assertEqual(viewer.read(timeout=0), [])
         viewer.close()
 
     def test_transport_sync_counters_are_visible_without_raw_logs(self):
         bus = EventBus(); viewer = bus.subscribe()
-        diagnostic_event(bus, "TS stats: tei=0 cc_errors=1 pending=5 sync_losses=2 sync_bytes=30 invalid_ts=4 psi_discontinuities=3", "channel", "tp:1", 0)
+        diagnostic_event(bus, "TS stats: tei=0 cc_errors=1 pending=5 sync_losses=2 sync_bytes=30 invalid_ts=4 psi_discontinuities=3 ca_switch_drops=10 queue_full_drops=20", "channel", "tp:1", 0)
         event = viewer.read(timeout=0)[0]
         self.assertEqual(event["stats"]["sync_losses"], 2)
         self.assertEqual(event["stats"]["psi_discontinuities"], 3)
+        self.assertEqual(event["stats"]["ca_switch_drops"], 10)
+        self.assertEqual(event["stats"]["queue_full_drops"], 20)
         self.assertEqual(event["level"], "warning")
         viewer.close()
 
