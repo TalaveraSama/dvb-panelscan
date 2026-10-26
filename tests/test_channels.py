@@ -73,6 +73,30 @@ class ChannelSettingsTests(unittest.TestCase):
             self.assertEqual(self.call("/api/channels/a:672/edit", {"descramble_delay_ms": delay})[0], 400)
         self.assertEqual(self.panel.STATE["channels"]["a:672"]["descramble_delay_ms"], 2000)
 
+    def test_active_broker_test_does_not_open_second_tcp(self):
+        self.panel.STATE["newcamd"] = self.config
+        broker = Mock()
+        broker.process.poll.return_value = None
+        identity = self.panel.newcamd_identity(self.config)
+        self.panel._streams.brokers[identity] = broker
+        real_connect = self.panel.socket.create_connection
+        probes = []
+        def connect(address, *args, **kwargs):
+            if address[1] == self.server.server_port:
+                return real_connect(address, *args, **kwargs)
+            probes.append(address)
+            return Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
+        with patch.object(self.panel.socket, "create_connection", side_effect=connect):
+            code, result = self.call("/api/newcamd/test", {})
+            self.assertEqual(code, 200)
+            self.assertTrue(result["ok"])
+            self.assertIn("no se abre otra", result["message"])
+            self.assertEqual(probes, [])
+            self.assertEqual(identity, self.panel.newcamd_identity({**self.config, "name": "Otro perfil", "host": "127.0.0.1", "deskey": ":".join(self.config["deskey"][i:i+2] for i in range(0,28,2)).upper()}))
+            broker.process.poll.return_value = 1
+            self.assertEqual(self.call("/api/newcamd/test", {})[0], 200)
+            self.assertEqual(probes, [(self.config["host"], self.config["port"])])
+
     def profile(self):
         code, response = self.call("/api/newcamd/profiles", self.config)
         self.assertEqual(code,200); return response["id"]

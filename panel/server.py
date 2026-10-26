@@ -306,6 +306,14 @@ def profile_config(identity="default"):
     return STATE["profiles"][identity]
 
 
+def newcamd_identity(nc):
+    # Config identity, not profile name or binary path. DNS case and DES-key
+    # spelling must not create a second broker for the same configuration.
+    return (str(nc.get("host", "")).strip().lower(), int(nc.get("port", 5000)),
+            nc.get("user", ""), nc.get("pass", ""),
+            str(nc.get("deskey", "")).replace(":", "").replace(" ", "").lower())
+
+
 def validate_profile(body, previous=None):
     result = dict(previous or {})
     for key in ("host", "user", "pass", "deskey", "name"):
@@ -537,7 +545,7 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
                             timeout=normalized["timeout"] + 20, pinned=pinned,
                             http_port=http_port, udp=udp, mux_id=mux_id,
                             mux_command=capture, mux_log=mux_log,
-                            broker_command=ca, broker_id=tuple(ca),
+                            broker_command=ca, broker_id=newcamd_identity(nc),
                             broker_log=os.path.join(DATA_DIR, "ca.log"), mux_callback=epg_collector(tp).feed)
 
 
@@ -1160,8 +1168,15 @@ class Handler(BaseHTTPRequestHandler):
             except StreamError as error:
                 return self._send(400, {"ok": False, "error": str(error)})
             try:
-                with socket.create_connection((nc["host"], int(nc["port"])), timeout=3):
-                    pass
+                # Serialize with broker startup: a TCP probe must not overlap
+                # an active broker and consume a second server connection slot.
+                with _streams.lock:
+                    broker = _streams.brokers.get(newcamd_identity(nc))
+                    if broker and broker.process.poll() is None:
+                        return self._send(200, {"ok": True, "message":
+                            "Broker activo: no se abre otra conexión TCP de prueba. Esto no valida login ni descifrado."})
+                    with socket.create_connection((nc["host"], int(nc["port"])), timeout=3):
+                        pass
                 return self._send(200, {"ok": True, "message": "TCP accesible. No valida login, tarjeta ni descifrado."})
             except (OSError, ValueError) as e:
                 return self._send(200, {"ok": False, "error": "Conexión TCP: " + str(e)})
