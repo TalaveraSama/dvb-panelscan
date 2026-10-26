@@ -530,6 +530,51 @@
         </p>
       </div>
       <p id="securityInfo" role="status"></p>
+      <hr />
+      <h3>Usuarios IPTV / Flussonic</h3>
+      <p>
+        Estas cuentas no administran el panel. Selecciona los canales
+        permitidos. Guardar revoca los enlaces anteriores de ese usuario. Usa
+        HTTPS o VPN.
+      </p>
+      <label
+        >Usuario existente<select id="iptvUsers">
+          <option value="">Nuevo usuario</option>
+        </select></label
+      >
+      <label
+        >Usuario<input id="iptvUsername" maxlength="64" autocomplete="off"
+      /></label>
+      <label
+        >Contraseña (12 caracteres mínimo; vacío conserva la actual)<input
+          id="iptvPassword"
+          type="password"
+          autocomplete="new-password"
+      /></label>
+      <label
+        ><input id="iptvEnabled" type="checkbox" checked /> Habilitado</label
+      >
+      <label
+        >Vencimiento (vacío = sin vencimiento)<input
+          id="iptvExpires"
+          type="datetime-local"
+      /></label>
+      <label
+        >Canales autorizados<select id="iptvChannels" multiple size="8"></select
+      ></label>
+      <button id="iptvSave" class="btn primary" type="button">
+        Guardar usuario y generar enlaces
+      </button>
+      <label
+        >Backend de autorización Flussonic (privado)<input
+          id="iptvBackend"
+          readonly
+      /></label>
+      <label>Lista M3U del usuario<input id="iptvPlaylist" readonly /></label>
+      <label
+        >Token para clientes de Flussonic<input id="iptvToken" readonly
+      /></label>
+      <p id="iptvInfo" role="status"></p>
     </dialog>
     <dialog id="astraImportDialog">
       <div class="card-head">

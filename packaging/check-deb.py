@@ -13,13 +13,13 @@ with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     subprocess.run(["dpkg-deb", "-R", str(package), str(root)], check=True)
     lib = root / "usr/lib/dvb-panelscan"
-    for name in ("astra_import.py", "auth.py", "server.py", "streaming.py", "health.py", "events.py", "epg.py", "VERSION"):
+    for name in ("iptv.py", "astra_import.py", "auth.py", "server.py", "streaming.py", "health.py", "events.py", "epg.py", "VERSION"):
         assert (lib / name).is_file(), name
     assert (lib / "VERSION").read_text().strip() == version
     for name in ("logos.json", "LOGOS-SOURCES.txt", "index.html", "app.js", "login.html", "login.js", "style.css"):
         assert (lib / "static" / name).is_file(), name
     assert len(list((lib / "static").glob("logo-*.png"))) == 12
-    for name in ("EPG.md", "CHANNELS_AND_PROFILES.md", "LIVE_EVENTS.md", "RELEASING.md", "SECURITY.md", "ASTRA_IMPORT.md", "BUILD_INFO.txt"):
+    for name in ("EPG.md", "CHANNELS_AND_PROFILES.md", "LIVE_EVENTS.md", "RELEASING.md", "SECURITY.md", "ASTRA_IMPORT.md", "IPTV_FLUSSONIC.md", "BUILD_INFO.txt"):
         assert (root / "usr/share/doc/dvb-panelscan" / name).is_file(), name
     assert not (root / "var").exists(), "Runtime state must never be bundled"
     files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and "DEBIAN" not in p.relative_to(root).parts}

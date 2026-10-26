@@ -11,6 +11,7 @@ Mini panel DVB-Scan - panel con dashboard, EPG, newcamd y M3U8.
 Sin dependencias externas (solo stdlib de Python).
 """
 
+import base64
 import argparse
 import copy
 import glob
@@ -46,6 +47,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 import astra_import
 from auth import AuthStore
+from iptv import IPTVStore
 from streaming import StreamManager, StreamError
 from epg import EPGStore, EITCollector, clean_text
 
@@ -68,6 +70,7 @@ STATE = {
 
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
 _auth = AuthStore(os.path.join(DATA_DIR, "auth.json"), secure=os.environ.get("DVB_PANEL_SECURE_COOKIE") == "1")
+_iptv = IPTVStore(os.path.join(DATA_DIR, "iptv.json"))
 _streams = StreamManager()
 _epg = EPGStore(os.path.join(DATA_DIR, "epg.json"))
 
@@ -600,6 +603,8 @@ class Handler(BaseHTTPRequestHandler):
         return scheme + "://" + self.headers.get("Host", "127.0.0.1:8081")
 
     def _authorized(self, media=False):
+        if media and getattr(self, "iptv_token", ""):
+            return _iptv.allowed(self.iptv_token, getattr(self, "iptv_channel", None))
         if _auth is None:
             return True
         if _auth.session(self.headers.get("Cookie")):
@@ -646,6 +651,12 @@ class Handler(BaseHTTPRequestHandler):
         path, qs = u.path, urllib.parse.parse_qs(u.query)
 
         self.auth_cookie = None
+        self.iptv_token = ""
+        self.iptv_channel = None
+        if path.startswith("/iptv/flussonic/"):
+            return self._flussonic(path, qs)
+        if path == "/iptv/playlist.m3u8" or path.startswith("/iptv/stream/"):
+            return self._iptv_media(path, qs)
         self.media_token = qs.get("token", [""])[0]
         if _auth is not None:
             if path == "/api/auth/session":
@@ -672,6 +683,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "Ruta no permitida"})
             return self._send_file(target)
 
+        if path == "/api/iptv/users":
+            return self._send(200, {"users": _iptv.listing(),
+                "backend_url": self._origin() + "/iptv/flussonic/" + _iptv.data["backend_key"]})
         if path == "/api/status":
             return self._send(200, {
                 "version": VERSION, "platform": platform.system(), "linux": is_linux(),
@@ -745,6 +759,65 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "Solo se admite profile=pass"})
                 return self._stream_channel(urllib.parse.unquote(path[len(prefix):]))
         return self._send(404, {"error": "not found"})
+
+    def _iptv_credentials(self, qs):
+        token = qs.get("token", [""])[0]
+        if token:
+            return token
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                username, password = base64.b64decode(header[6:], validate=True).decode().split(":", 1)
+            except (ValueError, UnicodeError):
+                return ""
+        else:
+            username, password = qs.get("username", [""])[0], qs.get("password", [""])[0]
+        return _iptv.credentials(username, password, self.client_address[0]) or ""
+
+    def _iptv_media(self, path, qs):
+        self.iptv_token = self._iptv_credentials(qs)
+        if not _iptv.allowed(self.iptv_token):
+            return self._send(401, {"error": "Credenciales IPTV inválidas"})
+        if path.startswith("/iptv/stream/"):
+            identity = urllib.parse.unquote(path[len("/iptv/stream/"):])
+            self.iptv_channel = identity
+            if not _iptv.allowed(self.iptv_token, identity):
+                return self._send(403, {"error": "Canal no autorizado"})
+            return self._stream_channel(identity)
+        playlist = build_m3u8(self._origin() + "/iptv/stream/{channel_id}", logo_base=self._origin())
+        lines = ["#EXTM3U"]
+        pending = ""
+        for line in playlist.splitlines()[1:]:
+            if line.startswith("#EXTINF:"):
+                pending = line
+            elif line.startswith("http"):
+                identity = urllib.parse.unquote(urllib.parse.urlparse(line).path.rsplit("/", 1)[-1])
+                if _iptv.allowed(self.iptv_token, identity):
+                    lines.extend((pending, line + "&token=" + urllib.parse.quote(self.iptv_token)))
+        return self._send(200, "\n".join(lines) + "\n", "application/vnd.apple.mpegurl")
+
+    def _flussonic(self, path, qs):
+        secret = path[len("/iptv/flussonic/"):]
+        if not hmac.compare_digest(secret.encode(), _iptv.data["backend_key"].encode()):
+            return self._send(403, {"error": "Backend no autorizado"})
+        token = qs.get("token", [""])[0]
+        identity = qs.get("name", [""])[0]
+        if ":" in token:
+            username, password = token.split(":", 1)
+            token = _iptv.credentials(username, password, self.client_address[0]) or ""
+        # Safe Flussonic names may encode the exact TP:SID as UTF-8 hex.
+        if identity.startswith("dvb_"):
+            try:
+                identity = bytes.fromhex(identity[4:]).decode("utf-8") if len(identity) <= 260 else ""
+            except (ValueError, UnicodeError):
+                identity = ""
+        if not identity or not _iptv.allowed(token, identity):
+            return self._send(403, {"error": "Acceso denegado"})
+        self.send_response(200)
+        self.send_header("X-AuthDuration", "30")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _live_events(self):
         try:
@@ -854,6 +927,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/auth/media-token":
                 return self._send(200, {"ok": True, "token": _auth.rotate_media_token()})
 
+        if path == "/api/iptv/users":
+            try:
+                _iptv.save_user(body)
+                token = _iptv.token(body["username"]) if body.get("enabled", True) and (not body.get("expires") or body["expires"] > time.time()) else ""
+                return self._send(200, {"ok": True, "token": token})
+            except ValueError as error:
+                return self._send(400, {"error": str(error)})
+            except OSError:
+                return self._send(500, {"error": "No se pudo guardar el usuario IPTV"})
         if path in ("/api/import/astra/preview", "/api/import/astra/apply"):
             try:
                 with _streams.lock:

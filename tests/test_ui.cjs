@@ -34,9 +34,10 @@ w.fetch = async (url, options={}) => {
     const body = JSON.parse(options.body); requests.push([url,body]);
     if (url === '/api/transponders/tp/edit') Object.assign(tp,body);
     if (url === '/api/channels/tp%3A672/edit') Object.assign(service,body);
-    value = {ok:true,id:body.id || 'new-profile',token:url === '/api/auth/media-token' ? 'test-media-token' : undefined};
+    value = {ok:true,id:body.id || 'new-profile',token:url === '/api/iptv/users' ? 'iptv-test-token' : url === '/api/auth/media-token' ? 'test-media-token' : undefined};
     if (url.startsWith('/api/import/astra/')) value = {ok:true,preview_token:'preview-token',backup:'astra-backup.json',transponders:[{action:'crear',name:'Astra TP',adapter:8,frequency:12230,pol:'V'}],channels:1,profiles_created:0,profiles_updated:0,profile_bindings:[{astra_cam:'cam',name:'HD'}],warnings:['Preview warning']};
   } else if (url === '/api/auth/session') value = {username:'admin',csrf:'test-csrf'};
+  else if (url === '/api/iptv/users') value = {users:[],backend_url:'http://panel.test/iptv/flussonic/private-key'};
   else if (url === '/api/status') value = {platform:'Linux',adapters:[]};
   else if (url === '/api/transponders') value = [tp];
   else if (url === '/api/epg/settings') value = {days:1};
@@ -175,6 +176,16 @@ const tick = () => new Promise(resolve=>setTimeout(resolve,10));
   assert(w.document.getElementById('astraApply').disabled);
   assert(w.document.getElementById('astraPreviewText').textContent.includes('Aplicado'));
   w.document.getElementById('astraImportClose').click();
+  w.document.getElementById('securityOpen').click(); await tick();
+  w.document.getElementById('iptvUsername').value='viewer';
+  w.document.getElementById('iptvPassword').value='viewer-password';
+  w.document.getElementById('iptvChannels').options[0].selected=true;
+  w.document.getElementById('iptvSave').click(); await tick();
+  const iptvRequest=requests.find(([url])=>url==='/api/iptv/users')[1];
+  assert.deepEqual(iptvRequest.channels,['tp:672']);
+  assert.equal(iptvRequest.username,'viewer');
+  assert.equal(w.document.getElementById('iptvPassword').value,'');
+  assert(w.document.getElementById('iptvPlaylist').value.includes('iptv-test-token'));
   const loginDom = new JSDOM(fs.readFileSync('panel/static/login.html','utf8'),{runScripts:'outside-only',url:'http://panel.test/login'});
   const loginWindow = loginDom.window;
   loginWindow.fetch = async (url,options) => {

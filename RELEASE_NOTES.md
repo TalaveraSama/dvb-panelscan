@@ -1,3 +1,19 @@
+## DVB PanelScan 0.14.0 · Usuarios IPTV / Flussonic
+
+- Gestión desde Reproducción privada: usuarios IPTV separados de administrador y
+  Newcamd, contraseñas con hash, selección explícita de canales y vencimiento.
+- Listas M3U filtradas, señales MPEG-TS HTTP protegidas con Basic, credenciales
+  o tokens firmados y revocables por cuenta. Autorización durante la transmisión.
+- Backend Flussonic GET on_play: 200/403, name/token, clave privada independiente,
+  revalidación solicitada cada 30 segundos y nombres seguros dvb_<identidad hex>.
+- Mantiene autenticación administrativa/CSRF, token global, importación Astra,
+  perfiles, EPG y eventos sin persistencia. Sin Xtream Codes ni límites de conexión.
+- Pruebas de aislamiento, permisos, hash/0600, persistencia, revocación, expiración,
+  intentos limitados, contrato Flussonic y formulario DOM. Sin validación real de
+  Flussonic/hardware todavía. Ver docs/IPTV_FLUSSONIC.md para configurar ambos roles.
+
+---
+
 ## DVB PanelScan 0.13.0 · Importación Astra / Cesbo
 
 - Importador desde el panel autenticado: archivo JSON, tabla MAC→adaptador, perfiles
