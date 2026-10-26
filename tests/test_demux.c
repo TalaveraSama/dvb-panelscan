@@ -14,14 +14,25 @@ int main(void) {
                       0x1b,0xe1,0,0xf0,6,9,4,5,0,0xe1,0x24};
   parse_pmt(es_pmt, sizeof(es_pmt));
   assert(svc.ecm_pid == 0x124 && svc.caid == 0x500);
+  /* Every distinct advertised CA is retained; repeated PMTs keep selection. */
+  uint8_t multi_ca[] = {0,1,0xc1,0,0,0xe1,0,0xf0,12,
+    9,4,1,0,0xe1,0x23, 9,4,5,0,0xe1,0x24,
+    0x1b,0xe1,0,0xf0,0};
+  parse_pmt(multi_ca, sizeof(multi_ca));
+  assert(svc.ca_count == 2 && svc.ca[1].caid == 0x500);
+  select_ca(1);
+  uint64_t generation = ca_generation;
+  parse_pmt(multi_ca, sizeof(multi_ca));
+  assert(ca_selected == 1 && ca_generation == generation);
+  assert(svc.ca[ca_selected].pid == 0x124);
   /* ECM private sections have no MPEG long-section CRC. */
   secbuf_t sb = {0};
-  sb.pid = svc.ecm_pid;
+  sb.pid = svc.ca[ca_selected].pid;
   uint8_t ecm[] = {0x80,0x70,5,1,2,3,4,5};
   memcpy(sb.buf, ecm, sizeof(ecm)); sb.len = sizeof(ecm);
   process_sections(&sb);
   assert(ecm_q_count == 1);
-  enqueue_ecm(svc.sid, svc.caid, svc.provid, ecm, sizeof(ecm));
+  enqueue_ecm(svc.sid, svc.ca[ca_selected].caid, svc.provid, ecm, sizeof(ecm));
   assert(ecm_q_count == 1); /* repeated queued ECM does not build a backlog */
   assert(ecm_q[0].len == sizeof(ecm));
   assert(!memcmp(ecm_q[0].sec, ecm, sizeof(ecm)));

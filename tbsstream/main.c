@@ -89,6 +89,8 @@ typedef struct {
   int ecm_pid;
   uint16_t caid;
   uint32_t provid;
+  struct { uint16_t caid, pid; } ca[16];
+  int ca_count;
 
   uint8_t program_descriptors[1024];
   int program_descriptors_len;
@@ -487,10 +489,30 @@ static csa_t *csae = NULL;
 /* Estado de claves (protegido por csa_mutex) */
 static pthread_mutex_t csa_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int have_cw_even = 0, have_cw_odd = 0;
+/* A present key is not necessarily fresh for the next use of its parity. */
+static uint8_t cw_value[2][8];
+static uint64_t cw_revision[2], cw_used[2];
+static int output_parity = -1;
+/* CA selection changes only on the TS thread. Responses carry its generation. */
+static uint64_t ca_generation = 1;
+static int ca_selected, ca_failures, ca_rotate;
+static uint64_t ca_last_progress;
+
+static void install_cw(int parity, const uint8_t key[8])
+{
+  static const uint8_t zero[8];
+  if (!memcmp(key, zero, 8)) return;
+  if (!cw_revision[parity] || memcmp(cw_value[parity], key, 8)) {
+    memcpy(cw_value[parity], key, 8);
+    cw_revision[parity]++;
+  }
+  if (parity) { csa_set_key_odd(csae, key); have_cw_odd = 1; }
+  else { csa_set_key_even(csae, key); have_cw_even = 1; }
+}
 
 /* Cola de ECM (hilo principal -> hilo CA) */
 #define ECMQ_MAX 64
-typedef struct { uint8_t sec[1024]; int len; uint16_t sid, caid; uint32_t provid; } ecm_req_t;
+typedef struct { uint8_t sec[1024]; int len; uint16_t sid, caid; uint32_t provid; uint64_t generation; } ecm_req_t;
 static ecm_req_t ecm_q[ECMQ_MAX];
 static int ecm_q_head = 0, ecm_q_tail = 0, ecm_q_count = 0;
 static pthread_mutex_t ecm_q_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -519,6 +541,9 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
                         const uint8_t *sec, int len)
 {
   if (len <= 0 || len > (int)sizeof(ecm_q[0].sec)) return;
+  pthread_mutex_lock(&csa_mutex);
+  uint64_t generation = ca_generation;
+  pthread_mutex_unlock(&csa_mutex);
   pthread_mutex_lock(&ecm_q_mutex);
   /* Do not let identical queued retransmissions age later ECM requests. */
   for (int i = 0; i < ecm_q_count; i++) {
@@ -533,6 +558,7 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
     ecm_req_t *r = &ecm_q[ecm_q_tail];
     memcpy(r->sec, sec, len);
     r->len = len; r->sid = sid; r->caid = caid; r->provid = provid;
+    r->generation = generation;
     ecm_q_tail = (ecm_q_tail + 1) % ECMQ_MAX;
     ecm_q_count++;
     pthread_cond_signal(&ecm_q_cond);
@@ -550,11 +576,19 @@ static void flush_scrambled(void)
   while (scram_count) {
     int count = 0, encrypted = 0;
     pthread_mutex_lock(&csa_mutex);
+    int batch_parity = -1;
     while (count < scram_count && count < 64) {
       const uint8_t *pkt = scram_buf + ((scram_head + count) % SCRAM_MAX) * TS_PKT;
       if (pkt[3] & 0x80) {
-        int available = (pkt[3] & 0x40) ? have_cw_odd : have_cw_even;
+        int parity = !!(pkt[3] & 0x40);
+        int available = parity ? have_cw_odd : have_cw_even;
         if (!available) break;
+        if (batch_parity >= 0 && parity != batch_parity) break;
+        /* Returning to a previously used parity requires a different CW.
+         * Repeated ECM replies must not revalidate a key from an old period. */
+        if (parity != output_parity && cw_used[parity] &&
+            cw_revision[parity] <= cw_used[parity]) break;
+        batch_parity = parity;
         encrypted++;
       }
       memcpy(batch + count * TS_PKT, pkt, TS_PKT);
@@ -564,6 +598,8 @@ static void flush_scrambled(void)
       csa_descramble(csae, batch, count);
       csa_batches++;
       csa_packets += encrypted;
+      output_parity = batch_parity;
+      cw_used[batch_parity] = cw_revision[batch_parity];
     }
     pthread_mutex_unlock(&csa_mutex);
     if (!count) break;
@@ -632,6 +668,30 @@ static newcamd_t *connect_cam(char *error, size_t size)
                          opts.nc_user, opts.nc_pass, error, size);
 }
 
+/* Returns false for an obsolete response. Keys are never installed across a
+ * PMT/CA generation boundary. Callers do not hold queue or CSA locks. */
+static int accept_ecm_result(const ecm_req_t *request, int result,
+                             const uint8_t even[8], const uint8_t odd[8])
+{
+  static const uint8_t zero[8];
+  pthread_mutex_lock(&csa_mutex);
+  if (request->generation != ca_generation) {
+    pthread_mutex_unlock(&csa_mutex);
+    return 0;
+  }
+  if (!result && (memcmp(even, zero, 8) || memcmp(odd, zero, 8))) {
+    install_cw(0, even);
+    install_cw(1, odd);
+    ca_failures = 0;
+    ca_last_progress = monotonic_ms();
+  } else {
+    have_cw_even = have_cw_odd = 0;
+    if (result != -1 && ++ca_failures >= 2) ca_rotate = 1;
+  }
+  pthread_mutex_unlock(&csa_mutex);
+  return 1;
+}
+
 /* Hilo CA: envía ECMs y actualiza las CW (el bloqueo de red ocurre aquí) */
 static void *ca_thread(void *arg)
 {
@@ -647,6 +707,10 @@ static void *ca_thread(void *arg)
     ecm_q_head = (ecm_q_head + 1) % ECMQ_MAX;
     ecm_q_count--;
     pthread_mutex_unlock(&ecm_q_mutex);
+    pthread_mutex_lock(&csa_mutex);
+    int current = r.generation == ca_generation;
+    pthread_mutex_unlock(&csa_mutex);
+    if (!current) continue;
 
     if (!cam) {
       char error[256] = {0};
@@ -668,37 +732,12 @@ static void *ca_thread(void *arg)
     const uint8_t empty_cw[8] = {0};
     unsigned cw_mask = result == 0 ?
       ((memcmp(even, empty_cw, 8) ? 1 : 0) | (memcmp(odd, empty_cw, 8) ? 2 : 0)) : 0;
+    if (result == -1) { newcamd_close(cam); cam = NULL; }
+    if (!accept_ecm_result(&r, result, even, odd)) continue;
     LOGV("ECM: sid=%u caid=%04X time_ms=%llu result=%d cw_mask=%u at_ms=%llu pid=%ld\n",
          r.sid, r.caid, (unsigned long long)(monotonic_ms() - requested), result,
          cw_mask, (unsigned long long)monotonic_ms(), (long)getpid());
-    if (result == 0) {
-      pthread_mutex_lock(&csa_mutex);
-      /* A zero half means unavailable; do not replace a valid CW with it. */
-      const uint8_t zero[8] = {0};
-      if (memcmp(even, zero, 8)) {
-        csa_set_key_even(csae, even);
-        have_cw_even = 1;
-      }
-      if (memcmp(odd, zero, 8)) {
-        csa_set_key_odd(csae, odd);
-        have_cw_odd = 1;
-      }
-      pthread_mutex_unlock(&csa_mutex);
-      LOGV("CW actualizada (par/impar)\n");
-    } else {
-      LOGV("ECM sin CW (resultado %d)\n", result);
-      if (result < 0) {
-        /* Deadline/NOK invalidates this service only; never reuse an old CW
-         * indefinitely. A framed broker deadline does not close its socket. */
-        if (result == -1) { newcamd_close(cam); cam = NULL; }
-        pthread_mutex_lock(&csa_mutex);
-        have_cw_even = have_cw_odd = 0;
-        pthread_mutex_unlock(&csa_mutex);
-        pthread_mutex_lock(&ecm_q_mutex);
-        ecm_q_count = ecm_q_head = ecm_q_tail = 0;
-        pthread_mutex_unlock(&ecm_q_mutex);
-      }
-    }
+
   }
   return NULL;
 }
@@ -724,6 +763,15 @@ static int copy_descriptors(uint8_t *out, const uint8_t *in, int len,
     if (j + size > len) return -1;
     if (in[j] == DESC_CA) {
       if (size < 6) return -1;
+      uint16_t caid = ((uint16_t)in[j+2] << 8) | in[j+3];
+      uint16_t pid = ((in[j+4] & 0x1f) << 8) | in[j+5];
+      int duplicate = 0;
+      for (int c = 0; c < service->ca_count; c++)
+        if (service->ca[c].caid == caid && service->ca[c].pid == pid) duplicate = 1;
+      if (!duplicate && service->ca_count < 16 && pid > 0 && pid < 0x1fff) {
+        service->ca[service->ca_count].caid = caid;
+        service->ca[service->ca_count++].pid = pid;
+      }
       if (service->ecm_pid < 0) {
         service->caid = ((uint16_t)in[j+2] << 8) | in[j+3];
         service->ecm_pid = ((in[j+4] & 0x1f) << 8) | in[j+5];
@@ -735,6 +783,31 @@ static int copy_descriptors(uint8_t *out, const uint8_t *in, int len,
     j += size;
   }
   return used;
+}
+
+/* Main TS thread owns the candidate index and pending payload. */
+static void select_ca(int selected)
+{
+  pthread_mutex_lock(&csa_mutex);
+  ca_selected = selected;
+  ca_generation++;
+  ca_failures = ca_rotate = 0;
+  ca_last_progress = monotonic_ms();
+  have_cw_even = have_cw_odd = 0;
+  memset(cw_revision, 0, sizeof(cw_revision));
+  memset(cw_used, 0, sizeof(cw_used));
+  memset(cw_value, 0, sizeof(cw_value));
+  output_parity = -1;
+  pthread_mutex_unlock(&csa_mutex);
+  pthread_mutex_lock(&ecm_q_mutex);
+  ecm_q_count = ecm_q_head = ecm_q_tail = 0;
+  pthread_mutex_unlock(&ecm_q_mutex);
+  /* Payload waiting for an incompatible CA must not leak into the new context. */
+  service_drops += scram_count;
+  scram_head = scram_count = 0;
+  if (svc.ca_count)
+    LOGV("CA select: sid=%u caid=%04X ecm=%u candidate=%d/%d\n",
+         svc.sid, svc.ca[selected].caid, svc.ca[selected].pid, selected + 1, svc.ca_count);
 }
 
 static void parse_pmt(const uint8_t *b, int len)
@@ -769,7 +842,10 @@ static void parse_pmt(const uint8_t *b, int len)
   }
   next.ready = 1;
   if (memcmp(&svc, &next, sizeof(next))) {
+    int ca_changed = svc.sid != next.sid || svc.ca_count != next.ca_count ||
+                     memcmp(svc.ca, next.ca, sizeof(svc.ca));
     svc = next;
+    if (ca_changed) select_ca(0);
     refresh_playlist(svc.sid);
     psi_due_ms = 0;
     LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld\n",
@@ -802,10 +878,10 @@ static void handle_section(uint16_t pid, const uint8_t *s, int slen)
     parse_pat(body, blen);
   } else if (pid == svc.pmt_pid && tid == TID_PMT) {
     parse_pmt(body, blen);
-  } else if (svc.ecm_pid > 0 && pid == (uint16_t)svc.ecm_pid &&
+  } else if (svc.ca_count && pid == svc.ca[ca_selected].pid &&
              (tid == 0x80 || tid == 0x81)) {
     /* ECM uses private short sections: preserve the entire section. */
-    enqueue_ecm(svc.sid, svc.caid, svc.provid, s, slen + 3);
+    enqueue_ecm(svc.sid, svc.ca[ca_selected].caid, svc.provid, s, slen + 3);
   }
 }
 
@@ -898,6 +974,12 @@ static void *http_server(void *arg)
 static void process_packet(uint8_t *pkt)
 {
   if (pkt[0] != 0x47) return;
+  pthread_mutex_lock(&csa_mutex);
+  int rotate = ca_rotate || (svc.ca_count > 1 &&
+               monotonic_ms() - ca_last_progress >= 12000);
+  ca_rotate = 0;
+  pthread_mutex_unlock(&csa_mutex);
+  if (rotate && svc.ca_count > 1) select_ca((ca_selected + 1) % svc.ca_count);
   emit_psi();
   int pusi = (pkt[1] & 0x40) != 0;
   uint16_t pid = ((uint16_t)(pkt[1] & 0x1F) << 8) | pkt[2];
@@ -907,7 +989,7 @@ static void process_packet(uint8_t *pkt)
 
   /* Demux de secciones PSI (PAT/PMT/ECM) */
   if (pid == PID_PAT || (svc.pmt_pid && pid == svc.pmt_pid) ||
-      (svc.ecm_pid > 0 && pid == (uint16_t)svc.ecm_pid)) {
+      (svc.ca_count && pid == svc.ca[ca_selected].pid)) {
     int off = 4;
     if (afc == 0x02) return;
     if (afc == 0x03) off += 1 + pkt[4];

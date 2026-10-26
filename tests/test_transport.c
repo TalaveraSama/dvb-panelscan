@@ -124,16 +124,18 @@ static void test_service_order_and_csa_batch(void)
   for (int i = 0; i < 3; i++) buffer_service_packet(encrypted + i * TS_PKT);
   flush_scrambled();
   assert(ring_seq == 0 && scram_count == 3);
-  csa_set_key_even(csae, cw); have_cw_even = 1;
+  install_cw(0, cw);
   flush_scrambled();
   assert(ring_seq == 2 && scram_count == 1);
   assert(!memcmp(ring, plain, 2 * TS_PKT));
-  csa_set_key_odd(csae, cw); have_cw_odd = 1;
+  install_cw(1, cw);
   flush_scrambled();
   assert(ring_seq == 3 && scram_count == 0);
   assert(!memcmp(ring, plain, sizeof(plain)));
 
   ring_seq = 0;
+  output_parity = -1;
+  memset(cw_used, 0, sizeof(cw_used));
   uint64_t before = csa_batches;
   for (int i = 0; i < 64; i++) buffer_service_packet(encrypted);
   flush_scrambled();
@@ -148,6 +150,81 @@ static void test_service_order_and_csa_batch(void)
   scram_head = scram_count = 0;
   dvbcsa_key_free(key);
   csa_free(csae); csae = NULL;
+}
+
+static void test_late_rotating_cw(void)
+{
+  uint8_t even1[8] = {1,2,3,6,4,5,6,15};
+  uint8_t odd1[8] = {2,3,4,9,5,6,7,18};
+  uint8_t even2[8] = {3,4,5,12,6,7,8,21};
+  uint8_t plain[4 * TS_PKT], input[4 * TS_PKT];
+  struct dvbcsa_key_s *key = dvbcsa_key_alloc();
+  csae = csa_create();
+  memset(&svc, 0, sizeof(svc));
+  select_ca(0);
+  ring_seq = 0;
+  for (int i = 0; i < 4; i++) {
+    uint8_t *p = plain + i * TS_PKT;
+    memset(p, 0x51 + i, TS_PKT);
+    p[0] = 0x47; p[1] = 1; p[2] = 0; p[3] = 0x10 | i;
+  }
+  memcpy(input, plain, sizeof(input));
+  const uint8_t *keys[] = {even1, odd1, even2};
+  for (int i = 0; i < 3; i++) {
+    dvbcsa_key_set(keys[i], key);
+    dvbcsa_encrypt(key, input + i * TS_PKT + 4, 184);
+    input[i * TS_PKT + 3] |= i == 1 ? 0xc0 : 0x80;
+  }
+  install_cw(0, even1); install_cw(1, odd1);
+  buffer_service_packet(input); flush_scrambled();
+  buffer_service_packet(input + TS_PKT); flush_scrambled();
+  assert(ring_seq == 2);
+  buffer_service_packet(input + 2 * TS_PKT);
+  buffer_service_packet(input + 3 * TS_PKT); /* clear packet cannot overtake */
+  flush_scrambled();
+  assert(ring_seq == 2 && scram_count == 2);
+  install_cw(0, even1); /* a repeated old reply does not make the CW fresh */
+  flush_scrambled();
+  assert(ring_seq == 2);
+  install_cw(0, even2);
+  flush_scrambled();
+  assert(ring_seq == 4 && scram_count == 0);
+  assert(!memcmp(ring, plain, sizeof(plain)));
+  dvbcsa_key_free(key); csa_free(csae); csae = NULL;
+}
+
+static void test_ca_failure_and_late_response(void)
+{
+  uint8_t key[8] = {1,2,3,6,4,5,6,15}, zero[8] = {0};
+  csae = csa_create();
+  memset(&svc, 0, sizeof(svc));
+  svc.ca_count = 2;
+  svc.ca[0].caid = 0x100; svc.ca[0].pid = 0x123;
+  svc.ca[1].caid = 0x500; svc.ca[1].pid = 0x124;
+  select_ca(0);
+  ecm_req_t request = {.generation = ca_generation};
+  assert(accept_ecm_result(&request, -2, zero, zero));
+  assert(!ca_rotate); /* one failure is not enough */
+  assert(accept_ecm_result(&request, -2, zero, zero));
+  assert(ca_rotate);
+  uint8_t packet[TS_PKT] = {0x47,0x1f,0xff,0x10};
+  process_packet(packet);
+  assert(ca_selected == 1 && ca_generation != request.generation);
+  assert(!accept_ecm_result(&request, 0, key, key));
+  assert(!have_cw_even && !have_cw_odd);
+  request.generation = ca_generation;
+  assert(accept_ecm_result(&request, 0, key, zero));
+  assert(have_cw_even && !have_cw_odd && !ca_rotate);
+  /* No usable ECM on this candidate: try the next, not a permanent black screen. */
+  ca_last_progress = monotonic_ms() - 12001;
+  process_packet(packet);
+  assert(ca_selected == 0);
+  request.generation = ca_generation;
+  accept_ecm_result(&request, -1, zero, zero);
+  accept_ecm_result(&request, -1, zero, zero);
+  assert(!ca_rotate); /* transport errors do not select an unrelated CA */
+  csa_free(csae); csae = NULL;
+  memset(&svc, 0, sizeof(svc));
 }
 
 static void test_input_error_counters(void)
@@ -178,6 +255,8 @@ int main(void)
   test_http_writes();
   test_stdout_ts();
   test_service_order_and_csa_batch();
+  test_late_rotating_cw();
+  test_ca_failure_and_late_response();
   test_input_error_counters();
   puts("TS fragmentation, PCR forwarding, ring batching and TCP tests passed");
   return 0;
