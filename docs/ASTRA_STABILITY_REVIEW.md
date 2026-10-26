@@ -104,4 +104,7 @@ opción concreta. La documentación UDP de `sync` no demuestra regulación PCR p
 toda salida HTTP. El buffer HTTP Relay tampoco prueba cómo está configurado el
 servidor original. Se verificaron estas diferencias para evitar extrapolaciones.
 
-No hay nueva release asociada a esta investigación: el motor sigue en 0.17.0.
+La investigación inicial no cambió el motor 0.17.0. Tras aprobación del usuario,
+0.18.0 incorpora retardo acotado y salida independiente regulada: véase
+[TS y descifrado](TS_DESCRAMBLING.md#retardo-y-entrega-regulada-0180).
+No es una copia del motor comercial de Astra ni una cura validada en señal real.

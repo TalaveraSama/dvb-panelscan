@@ -334,8 +334,10 @@ static int udp_socks[8];
 static struct sockaddr_storage udp_addr[8];
 static socklen_t udp_addrlen[8];
 static int nudp_global;
+static uint64_t udp_output_drops;
+static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void deliver_packet(const uint8_t *pkt)
+static void output_packet(const uint8_t *pkt)
 {
   if (opts.stdout_ts) {
     size_t left = TS_PKT;
@@ -359,8 +361,14 @@ static void deliver_packet(const uint8_t *pkt)
   pthread_cond_broadcast(&ring_cond);
   pthread_mutex_unlock(&ring_mutex);
 
-  for (int i = 0; i < nudp_global; i++)
-    sendto(udp_socks[i], pkt, TS_PKT, MSG_DONTWAIT, (struct sockaddr *)&udp_addr[i], udp_addrlen[i]);
+  for (int i = 0; i < nudp_global; i++) {
+    if (sendto(udp_socks[i], pkt, TS_PKT, MSG_DONTWAIT,
+               (struct sockaddr *)&udp_addr[i], udp_addrlen[i]) != TS_PKT) {
+      pthread_mutex_lock(&output_mutex);
+      udp_output_drops++;
+      pthread_mutex_unlock(&output_mutex);
+    }
+  }
 }
 
 /* Separate bounded output queue. Capture/CA never sleep on the output clock.
@@ -371,7 +379,6 @@ static output_item_t output_q[OUTPUT_MAX];
 static unsigned output_head, output_count;
 static int output_async, output_running, output_reset;
 static uint64_t output_epoch;
-static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t output_cond = PTHREAD_COND_INITIALIZER;
 static uint64_t output_drops, output_late, output_clock_resets, output_pes_errors;
 
@@ -384,7 +391,7 @@ static uint64_t monotonic_us(void)
 
 static void queue_output(const uint8_t *pkt, uint64_t arrival)
 {
-  if (!output_async) { deliver_packet(pkt); return; }
+  if (!output_async) { output_packet(pkt); return; }
   pthread_mutex_lock(&output_mutex);
   if (output_count == OUTPUT_MAX) {
     output_drops += output_count;
@@ -399,7 +406,6 @@ static void queue_output(const uint8_t *pkt, uint64_t arrival)
   pthread_cond_signal(&output_cond);
   pthread_mutex_unlock(&output_mutex);
 }
-static void output_packet(const uint8_t *pkt) { queue_output(pkt, monotonic_us()); }
 
 static void *output_worker(void *unused)
 {
@@ -441,7 +447,7 @@ static void *output_worker(void *unused)
     int obsolete = epoch != output_epoch;
     if (obsolete) output_drops += count;
     pthread_mutex_unlock(&output_mutex);
-    if (!obsolete) for (unsigned i = 0; i < count; i++) deliver_packet(items[i].pkt);
+    if (!obsolete) for (unsigned i = 0; i < count; i++) output_packet(items[i].pkt);
   }
   return NULL;
 }
@@ -545,6 +551,8 @@ static int build_pmt(uint8_t *sec)
 }
 
 /* A PSI section can span multiple TS packets. Only the first has a pointer. */
+static void buffer_service_packet(const uint8_t *pkt);
+static void flush_scrambled(void);
 static void output_psi(uint16_t pid, uint8_t *cc, const uint8_t *sec, int len)
 {
   int first = 1;
@@ -560,7 +568,9 @@ static void output_psi(uint16_t pid, uint8_t *cc, const uint8_t *sec, int len)
     if (first) out[offset++] = 0;
     int size = len < TS_PKT - offset ? len : TS_PKT - offset;
     memcpy(out + offset, sec, size);
-    output_packet(out);
+    /* Generated PSI follows the same time/order boundary as service payload. */
+    buffer_service_packet(out);
+    flush_scrambled();
     sec += size;
     len -= size;
     first = 0;
@@ -848,14 +858,14 @@ static void log_transport_stats(void)
   pthread_mutex_unlock(&ecm_q_mutex);
   pthread_mutex_lock(&output_mutex);
   unsigned output_pending = output_count;
-  uint64_t odrops = output_drops, olate = output_late, oresets = output_clock_resets;
+  uint64_t odrops = output_drops, olate = output_late, oresets = output_clock_resets, udrops = udp_output_drops;
   pthread_mutex_unlock(&output_mutex);
   LOGV("TS stats: tei=%llu cc_errors=%llu service_drops=%llu pending=%d "
        "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu "
        "sync_losses=%llu sync_bytes=%llu invalid_ts=%llu psi_discontinuities=%llu "
        "ca_switch_drops=%llu queue_full_drops=%llu ecm_repeats=%llu "
        "cw_timeout_drops=%llu output_pending=%u output_drops=%llu "
-       "output_late=%llu pcr_resets=%llu pes_errors=%llu\n",
+       "output_late=%llu pcr_resets=%llu pes_errors=%llu udp_output_drops=%llu\n",
        (unsigned long long)input_tei, (unsigned long long)input_cc_errors,
        (unsigned long long)service_drops, scram_count, queued,
        (unsigned long long)dropped, (unsigned long long)csa_batches,
@@ -864,7 +874,8 @@ static void log_transport_stats(void)
        (unsigned long long)psi_discontinuities, (unsigned long long)ca_switch_drops,
        (unsigned long long)queue_full_drops, (unsigned long long)ecm_repeats,
        (unsigned long long)cw_timeout_drops, output_pending, (unsigned long long)odrops,
-       (unsigned long long)olate, (unsigned long long)oresets, (unsigned long long)output_pes_errors);
+       (unsigned long long)olate, (unsigned long long)oresets, (unsigned long long)output_pes_errors,
+       (unsigned long long)udrops);
   due = now + 5000;
 }
 

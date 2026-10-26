@@ -431,12 +431,18 @@ static void test_timed_descramble_and_expiry(void)
   scram_at[scram_head] -= 501000;
   flush_scrambled();
   assert(scram_count == 1 && ring_seq == before + 1);
+  /* Generated PSI must not bypass the retained service or its delay. */
+  uint8_t section[] = {0, 0xb0, 0}; uint8_t cc = 0;
+  output_psi(0, &cc, section, sizeof(section));
+  assert(scram_count == 2 && ring_seq == before + 1);
   /* Expired payload must not be decrypted later or remain forever. */
   uint64_t dropped = cw_timeout_drops;
   scram_at[scram_head] -= 2100000;
   flush_scrambled();
-  assert(!scram_count && cw_timeout_drops == dropped + 1);
+  assert(scram_count == 1 && cw_timeout_drops == dropped + 1);
   opts.descramble_delay_ms = 0;
+  flush_scrambled();
+  assert(!scram_count && ring_seq == before + 2);
 }
 
 static void test_bounded_output_queue(void)

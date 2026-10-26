@@ -1,4 +1,4 @@
-# TS y descifrado: correcciones 0.16.0
+# TS y descifrado: comportamiento y correcciones hasta 0.18.0
 
 ## Cambios
 
@@ -88,9 +88,9 @@ La sincronía de bytes y la sincronía temporal A/V no son la misma cosa:
 - pointer_field solo completa la sección anterior. Después comienza otra sección
   desde cero; un resto viejo incompleto nunca se concatena con la nueva. Se
   aceptan payloads de continuación pequeños y PUSI con solo pointer=0.
-- No se cambian PCR/PTS/DTS, la cadencia del emisor ni el orden de servicio.
-  Las pruebas verifican conservación byte a byte del PCR y payload reenviado.
-  Esto no mide ni corrige jitter PCR ni deriva de reloj A/V.
+- En 0.16.1 no se cambiaban PCR/PTS/DTS ni la cadencia de entrega. En 0.18.0
+  se conserva el contenido de timestamps y se regula la entrega según el reloj
+  descrito abajo. Esto no valida la deriva del reloj A/V del emisor.
 
 Los contadores acumulados `sync_losses`, `sync_bytes`, `invalid_ts` y
 `psi_discontinuities` se publican en **Eventos en vivo** junto a los anteriores.
@@ -163,3 +163,66 @@ como pérdida instantánea. La latencia del evento ECM se mide desde el worker;
 No se promete que fijar la pareja cure recepción RF, CW equivocadas, algoritmos no
 soportados o errores del reproductor. Probar SD/HD directamente y después mediante
 Flussonic. No compartir contraseñas, claves o enlaces con tokens en los informes.
+
+
+## Retardo y entrega regulada (0.18.0)
+
+**Editar canal → Retardo de descifrado (ms)**: entero 0–2000, predeterminado
+500 ms, persistido por TP:SID. Guardar detiene solo ese servicio; debe reabrirse.
+CLI: `--descramble-delay-ms 500`. Cero desactiva la espera mínima, no el pacing.
+El valor es una decisión inicial de este proyecto, no una medición de la señal
+ni un valor universal de Astra.
+
+### Pipeline y límites
+
+- ECM sigue procesándose sin esperar el retardo de vídeo. El hilo TS conserva
+  la hora monotónica de cada paquete, su orden y las snapshots de claves existentes.
+  PAT/PMT regeneradas pasan por la misma cola, sin adelantar al payload retenido.
+- CSA no procesa paquetes antes de cumplir el retardo. Una CW ausente conserva
+  bloqueada la cabecera, pero solo hasta retardo + 2000 ms. Después los paquetes
+  caducados se descartan y cuentan en `cw_timeout_drops` y `service_drops`.
+  Esto no implementa un historial universal de claves por período: siguen los
+  límites de asociación ECM/CW explicados arriba.
+- Un hilo independiente entrega los paquetes descifrados a stdout/HTTP/UDP.
+  La captura y el hilo ECM no duermen para regular bitrate ni esperan sockets
+  de salida. stdout no bloqueante tiene un plazo de escritura de 500 ms: si el
+  consumidor se atasca, el motor termina para requerir reconexión, no altera
+  silenciosamente bytes parciales del TS. UDP usa envío no bloqueante.
+- El reloj aprende espaciado de PCR del PID anunciado por PMT e interpola según
+  paquetes del servicio. Tiene en cuenta wraparound de PCR; PCR repetido no cambia
+  el ancla. Sin PCR utiliza espaciado de llegada; comienza con 75 µs por paquete
+  mientras aprende. Si PCR falta durante más de 500 ms vuelve a llegada.
+  No es un remultiplexor CBR ni un analizador completo de jitter.
+- Hay 100 ms de margen inicial en la entrega. Tras retraso de más de 20 ms, el
+  reloj se reasienta 20 ms por delante, en lugar de recuperar todo de golpe.
+  PCR discontinuo/salto >500 ms o planificación >500 ms por delante reasientan
+  el reloj. Se agrupan como máximo siete paquetes en una ventana de 1 ms.
+- Tanto la cola previa a CSA como la de salida admiten hasta 65536 paquetes
+  (aproximadamente 12 MiB de payload cada una, más metadatos). Memoria por servicio.
+  Una cola llena se vacía con descarte contabilizado. Salida también descarta
+  paquetes de edad mayor que retardo + 2000 ms. No se recupera vídeo ya perdido.
+- Cambiar contexto CA limpia colas y cambia época de salida; un lote que estaba
+  esperando reloj se descarta si su época queda obsoleta. Los bytes ya entregados
+  al sistema operativo no se pueden retirar.
+
+### Eventos y prueba real
+
+En **Eventos en vivo** se añaden `cw_timeout_drops`, `output_pending`,
+`output_drops`, `output_late`, `pcr_resets`, `pes_errors`, `udp_output_drops`. Son acumulados salvo
+ocupación de cola; comparar dos muestras de una misma sesión. No se guardan
+archivos ni se conservan eventos sin visor.
+
+`pes_errors` solo detecta prefijos PES inválidos en PUSI de los primeros ES de
+vídeo/audio cuando caben completos en el paquete. No analiza todos los ES, códecs,
+cabeceras fragmentadas ni la imagen. `pcr_resets` cuenta reajustes del reloj, no
+es una medida de jitter PCR ni prueba de recepción correcta.
+
+Probar con 500 ms por defecto durante varios cambios de clave, SD y HD directo
+al panel y después por Flussonic. Subir a 1000 ms solo como comparación si hay
+esperas de CW; no oculta claves incorrectas, RF dañada o paquetes perdidos. No
+cambiar simultáneamente CAID/PID y retardo, para poder atribuir diferencias.
+
+Pruebas: `test_pacing.c` verifica PCR/wrap/discontinuidad, reloj tardío, fallback,
+PCR repetido y límites. `test_transport.c` verifica retardo, caducidad, salida
+asíncrona ordenada y límites de cola además de las pruebas de CSA existentes.
+No equivale a una validación con la señal del usuario.

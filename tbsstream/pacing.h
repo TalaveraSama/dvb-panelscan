@@ -6,7 +6,7 @@
 #define PCR_WRAP ((UINT64_C(1) << 33) * 300)
 typedef struct {
   uint64_t due, step, index, pcr, pcr_index, pcr_due;
-  uint64_t arrival, arrival_index, resets, late;
+  uint64_t arrival, arrival_index, pcr_arrival, resets, late;
   int have_pcr;
 } ts_clock_t;
 
@@ -34,6 +34,8 @@ static uint64_t ts_schedule(ts_clock_t *c, const uint8_t *pkt, int pcr_pid,
   int disc = 0;
   int pid = ((pkt[1] & 31) << 8) | pkt[2];
   int has_pcr = pid == pcr_pid && ts_pcr(pkt, &pcr, &disc);
+  uint64_t previous_due = c->due;
+  if (c->have_pcr && arrival > c->pcr_arrival + 500000) c->have_pcr = 0;
   if (!c->due) { c->due = now + 100000; c->step = 75; }
   else c->due += c->step;
   c->index++;
@@ -51,12 +53,16 @@ static uint64_t ts_schedule(ts_clock_t *c, const uint8_t *pkt, int pcr_pid,
       if (step >= 1 && step <= 20000) {
         c->step = step;
         uint64_t target = c->pcr_due + delta / 27;
-        if (target > c->due) c->due = target;
+        c->due = target > previous_due ? target : previous_due + 1;
       }
     } else if (c->have_pcr && delta > 13500000) {
       c->due = now + 100000; c->resets++;
     }
-    c->have_pcr = 1; c->pcr = pcr; c->pcr_index = c->index; c->pcr_due = c->due;
+    /* A duplicate PCR must not shorten the interval used for the next one. */
+    if (!c->have_pcr || delta) {
+      c->have_pcr = 1; c->pcr = pcr; c->pcr_index = c->index;
+      c->pcr_due = c->due; c->pcr_arrival = arrival;
+    }
   }
   if (now > c->due && now - c->due > 20000) {
     c->due = now + 20000; c->have_pcr = 0; c->late++;

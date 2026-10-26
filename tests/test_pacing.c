@@ -29,6 +29,9 @@ int main(void)
   packet(p, 540000, 0); /* 40 ms across PCR wrap */
   due = ts_schedule(&c, p, 0x100, 1040000, 1500000);
   assert(c.step == 400 && due == 1640000 && !c.resets);
+  uint64_t anchor = c.pcr_index;
+  ts_schedule(&c, p, 0x100, 1040000, 1500000);
+  assert(c.pcr_index == anchor); /* repeated PCR doesn't replace reference */
   assert(ts_schedule(&c, p, 0x100, 1040000, 2000000) == 2020000 && c.late == 1);
   packet(p, 200000, 1);
   assert(ts_schedule(&c, p, 0x100, 1040000, 2100000) == 2200000 && c.resets == 1);
@@ -40,6 +43,12 @@ int main(void)
   ts_schedule(&c, p, 0x100, 1000000, 1500000);
   for (int i = 1; i <= 100; i++) ts_schedule(&c, p, 0x100, 1000000 + i*500, 1500000);
   assert(!c.have_pcr && c.step == 500); /* arrival-clock fallback */
+  packet(p, 1000000, 0);
+  ts_schedule(&c, p, 0x100, 1050000, 1500000);
+  assert(c.have_pcr);
+  p[5] = 0;
+  ts_schedule(&c, p, 0x100, 1650000, 1500000);
+  assert(!c.have_pcr); /* missing PCR returns to arrival clock */
   /* Even a corrupted/implausible clock cannot schedule seconds ahead. */
   c.step = 5000000;
   assert(ts_schedule(&c, p, 0x100, 1050000, 1500000) == 1600000 && c.resets == 1);
