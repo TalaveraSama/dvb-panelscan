@@ -1,3 +1,13 @@
+## DVB PanelScan 0.14.2 · Diseño de usuarios IPTV
+
+- Corrige conflicto CSS: casillas IPTV/Habilitado de ancho fijo, no 100%.
+- Nombres de canales con espacio flexible y ajuste de texto largo; lista sin
+  desplazamiento horizontal. Campos separados y botón Guardar en su propia fila.
+- Prueba DOM de estilos efectivos de casillas y estructura de la lista.
+- Sin cambios en permisos, tokens, cuentas ni configuración de streaming.
+
+---
+
 ## DVB PanelScan 0.14.1 · Selección IPTV y descarga M3U
 
 - Selección de canales mediante casillas independientes, botones seleccionar todos

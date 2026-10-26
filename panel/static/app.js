@@ -1216,7 +1216,7 @@ async function loadIptvUsers() {
         .filter((c) => c.enabled !== false)
         .map(
           (c) =>
-            `<label><input type="checkbox" data-iptv-channel value="${esc(tp.id + ":" + c.sid)}"> ${esc(tp.name)} · ${esc(c.name || c.sid)}</label>`,
+            `<label><input type="checkbox" data-iptv-channel value="${esc(tp.id + ":" + c.sid)}"> <span class="iptv-channel-name">${esc(tp.name)} · ${esc(c.name || c.sid)}</span></label>`,
         ),
     )
     .join("");

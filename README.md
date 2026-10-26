@@ -7,7 +7,7 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.14.1 · Usuarios IPTV y autorización Flussonic
+## Actual: 0.14.2 · Usuarios IPTV y autorización Flussonic
 
 Cuentas IPTV independientes con contraseña, canales permitidos, vencimiento y
 revocación individual. Salidas MPEG-TS protegidas para Flussonic y backend GET

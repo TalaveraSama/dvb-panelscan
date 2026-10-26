@@ -632,7 +632,7 @@ select:focus-visible {
 #securityDialog {
   width: min(680px, 94vw);
 }
-#securityDialog input {
+#securityDialog input:not([type="checkbox"]) {
   width: 100%;
   font-family: monospace;
 }
@@ -1061,4 +1061,69 @@ select:focus-visible {
 .iptv-channel-list input[type="checkbox"] {
   width: auto;
   flex: 0 0 auto;
+}
+
+/* Keep checkbox controls out of full-width text-field rules. */
+#securityDialog {
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+#securityDialog > label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0;
+  min-width: 0;
+}
+#securityDialog > label.iptv-enabled {
+  flex-direction: row;
+  align-items: center;
+}
+#securityDialog input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  padding: 0;
+  margin: 0;
+  flex: 0 0 18px;
+}
+#securityDialog .iptv-channel-list {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+}
+#securityDialog .iptv-channel-list label {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+}
+#securityDialog .iptv-channel-list .iptv-channel-name {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+#securityDialog .iptv-channel-list input[type="checkbox"] {
+  margin-top: 2px;
+}
+#iptvSave {
+  display: block;
+  margin: 16px 0;
+  max-width: 100%;
+  white-space: normal;
+}
+#iptvSelectAll,
+#iptvSelectNone {
+  max-width: 100%;
+  white-space: normal;
+  margin-bottom: 8px;
+}
+#iptvDownload:not(.hidden) {
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
 }
