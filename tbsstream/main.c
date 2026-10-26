@@ -239,7 +239,10 @@ static int wait_lock(int fd, int timeout_s)
 /* -------------------------------------------------------------------------
  * Reensamblado de secciones
  * ------------------------------------------------------------------------- */
-typedef struct { uint16_t pid; uint8_t buf[4096]; int len; } secbuf_t;
+typedef struct {
+  uint16_t pid; uint8_t buf[4096]; int len;
+  int cc_seen, last_cc, wait_pusi;
+} secbuf_t;
 static secbuf_t secbufs[4];
 static int nsecbufs = 0;
 
@@ -251,6 +254,7 @@ static secbuf_t *secbuf_get(uint16_t pid)
     if (secbufs[i].pid == 0x1fff) {
       memset(&secbufs[i], 0, sizeof(secbufs[i]));
       secbufs[i].pid = pid;
+      secbufs[i].wait_pusi = 1;
       return &secbufs[i];
     }
   }
@@ -258,6 +262,7 @@ static secbuf_t *secbuf_get(uint16_t pid)
   secbuf_t *sb = &secbufs[nsecbufs++];
   memset(sb, 0, sizeof(*sb));
   sb->pid = pid;
+  sb->wait_pusi = 1;
   return sb;
 }
 
@@ -283,28 +288,32 @@ static void feed_section(uint16_t pid, const uint8_t *data, int len, int pusi)
   secbuf_t *sb = secbuf_get(pid);
   if (!sb) return;
   if (pusi) {
-    if (len < 1) return;
-    int pointer = data[0];
-    const uint8_t *p = data + 1;
-    int plen = len - 1;
-    if (pointer > 0) {
-      int take = pointer < plen ? pointer : plen;
-      if (sb->len + take < (int)sizeof(sb->buf)) {
-        memcpy(sb->buf + sb->len, p, take);
-        sb->len += take;
-        process_sections(sb);
-      }
-      p += take; plen -= take;
+    if (len < 1 || data[0] > len - 1) {
+      sb->len = 0; sb->wait_pusi = 1;
+      return;
     }
-    if (plen > 0 && sb->len + plen < (int)sizeof(sb->buf)) {
-      memcpy(sb->buf + sb->len, p, plen);
-      sb->len += plen;
+    int pointer = data[0];
+    /* The pointer completes ONLY the previous section. The boundary after it
+     * starts a fresh section, even if that previous one was lost/incomplete. */
+    if (sb->len && pointer && sb->len + pointer <= (int)sizeof(sb->buf)) {
+      memcpy(sb->buf + sb->len, data + 1, pointer);
+      sb->len += pointer;
       process_sections(sb);
     }
-  } else if (sb->len + len < (int)sizeof(sb->buf)) {
+    sb->len = 0;
+    sb->wait_pusi = 0;
+    int remaining = len - 1 - pointer;
+    if (remaining > 0 && remaining <= (int)sizeof(sb->buf)) {
+      memcpy(sb->buf, data + 1 + pointer, remaining);
+      sb->len = remaining;
+      process_sections(sb);
+    }
+  } else if (!sb->wait_pusi && sb->len && sb->len + len <= (int)sizeof(sb->buf)) {
     memcpy(sb->buf + sb->len, data, len);
     sb->len += len;
     process_sections(sb);
+  } else if (sb->len + len > (int)sizeof(sb->buf)) {
+    sb->len = 0; sb->wait_pusi = 1;
   }
 }
 
@@ -535,6 +544,15 @@ static uint8_t scram_cw[SCRAM_MAX][8];
 static uint64_t scram_revision[SCRAM_MAX];
 static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
 static uint64_t ecm_queue_drops;
+static uint64_t sync_losses, sync_bytes, invalid_ts, psi_discontinuities;
+
+static void reset_sections(void)
+{
+  for (int i = 0; i < nsecbufs; i++) {
+    secbufs[i].len = secbufs[i].cc_seen = 0;
+    secbufs[i].wait_pusi = 1;
+  }
+}
 static uint8_t cc_seen[8192], last_cc[8192];
 
 static volatile int ca_running = 1;
@@ -697,11 +715,14 @@ static void log_transport_stats(void)
   uint64_t dropped = ecm_queue_drops;
   pthread_mutex_unlock(&ecm_q_mutex);
   LOGV("TS stats: tei=%llu cc_errors=%llu service_drops=%llu pending=%d "
-       "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu\n",
+       "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu "
+       "sync_losses=%llu sync_bytes=%llu invalid_ts=%llu psi_discontinuities=%llu\n",
        (unsigned long long)input_tei, (unsigned long long)input_cc_errors,
        (unsigned long long)service_drops, scram_count, queued,
        (unsigned long long)dropped, (unsigned long long)csa_batches,
-       (unsigned long long)csa_packets);
+       (unsigned long long)csa_packets, (unsigned long long)sync_losses,
+       (unsigned long long)sync_bytes, (unsigned long long)invalid_ts,
+       (unsigned long long)psi_discontinuities);
   due = now + 5000;
 }
 
@@ -850,8 +871,9 @@ static void select_ca(int selected)
    * may be executing through a pointer to one of those buffers right now. */
   for (int i = 0; i < nsecbufs; i++) {
     if (secbufs[i].pid != PID_PAT && secbufs[i].pid != svc.pmt_pid) {
+      memset(&secbufs[i], 0, sizeof(secbufs[i]));
       secbufs[i].pid = 0x1fff;
-      secbufs[i].len = 0;
+      secbufs[i].wait_pusi = 1;
     }
   }
   /* Payload waiting for an incompatible CA must not leak into the new context. */
@@ -1025,9 +1047,23 @@ static void *http_server(void *arg)
 /* -------------------------------------------------------------------------
  * Bucle principal
  * ------------------------------------------------------------------------- */
+static int valid_ts_header(const uint8_t *packet)
+{
+  return packet[0] == 0x47 && (packet[3] & 0x30) != 0;
+}
+
+static int valid_ts_packet(const uint8_t *packet)
+{
+  if (!valid_ts_header(packet)) return 0;
+  int afc = (packet[3] >> 4) & 3;
+  if (afc == 2) return packet[4] == 183;
+  if (afc == 3) return packet[4] <= 182;
+  return 1;
+}
+
 static void process_packet(uint8_t *pkt)
 {
-  if (pkt[0] != 0x47) return;
+  if (!valid_ts_packet(pkt)) { invalid_ts++; reset_sections(); return; }
   pthread_mutex_lock(&csa_mutex);
   int rotate = ca_rotate || (svc.ca_count > 1 &&
                monotonic_ms() - ca_last_progress >= 12000);
@@ -1038,16 +1074,37 @@ static void process_packet(uint8_t *pkt)
   int pusi = (pkt[1] & 0x40) != 0;
   uint16_t pid = ((uint16_t)(pkt[1] & 0x1F) << 8) | pkt[2];
   observe_transport(pkt, pid);
-  if (pkt[1] & 0x80) return; /* corrupt input must not enter PSI/CSA */
+  if (pkt[1] & 0x80) {
+    for (int i = 0; i < nsecbufs; i++) if (secbufs[i].pid == pid) {
+      secbufs[i].len = secbufs[i].cc_seen = 0;
+      secbufs[i].wait_pusi = 1;
+    }
+    return; /* corrupt input must not enter PSI/CSA */
+  }
   int afc = (pkt[3] >> 4) & 0x03;
 
   /* Demux de secciones PSI (PAT/PMT/ECM) */
   if (pid == PID_PAT || (svc.pmt_pid && pid == svc.pmt_pid) ||
       (svc.ca_count && pid == svc.ca[ca_selected].pid)) {
+    secbuf_t *sb = secbuf_get(pid);
+    if (!sb) return;
+    if ((afc & 2) && pkt[4] && (pkt[5] & 0x80)) {
+      sb->len = sb->cc_seen = 0;
+      sb->wait_pusi = 1;
+    }
+    if (!(afc & 1)) return;
+    int cc = pkt[3] & 15;
+    if (sb->cc_seen) {
+      if (cc == sb->last_cc) return; /* duplicate payload must not enter an ECM twice */
+      if (cc != ((sb->last_cc + 1) & 15)) {
+        psi_discontinuities++;
+        sb->len = 0; sb->wait_pusi = 1;
+      }
+    }
+    sb->cc_seen = 1; sb->last_cc = cc;
     int off = 4;
-    if (afc == 0x02) return;
-    if (afc == 0x03) off += 1 + pkt[4];
-    if (off <= 184)
+    if (afc == 3) off += 1 + pkt[4];
+    if (off < TS_PKT && (pusi || !sb->wait_pusi))
       feed_section(pid, pkt + off, TS_PKT - off, pusi);
     return;
   }
@@ -1063,17 +1120,24 @@ static void process_buffer(const uint8_t *buf, int len)
 {
   for (int i = 0; i < len; i++) {
     ts_pending[ts_pending_len++] = buf[i];
-    if (ts_synced && ts_pending_len >= TS_PKT && ts_pending[0] != 0x47)
+    if (ts_synced && ts_pending_len >= TS_PKT && !valid_ts_header(ts_pending)) {
       ts_synced = 0;
-    if (!ts_synced && ts_pending_len >= 2 * TS_PKT + 1) {
-      if (ts_pending[0] == 0x47 && ts_pending[TS_PKT] == 0x47 &&
-          ts_pending[2 * TS_PKT] == 0x47) {
+      sync_losses++;
+      reset_sections();
+    }
+    if (!ts_synced && ts_pending_len >= 2 * TS_PKT + 4) {
+      if (valid_ts_header(ts_pending) && valid_ts_header(ts_pending + TS_PKT) &&
+          valid_ts_header(ts_pending + 2 * TS_PKT)) {
         ts_synced = 1;
       } else {
         memmove(ts_pending, ts_pending + 1, --ts_pending_len);
+        sync_bytes++;
       }
     }
     while (ts_synced && ts_pending_len >= TS_PKT) {
+      if (!valid_ts_header(ts_pending)) {
+        ts_synced = 0; sync_losses++; reset_sections(); break;
+      }
       process_packet(ts_pending);
       ts_pending_len -= TS_PKT;
       memmove(ts_pending, ts_pending + TS_PKT, ts_pending_len);

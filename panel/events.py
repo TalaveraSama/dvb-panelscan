@@ -86,7 +86,7 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
         return
     if line.startswith("TS stats:"):
         stats = {key: int(value) for key, value in re.findall(
-            r"\b(tei|cc_errors|service_drops|pending|ecm_drops)=(\d+)", line)}
+            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities)=(\d+)", line)}
         if stats:
             level = "warning" if any(value for key, value in stats.items() if key != "pending") else "info"
             bus.publish("stats", "Estadísticas TS (acumuladas)", level, channel, adapter, stats=stats)

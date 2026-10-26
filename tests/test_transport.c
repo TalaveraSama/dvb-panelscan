@@ -250,6 +250,76 @@ static void test_ca_failure_and_late_response(void)
   memset(&svc, 0, sizeof(svc));
 }
 
+static void psi_packet(uint8_t *packet, unsigned pid, int cc, int start,
+                       const uint8_t *payload, unsigned length)
+{
+  assert(length > 0 && length < 183);
+  memset(packet, 0xff, TS_PKT);
+  packet[0] = 0x47; packet[1] = (pid >> 8) | (start ? 0x40 : 0);
+  packet[2] = pid; packet[3] = 0x30 | cc;
+  packet[4] = 183 - length; packet[5] = 0;
+  memcpy(packet + TS_PKT - length, payload, length);
+}
+
+static void test_psi_continuity_and_pointer(void)
+{
+  uint8_t ecm[] = {0x80,0x70,5,1,2,3,4,5};
+  uint8_t start[] = {0,0x80,0x70,5,1,2};
+  uint8_t packet[TS_PKT];
+  memset(&svc, 0, sizeof(svc));
+  svc.ca_count = 1; svc.ca[0].caid = 0x100; svc.ca[0].pid = 0x123;
+  nsecbufs = 0; select_ca(0);
+  psi_packet(packet, 0x123, 0, 1, start, sizeof(start));
+  process_packet(packet);
+  secbuf_t *assembly = secbuf_get(0x123);
+  assert(assembly->len == 5 && !ecm_q_count);
+  process_packet(packet); /* duplicate must not concatenate the same bytes */
+  assert(assembly->len == 5);
+  psi_packet(packet, 0x123, 2, 0, ecm + 5, 3); /* CC 1 lost */
+  process_packet(packet);
+  assert(!assembly->len && assembly->wait_pusi && !ecm_q_count);
+  psi_packet(packet, 0x123, 3, 1, start, sizeof(start)); process_packet(packet);
+  psi_packet(packet, 0x123, 4, 0, ecm + 5, 3); process_packet(packet);
+  assert(ecm_q_count == 1 && ecm_q[0].len == sizeof(ecm));
+  assert(!memcmp(ecm_q[0].sec, ecm, sizeof(ecm)));
+  ecm_q_count = ecm_q_head = ecm_q_tail = 0;
+  psi_packet(packet, 0x123, 5, 1, start, sizeof(start)); process_packet(packet);
+  uint8_t next[] = {0,0x81,0x70,5,9,8,7,6,5};
+  psi_packet(packet, 0x123, 6, 1, next, sizeof(next)); process_packet(packet);
+  assert(ecm_q_count == 1 && ecm_q[0].sec[0] == 0x81); /* pointer 0 abandons old partial */
+  uint8_t bad_pointer[] = {10,0x80};
+  feed_section(0x123, bad_pointer, sizeof(bad_pointer), 1);
+  assert(!assembly->len && assembly->wait_pusi);
+  ecm_q_count = ecm_q_head = ecm_q_tail = 0;
+  psi_packet(packet, 0x123, 7, 1, start, sizeof(start)); process_packet(packet);
+  packet[1] |= 0x80; process_packet(packet); /* TEI destroys partial PSI */
+  assert(!assembly->len && assembly->wait_pusi);
+  uint64_t before = invalid_ts;
+  packet[1] &= 0x7f; packet[4] = 184; process_packet(packet);
+  assert(invalid_ts == before + 1);
+  memset(&svc, 0, sizeof(svc));
+}
+
+static void test_false_sync_headers(void)
+{
+  uint8_t fake[3 * TS_PKT], valid[3 * TS_PKT];
+  memset(fake, 0, sizeof(fake));
+  for (int i = 0; i < 3; i++) fake[i * TS_PKT] = 0x47; /* reserved AFC=0 */
+  memset(&svc, 0, sizeof(svc));
+  svc.ready = 1; svc.nes = 1; svc.es[0].pid = 0x100; svc.pcr_pid = 0x1fff;
+  ts_synced = ts_pending_len = 0; ring_seq = 0; scram_count = scram_head = 0;
+  process_buffer(fake, sizeof(fake));
+  assert(!ts_synced && !ring_seq);
+  for (int i = 0; i < 3; i++) {
+    uint8_t *packet = valid + i * TS_PKT;
+    memset(packet, 0x55, TS_PKT);
+    packet[0] = 0x47; packet[1] = 1; packet[2] = 0; packet[3] = 0x10 | i;
+  }
+  process_buffer(valid, sizeof(valid));
+  assert(ts_synced && ring_seq == 3 && !ts_pending_len);
+  assert(!memcmp(ring, valid, sizeof(valid)));
+}
+
 static void test_input_error_counters(void)
 {
   uint8_t pkt[TS_PKT] = {0x47, 1, 0, 0x10};
@@ -281,6 +351,8 @@ int main(void)
   test_late_rotating_cw();
   test_buffer_keeps_its_key();
   test_ca_failure_and_late_response();
+  test_psi_continuity_and_pointer();
+  test_false_sync_headers();
   test_input_error_counters();
   puts("TS fragmentation, PCR forwarding, ring batching and TCP tests passed");
   return 0;

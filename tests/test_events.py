@@ -64,6 +64,15 @@ class EventTests(unittest.TestCase):
         self.assertEqual(viewer.read(timeout=0), [])
         viewer.close()
 
+    def test_transport_sync_counters_are_visible_without_raw_logs(self):
+        bus = EventBus(); viewer = bus.subscribe()
+        diagnostic_event(bus, "TS stats: tei=0 cc_errors=1 pending=5 sync_losses=2 sync_bytes=30 invalid_ts=4 psi_discontinuities=3", "channel", "tp:1", 0)
+        event = viewer.read(timeout=0)[0]
+        self.assertEqual(event["stats"]["sync_losses"], 2)
+        self.assertEqual(event["stats"]["psi_discontinuities"], 3)
+        self.assertEqual(event["level"], "warning")
+        viewer.close()
+
     def test_session_drains_stderr_and_health_without_creating_log(self):
         with tempfile.TemporaryDirectory() as folder:
             manager = StreamManager(); viewer = manager.events.subscribe()
