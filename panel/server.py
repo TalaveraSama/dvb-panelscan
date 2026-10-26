@@ -71,7 +71,7 @@ STATE = {
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
 _auth = AuthStore(os.path.join(DATA_DIR, "auth.json"), secure=os.environ.get("DVB_PANEL_SECURE_COOKIE") == "1")
 _iptv = IPTVStore(os.path.join(DATA_DIR, "iptv.json"))
-_streams = StreamManager()
+_streams = StreamManager(reconnect_grace=10)
 _epg = EPGStore(os.path.join(DATA_DIR, "epg.json"))
 
 

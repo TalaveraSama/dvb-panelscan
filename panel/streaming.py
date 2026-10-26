@@ -27,6 +27,7 @@ class Session:
         self.http_port, self.udp = http_port, tuple(udp)
         self.log_path = log_path
         self.clients, self.pinned = 0, False
+        self.reconnect_until = None
         self.condition = threading.Condition()
         self.blocks = collections.deque()
         self.first = self.next = self.buffered = self.bytes_received = 0
@@ -183,6 +184,7 @@ class Session:
             return {"channel_id": self.key, "adapter": self.adapter,
                     "pid": self.process.pid, "running": self.process.poll() is None and not self.ended,
                     "clients": self.clients, "pinned": self.pinned,
+                    "reconnect_waiting": self.reconnect_until is not None,
                     "http_port": self.http_port, "udp": ", ".join(self.udp),
                     "bytes_received": self.bytes_received, "queue_bytes": self.buffered,
                     "slow_clients": self.overruns, "exit_code": self.process.poll(),
@@ -229,13 +231,47 @@ class Broker:
 
 
 class StreamManager:
-    def __init__(self):
+    def __init__(self, reconnect_grace=0):
         self.lock = threading.RLock()
         self.events = EventBus()
         self.sessions = {}  # (adapter, channel identity), never just adapter
         self.muxes = {}  # adapter -> (tuning identity, capture)
         self.brokers = {}  # private configuration tuple -> broker
         self.scanning = set()
+        self.reconnect_grace = max(0, min(float(reconnect_grace), 30))
+        self._idle = {}  # identity -> (unique expiry token, timer)
+
+    def _cancel_idle(self, session):
+        entry = self._idle.pop((session.adapter, session.key), None)
+        if entry:
+            entry[1].cancel()
+        session.reconnect_until = None
+
+    def _close_session(self, session):
+        identity = (session.adapter, session.key)
+        if self.sessions.get(identity) is session:
+            self._cancel_idle(session)
+            del self.sessions[identity]
+        session.stop()
+
+    def _expire_idle(self, session, token):
+        with self.lock:
+            identity = (session.adapter, session.key)
+            entry = self._idle.get(identity)
+            if not entry or entry[0] is not token:
+                return  # A cancelled callback must not close a renewed session.
+            if self.sessions.get(identity) is session and not session.clients and not session.pinned:
+                self._close_session(session)
+                self._collect()
+
+    def _evict_idle(self, adapter):
+        # Explicit scan/tuning changes must not wait for reconnect retention.
+        for identity in list(self._idle):
+            if identity[0] == adapter:
+                session = self.sessions.get(identity)
+                if session and not session.clients and not session.pinned:
+                    self._close_session(session)
+        self._collect()
 
     def _collect(self):
         for adapter, (_, source) in list(self.muxes.items()):
@@ -251,8 +287,7 @@ class StreamManager:
         for identity, session in list(self.sessions.items()):
             if (session.ended or session.process.poll() is not None or
                     (session.source and session.source.ended)):
-                del self.sessions[identity]
-                session.stop()
+                self._close_session(session)
         self._collect()
 
     def acquire(self, key, adapter, command, log_path, timeout=35, pinned=False,
@@ -264,6 +299,8 @@ class StreamManager:
             if adapter in self.scanning:
                 raise StreamError("Adaptador ocupado por un escaneo", 409)
             previous = self.sessions.get(identity)
+            if not previous:
+                self._evict_idle(adapter)
             active = [s for s in self.sessions.values() if s.adapter == adapter]
             if active and (mux_command is None or adapter not in self.muxes or
                            self.muxes[adapter][0] != mux_id) and not previous:
@@ -305,6 +342,9 @@ class StreamManager:
                     if isinstance(error, OSError):
                         raise StreamError("No se pudo iniciar el motor") from None
                     raise
+            if (previous.adapter, previous.key) in self._idle:
+                self._cancel_idle(previous)
+                previous._event("reuse", "Reconexion HTTP: se reutiliza canal y broker Newcamd")
             previous.clients += 1
         try:
             previous.wait_ready(timeout)
@@ -323,14 +363,33 @@ class StreamManager:
             session.clients = max(0, session.clients - 1)
             if not session.clients and not session.pinned:
                 identity = (session.adapter, session.key)
-                if self.sessions.get(identity) is session:
-                    del self.sessions[identity]
-                session.stop()
-                self._collect()
+                healthy = (not session.ended and session.bytes_received > 0 and
+                           session.process.poll() is None and
+                           (not session.source or not session.source.ended))
+                switching = any(s is not session and s.adapter == session.adapter and
+                                (s.clients or s.pinned) for s in self.sessions.values())
+                if self.sessions.get(identity) is session and healthy and self.reconnect_grace and not switching:
+                    if identity not in self._idle:
+                        # Bound retained workers/memory even under channel hopping.
+                        if len(self._idle) >= 16:
+                            oldest = next(iter(self._idle))
+                            self._close_session(self.sessions[oldest])
+                            self._collect()
+                        token = object()
+                        timer = threading.Timer(self.reconnect_grace, self._expire_idle, (session, token))
+                        timer.daemon = True
+                        self._idle[identity] = (token, timer)
+                        session.reconnect_until = time.monotonic() + self.reconnect_grace
+                        session._event("reconnect", "Esperando reconexion del reproductor; se conserva canal y broker")
+                        timer.start()
+                else:
+                    self._close_session(session)
+                    self._collect()
 
     def reserve_scan(self, adapter):
         with self.lock:
             self._reap()
+            self._evict_idle(adapter)
             if adapter in self.scanning or any(s.adapter == adapter for s in self.sessions.values()):
                 raise StreamError("Adaptador ocupado; detén sus canales antes de escanear", 409)
             self.scanning.add(adapter)
@@ -343,18 +402,16 @@ class StreamManager:
         with self.lock:
             targets = [s for s in self.sessions.values() if s.key == key]
             for session in targets:
-                self.sessions.pop((session.adapter, session.key), None)
                 session.pinned = False
-                session.stop()
+                self._close_session(session)
             self._collect()
             return bool(targets)
 
     def stop_all(self):
         with self.lock:
-            sessions, self.sessions = list(self.sessions.values()), {}
-            for session in sessions:
+            for session in list(self.sessions.values()):
                 session.pinned = False
-                session.stop()
+                self._close_session(session)
             self._collect()
 
     def status(self):

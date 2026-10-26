@@ -49,6 +49,62 @@ class StreamingTests(unittest.TestCase):
     def acquire(self, key="tp:1", **kwargs):
         return self.manager.acquire(key, 0, self.command, self.log, timeout=2, **kwargs)
 
+    def test_reconnect_grace_reuses_worker_and_ignores_old_expiry(self):
+        self.manager.reconnect_grace = 10
+        a = self.acquire()
+        pid = a.process.pid
+        self.manager.release(a)
+        token = self.manager._idle[(0, "tp:1")][0]
+        self.assertTrue(a.status()["reconnect_waiting"])
+        b = self.acquire()
+        self.assertIs(a, b)
+        self.assertEqual(b.process.pid, pid)
+        self.assertFalse(b.status()["reconnect_waiting"])
+        self.manager._expire_idle(a, token)
+        self.assertIsNone(b.process.poll())
+        self.manager.release(b)
+        new_token = self.manager._idle[(0, "tp:1")][0]
+        self.manager._expire_idle(a, token)  # cannot expire the renewed idle period
+        self.assertIsNone(b.process.poll())
+        self.manager._expire_idle(b, new_token)
+        self.assertIsNotNone(b.process.poll())
+        self.assertEqual(self.manager.sessions, {})
+        self.assertEqual(self.manager._idle, {})
+
+    def test_reconnect_timer_expires_without_another_http_request(self):
+        self.manager.reconnect_grace = .1
+        a = self.acquire()
+        self.manager.release(a)
+        a.process.wait(timeout=3)
+        with self.manager.lock:
+            self.assertEqual(self.manager.sessions, {})
+            self.assertEqual(self.manager._idle, {})
+
+    def test_explicit_stop_cancels_retention_and_stale_release_is_safe(self):
+        self.manager.reconnect_grace = 10
+        a = self.acquire()
+        self.manager.release(a)
+        token = self.manager._idle[(0, "tp:1")][0]
+        self.manager.stop_channel("tp:1")
+        self.assertIsNotNone(a.process.poll())
+        b = self.acquire()
+        self.manager.release(b)
+        self.manager.release(a)
+        self.manager._expire_idle(a, token)
+        self.assertIsNone(b.process.poll())
+        self.assertIn((0, "tp:1"), self.manager._idle)
+        self.manager.stop_all()
+        self.assertEqual(self.manager._idle, {})
+
+    def test_scan_evicts_idle_but_does_not_evict_a_live_subscription(self):
+        self.manager.reconnect_grace = 10
+        a = self.acquire()
+        with self.assertRaises(StreamError): self.manager.reserve_scan(0)
+        self.manager.release(a)
+        self.manager.reserve_scan(0)
+        self.assertIsNotNone(a.process.poll())
+        self.manager.release_scan(0)
+
     def test_same_channel_reuses_process_and_refcounts(self):
         a = self.acquire()
         b = self.acquire()
@@ -173,6 +229,20 @@ class MuxTests(unittest.TestCase):
         self.manager.release(b)
         self.assertIsNotNone(source.process.poll())
         self.assertEqual(self.manager.muxes, {})
+
+    def test_channel_change_does_not_keep_old_idle_ecm_requests(self):
+        self.manager.reconnect_grace = 10
+        a = self.acquire_mux()
+        self.manager.release(a)
+        b = self.acquire_mux("tp:2")
+        self.assertIsNotNone(a.process.poll())
+        self.assertEqual(len(self.manager.sessions), 1)
+        # Also cover the new HTTP request arriving before the old disconnect.
+        c = self.acquire_mux("tp:3")
+        self.manager.release(b)
+        self.assertIsNotNone(b.process.poll())
+        self.assertIsNone(c.process.poll())
+        self.assertNotIn((0, "tp:2"), self.manager._idle)
 
     def test_concurrent_different_services_share_one_capture(self):
         results, errors = [], []
@@ -344,6 +414,25 @@ class HttpSubscriptionTests(unittest.TestCase):
                 self.assertTrue(all(s["ca_pid"] for s in sessions))
                 self.panel._streams.stop_channel("tp-a:672")
                 self.assertEqual(b.read(188)[0], 0x47)
+
+    def test_http_reconnect_preserves_service_mux_and_broker_pids(self):
+        url = self.base + "/stream/channel/tp-a:672"
+        with self.request.urlopen(url, timeout=2) as stream:
+            self.assertEqual(stream.read(188)[0], 0x47)
+            initial = self.panel.stream_status()["sessions"][0]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            status = self.panel.stream_status()["sessions"]
+            if status and status[0]["reconnect_waiting"]: break
+            time.sleep(.01)
+        self.assertTrue(status[0]["reconnect_waiting"])
+        with self.request.urlopen(url, timeout=2) as stream:
+            self.assertEqual(stream.read(188)[0], 0x47)
+            renewed = self.panel.stream_status()["sessions"][0]
+            for key in ("pid", "mux_pid", "ca_pid"):
+                self.assertEqual(initial[key], renewed[key])
+            self.assertEqual(len(self.panel._streams.brokers), 1)
+            self.assertFalse(renewed["reconnect_waiting"])
 
     def test_failed_start_is_not_http_200(self):
         import urllib.error

@@ -7,7 +7,13 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.18.0 · Retardo de descifrado y entrega regulada
+## Actual: 0.18.1 · Reutilización de sesión al reconectar
+
+El último cierre HTTP conserva hasta 10 segundos la sesión bajo demanda para
+que el mismo canal reconecte sin recrear worker/mux/broker Newcamd. Detener/editar
+sigue siendo inmediato. Caducidad autónoma y retención acotada; cambio de canal
+libera el servicio anterior inactivo. No es modo siempre activo ni corrige por
+sí solo claves antiguas/rechazos del servidor. [Detalle](docs/CA_CONNECTION_REVIEW.md).
 
 Retardo por canal de 0–2000 ms (500 ms por defecto) y salida en un hilo
 independiente, regulada por PCR con reloj de llegada como respaldo. Colas y edad

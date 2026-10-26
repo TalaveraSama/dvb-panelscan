@@ -1,3 +1,32 @@
+## DVB PanelScan 0.18.1 · Reconexión HTTP sin recrear canal y broker
+
+- Al salir el último reproductor de una sesión bajo demanda ya iniciada, el panel
+  conserva durante 10 segundos el worker, mux y broker para permitir reconexión.
+  Reabrir el mismo TP:SID reutiliza los mismos procesos, sin crear otro broker.
+  No reproduce el atraso: el cliente nuevo se incorpora al punto en vivo.
+- Caducidad autónoma, incluso sin más peticiones. Máximo 16 sesiones retenidas.
+  Los callbacks antiguos no pueden detener una sesión renovada o reemplazada.
+- Detener/editar/deshabilitar canal y Detener todas siguen siendo inmediatos.
+  Escaneo y cambio de canal liberan sesiones inactivas del mismo adaptador;
+  no se conserva el canal viejo enviando ECM al cambiar al siguiente.
+- No se retienen arranques sin TS o procesos finalizados. No convierte servicios
+  bajo demanda en canales siempre activos. El último cierre puede mantener ECM
+  durante hasta 10 segundos; después termina si no hay consumidores ni pin manual.
+- Probar Newcamd no abre un TCP adicional si existe un broker activo. Identidad
+  del broker normalizada por configuración, no nombre del perfil/ruta del binario.
+- Eventos solo en vivo de espera/reutilización y estado reconnect_waiting por
+  sesión. Sin archivos de registros ni publicación de credenciales.
+- Pruebas con procesos reales y reconexión HTTP: PIDs worker/mux/broker iguales,
+  expiración, callbacks antiguos, parada explícita, escaneo y cambio de canal.
+  Incluye pruebas CSA ampliadas de la revisión anterior y script de diagnóstico.
+
+Corrige la recreación por cierre/reintento HTTP; no prueba la causa del pegón
+inicial. No garantiza eliminar timeouts, rechazos CAID/proveedor o claves antiguas
+reportadas por Ncam. No se cambió la primitiva CSA ni se accedió al VPS del usuario.
+La validación real con TBS/Ncam sigue pendiente. Actualizar interrumpe los canales.
+
+---
+
 ## DVB PanelScan 0.18.0 · Descifrado temporizado y salida independiente
 
 - Editar canal: retardo de descifrado entero 0–2000 ms, 500 ms por defecto;

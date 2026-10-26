@@ -61,5 +61,41 @@ No se debe seguir aumentando retardo ni prometer otra cura sin esos datos.
 
 El entorno del agente no dispone de acceso de red SSH al VPS. No se solicita ni
 almacena contraseña; se requiere ejecutar la comprobación localmente o habilitar
-un entorno autorizado que sí tenga acceso. Esta revisión no despliega ni publica
-una nueva versión del paquete.
+un entorno autorizado que sí tenga acceso. La investigación inicial no desplegó cambios. El ciclo de reconexión HTTP se
+modifica posteriormente en 0.18.1, descrito a continuación; no se instala
+automáticamente en el VPS.
+
+
+## Reutilización ante reconexiones HTTP (0.18.1)
+
+El usuario observó que al pegarse el reproductor solicita de nuevo el canal y
+aparecen dos llamados. El código anterior liberaba el último consumidor cerrando
+inmediatamente worker, mux y broker sin otra sesión referenciándolos. Un nuevo
+GET después de ese cierre iniciaba todo otra vez. El registro Ncam muestra dos
+sesiones y reconexiones, pero no permite atribuir cada una a un PID ni demuestra
+que todos sus rechazos/pegones procedan de esta ruta.
+
+El panel activa ahora 10 segundos de gracia para una sesión bajo demanda con TS
+previo y proceso vivo. Mantiene recepción/ECM durante ese tiempo. Un GET del mismo
+TP:SID reutiliza el objeto y los PIDs; cancela su caducidad y se incorpora al final
+actual del ring, sin reenviar el atraso. No se instala otra conexión upstream por
+ese GET. Un fallo de transporte del propio broker aún puede causar reconexión.
+
+La caducidad usa un timer daemon y token único, protegido por el mismo lock que
+acquire/release. Un callback cancelado no cierra una retención posterior ni un
+proceso reemplazado. Hay hasta 16 sesiones en gracia y su cierre ocurre sin más
+peticiones. `reconnect_waiting` identifica la retención en estado de sesión;
+eventos de espera/reutilización se emiten solo a visores conectados.
+
+Detener/editar/deshabilitar canal o Detener todas no esperan la gracia. Escaneo y
+adquisición de un canal distinto liberan retenciones en ese adaptador. Si el GET
+del canal siguiente llega antes del cierre del anterior, ese cierre no conserva
+al anterior enviando ECM. Suscripciones activas de otros canales siguen aisladas.
+Los procesos muertos y los arranques sin datos no se retienen. La API interna de
+StreamManager deja gracia cero salvo activación explícita por el panel.
+
+Pruebas con procesos reales verifican reconexión HTTP con los mismos PIDs de
+worker, mux y broker; timer sin peticiones; callback viejo tras renovación;
+release de una referencia obsoleta; stop inmediato; escaneo y cambio de canal.
+No se afirma que esto repare `rejected caid`, `no server match`, `cwc NOK(old)` o
+que el mismo socket upstream sobreviva a un cierre iniciado por Ncam.
