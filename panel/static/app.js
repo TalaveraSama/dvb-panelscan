@@ -42,7 +42,7 @@ function typeTag(t) {
   return `<span class="tag ${radio ? "radio" : "tv"}">${radio ? "Radio" : "TV"}</span>`;
 }
 function tpInfo(t) {
-  return `${(t.type || "").toUpperCase()} · ${t.freq_mhz} MHz · SR ${t.symbol_rate} · ${t.pol} · LNB ${t.lnb_lo} · adap ${t.adapter}`;
+  return `${(t.type || "").toUpperCase()} · ${t.freq_mhz} MHz · SR ${t.symbol_rate} · ${t.pol} · LNB ${t.lnb_mode === "universal" ? "Universal 9750/10600 · 22 kHz auto" : t.lnb_lo} · adap ${t.adapter}`;
 }
 
 /* ------------------------------ Tabs ------------------------------ */
@@ -213,6 +213,10 @@ function renderTransponders() {
     );
 }
 
+function updateLnbMode() {
+  $("tp_lnb").disabled = $("tp_lnb_mode").value === "universal";
+}
+$("tp_lnb_mode").addEventListener("change", updateLnbMode);
 function renderTpProfiles(selected = $("tp_profile").value || "default") {
   $("tp_profile").innerHTML =
     newcamdProfiles
@@ -240,6 +244,8 @@ async function editTransponder(id) {
     $("tp_" + field).value =
       tp[key] ?? { lnb: 9750, timeout: 15, sr: 0 }[field] ?? "";
   }
+  $("tp_lnb_mode").value = tp.lnb_mode || "manual";
+  updateLnbMode();
   renderTpProfiles(tp.newcamd_profile || "default");
   $("tpForm").style.display = "";
   $("tpSave").textContent = "Guardar cambios";
@@ -258,6 +264,7 @@ function cancelTransponderEdit() {
   $("tpEditInfo").textContent =
     "Los canales sin excepción propia heredan el perfil del transpondedor.";
   $("tpForm").reset();
+  updateLnbMode();
 }
 $("tpCancel").addEventListener("click", cancelTransponderEdit);
 
@@ -268,6 +275,7 @@ async function addTransponder(e) {
     type: $("tp_type").value,
     freq_mhz: parseFloat($("tp_freq").value),
     lnb_lo: parseFloat($("tp_lnb").value),
+    lnb_mode: $("tp_lnb_mode").value,
     symbol_rate: parseInt($("tp_sr").value, 10) || 0,
     pol: $("tp_pol").value,
     adapter: parseInt($("tp_adapter").value, 10) || 0,

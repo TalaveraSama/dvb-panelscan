@@ -7,7 +7,14 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.11.0 · Editar transpondedores y softcam por TP
+## Actual: 0.12.0 · LNB universal automático
+
+Para LNB universal directo, en Editar transpondedor elegir **Universal automático
+9750/10600**. El escáner y el streaming seleccionan LO, 13/18 V para V/H y tono
+22 kHz según la banda. No se añaden comandos de switch DiSEqC. TP antiguos conservan
+modo manual hasta que se editen. Ver [instalación y límites](docs/LNB.md).
+
+### Editar transpondedores y softcam por TP (0.11.0)
 
 Editar en Dashboard permite corregir parámetros sin borrar el TP ni sus canales.
 Elegir un perfil Newcamd predeterminado por transpondedor; cada canal puede heredarlo

@@ -253,3 +253,16 @@ class ChannelSettingsTests(unittest.TestCase):
         tp=next(t for t in self.panel.STATE['transponders'] if t['id']==result['transponder']['id'])
         self.assertEqual(tp['newcamd_profile'],identity)
         self.assertEqual(self.call('/api/newcamd/profiles/'+identity+'/delete',{})[0],409)
+
+    def test_universal_lnb_flags_for_scanner_and_shared_capture(self):
+        self.assertEqual(self.call('/api/transponders/a/edit',{'lnb_mode':'universal','freq_mhz':12230,'symbol_rate':30000000})[0],200)
+        tp=self.panel.STATE['transponders'][0]
+        normalized=self.panel._norm_tp(tp)
+        self.assertIn('--lnb-universal',self.panel._scan_cmd('/bin/true',normalized))
+        with patch.object(self.panel,'find_tbsstream',return_value='/bin/true'),patch.object(self.panel._streams,'acquire') as acquire:
+            self.panel._session_start(tp,sid=672)
+            self.assertIn('--lnb-universal',acquire.call_args.kwargs['mux_command'])
+        self.panel._load()
+        self.assertEqual(self.panel.STATE['transponders'][0]['lnb_mode'],'universal')
+        self.assertEqual(self.panel._norm_tp(self.panel.STATE['transponders'][1])['lnb_mode'],'manual')
+        self.assertEqual(self.call('/api/transponders/a/edit',{'lnb_mode':'invalid'})[0],400)

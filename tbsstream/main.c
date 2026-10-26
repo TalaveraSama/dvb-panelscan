@@ -38,6 +38,7 @@
 #include <netdb.h>
 
 #include <linux/dvb/frontend.h>
+#include "../dvb_lnb.h"
 #include <linux/dvb/version.h>
 #include <linux/dvb/dmx.h>
 
@@ -111,6 +112,7 @@ typedef struct {
   int adapter, frontend;
   int delsys;
   int64_t freq_hz;     /* frecuencia de satélite; si lnb_lo_hz=0 es la FI */
+  int lnb_universal;
   int64_t lnb_lo_hz;
   uint32_t bandwidth_hz, symbol_rate;
   int mod, fec, fec_hp, fec_lp, tx_mode, guard, hier, rolloff;
@@ -166,9 +168,9 @@ static int frontend_tune(int fd, const opts_t *o)
   dtv(p, &n, DTV_DELIVERY_SYSTEM, (uint32_t)o->delsys);
   /* Conversión frecuencia de satélite -> FI con el LO del LNB (si aplica).
      El driver TBS (TBSECP3) espera la FI en kHz, no en Hz. */
-  int64_t if_hz = o->freq_hz;
-  if (o->lnb_lo_hz > 0 && o->freq_hz > o->lnb_lo_hz)
-    if_hz = o->freq_hz - o->lnb_lo_hz;
+  int satellite = o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2;
+  dvb_lnb_plan_t lnb = dvb_lnb_plan(o->freq_hz, o->lnb_lo_hz, o->pol, o->lnb_universal);
+  int64_t if_hz = satellite ? lnb.if_hz : o->freq_hz;
   dtv(p, &n, DTV_FREQUENCY, (uint32_t)(if_hz / 1000));
   dtv(p, &n, DTV_INVERSION, INVERSION_AUTO);
 
@@ -203,11 +205,12 @@ static int frontend_tune(int fd, const opts_t *o)
   }
   /* Polarización LNB por voltaje ANTES de sintonizar: alimenta el LNB y
      selecciona la polarización. Si se hace DESPUÉS, el tuner no engancha. */
-  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
-    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
-                         ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
-    ioctl(fd, FE_SET_VOLTAGE, v);
-    usleep(300000);   /* dejar estabilizar el LNB */
+  if (satellite) {
+    if (dvb_lnb_apply(fd, &lnb) < 0) return -1;
+    fprintf(stderr, "LNB %s: LO %lld MHz, FI %lld kHz, %s, 22 kHz %s\n",
+            o->lnb_universal ? "universal" : "manual", (long long)(lnb.lo_hz/1000000),
+            (long long)(lnb.if_hz/1000), lnb.voltage == SEC_VOLTAGE_13 ? "13 V" : "18 V",
+            lnb.tone == SEC_TONE_ON ? "ON" : "OFF");
   }
 
   dtv(p, &n, DTV_TUNE, 0);
@@ -973,7 +976,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER };
+         OPT_BASE, OPT_LNBUNIVERSAL, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -1000,6 +1003,7 @@ int main(int argc, char **argv)
     {"cam-socket", required_argument, 0, OPT_CAM_SOCKET},
     {"ca-broker", required_argument, 0, OPT_CA_BROKER},
     {"m3u8-base", required_argument, 0, OPT_BASE},
+    {"lnb-universal", no_argument, 0, OPT_LNBUNIVERSAL},
     {"lnb-lo", required_argument, 0, OPT_LNBLO},
     {"timeout", required_argument, 0, 'T'},
     {"verbose", no_argument, 0, 'v'},
@@ -1066,10 +1070,12 @@ int main(int argc, char **argv)
         break;
       case OPT_HTTP: opts.http_port = atoi(optarg); break;
       case OPT_BASE: strncpy(opts.m3u8_base, optarg, sizeof(opts.m3u8_base)-1); break;
+      case OPT_LNBUNIVERSAL: opts.lnb_universal = 1; break;
       case OPT_LNBLO: opts.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'T': timeout = atoi(optarg); break;
       case 'v': verbose = 1; break;
       case 'h':
+        fprintf(stderr, "LNB: --lnb-universal (9750/10600, 22 kHz auto) or --lnb-lo MHz (fixed LO, tone OFF)\n");
         fprintf(stderr, "Panel roles: --mux-only --stdout (DVB capture), "
                 "--stdin --sid N --stdout --cam-socket PATH (service), "
                 "--ca-broker PATH --newcamd HOST:PORT (shared CA)\n");

@@ -147,6 +147,7 @@ def _norm_tp(tp):
     return {
         "type": tp.get("type") if tp.get("type") in VALID_TYPES else "dvbs2",
         "freq_mhz": float(tp.get("freq_mhz") or 0),
+        "lnb_mode": tp.get("lnb_mode", "manual"),
         "lnb_lo": float(tp.get("lnb_lo") if tp.get("lnb_lo") is not None else 9750),
         "symbol_rate": int(tp.get("symbol_rate") or 0),
         "pol": str(tp.get("pol") or "V").upper()[:1],
@@ -162,6 +163,8 @@ def validate_transponder(body):
     if "timeout" in body and not 1 <= int(body["timeout"]) <= 600:
         raise ValueError("Tiempo inválido (1–600 segundos)")
     tp = _norm_tp(body)
+    if tp["lnb_mode"] not in ("manual", "universal"):
+        raise ValueError("Modo LNB inválido")
     if (body.get("type", "dvbs2") not in VALID_TYPES or not math.isfinite(tp["freq_mhz"])
             or not 0 < tp["freq_mhz"] <= 100000 or not math.isfinite(tp["lnb_lo"])
             or not 0 <= tp["lnb_lo"] <= 100000 or not 0 <= tp["adapter"] <= 255
@@ -189,6 +192,8 @@ def _scan_cmd(binary, tp):
            "--lnb-lo", str(tp["lnb_lo"]),
            "--pol", tp["pol"], "-a", str(tp["adapter"]),
            "-T", str(tp["timeout"]), "-v"]
+    if tp["lnb_mode"] == "universal" and tp["type"] in ("dvbs", "dvbs2"):
+        cmd.append("--lnb-universal")
     if tp["symbol_rate"]:
         cmd += ["--symbol-rate", str(tp["symbol_rate"])]
     return cmd
@@ -460,7 +465,7 @@ def epg_collector(tp):
             targets = [(candidate["id"], {int(s["sid"]) for s in (candidate.get("scan") or {}).get("services", [])})
                        for candidate in STATE["transponders"]
                        if all(_norm_tp(candidate)[key] == tuning[key] for key in
-                              ("adapter", "type", "freq_mhz", "symbol_rate", "pol", "lnb_lo"))]
+                              ("adapter", "type", "freq_mhz", "symbol_rate", "pol", "lnb_lo", "lnb_mode"))]
         for tid, services in targets:
             for event in events:
                 if event["sid"] in services:
@@ -495,6 +500,8 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     tuning = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
               "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
               "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"])]
+    if normalized["lnb_mode"] == "universal" and normalized["type"] in ("dvbs", "dvbs2"):
+        tuning.append("--lnb-universal")
     if normalized["symbol_rate"]:
         tuning += ["--symbol-rate", str(normalized["symbol_rate"])]
     capture = tuning + ["--mux-only", "--stdout", "--http-port", "0", "--verbose"]
@@ -513,7 +520,7 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     mux_log = os.path.join(DATA_DIR, "mux-%d.log" % normalized["adapter"])
     # Exclude the acquisition timeout: it does not change the RF tuning.
     mux_id = tuple(normalized[k] for k in
-                   ("type", "freq_mhz", "lnb_lo", "pol", "symbol_rate", "adapter"))
+                   ("type", "freq_mhz", "lnb_lo", "lnb_mode", "pol", "symbol_rate", "adapter"))
     return _streams.acquire(key, normalized["adapter"], cmd, log,
                             timeout=normalized["timeout"] + 20, pinned=pinned,
                             http_port=http_port, udp=udp, mux_id=mux_id,

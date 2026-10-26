@@ -149,8 +149,16 @@
               <input id="tp_freq" type="number" step="any" value="10970"
             /></label>
             <label
-              >LNB LO (MHz)
-              <input id="tp_lnb" type="number" step="any" value="9750"
+              >Modo LNB<select id="tp_lnb_mode">
+                <option value="universal" selected>
+                  Universal automático 9750/10600
+                </option>
+                <option value="manual">LO manual / fijo (22 kHz OFF)</option>
+              </select></label
+            >
+            <label
+              >LNB LO manual (MHz)
+              <input id="tp_lnb" type="number" step="any" value="9750" disabled
             /></label>
             <label
               >Symbol rate <input id="tp_sr" type="number" value="27900000"

@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <linux/dvb/frontend.h>
+#include "../dvb_lnb.h"
 #include <linux/dvb/version.h>
 #include <linux/dvb/dmx.h>
 
@@ -519,6 +520,7 @@ typedef struct {
   int adapter, frontend;
   int delsys;          /* SYS_DVBT / DVBT2 / DVBC_ANNEX_A / DVBS / DVBS2 */
   int64_t freq_hz;     /* frecuencia de satélite; si lnb_lo_hz=0 es la FI */
+  int lnb_universal;
   int64_t lnb_lo_hz;   /* LO del LNB (0 = sin conversión, freq ya es FI) */
   uint32_t bandwidth_hz;
   uint32_t symbol_rate;
@@ -547,9 +549,9 @@ static int frontend_tune(int fd, const opts_t *o)
   dtv(p, &n, DTV_DELIVERY_SYSTEM, (uint32_t)o->delsys);
   /* Conversión frecuencia de satélite -> FI con el LO del LNB (si aplica).
      El driver TBS (TBSECP3) espera la FI en kHz, no en Hz. */
-  int64_t if_hz = o->freq_hz;
-  if (o->lnb_lo_hz > 0 && o->freq_hz > o->lnb_lo_hz)
-    if_hz = o->freq_hz - o->lnb_lo_hz;
+  int satellite = o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2;
+  dvb_lnb_plan_t lnb = dvb_lnb_plan(o->freq_hz, o->lnb_lo_hz, o->pol, o->lnb_universal);
+  int64_t if_hz = satellite ? lnb.if_hz : o->freq_hz;
   dtv(p, &n, DTV_FREQUENCY, (uint32_t)(if_hz / 1000));
   dtv(p, &n, DTV_INVERSION, INVERSION_AUTO);
 
@@ -587,11 +589,12 @@ static int frontend_tune(int fd, const opts_t *o)
 
   /* Polarización LNB por voltaje ANTES de sintonizar: alimenta el LNB y
      selecciona la polarización. Si se hace DESPUÉS, el tuner no engancha. */
-  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
-    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
-                       ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
-    ioctl(fd, FE_SET_VOLTAGE, v);
-    usleep(300000);   /* dejar estabilizar el LNB */
+  if (satellite) {
+    if (dvb_lnb_apply(fd, &lnb) < 0) return -1;
+    fprintf(stderr, "LNB %s: LO %lld MHz, FI %lld kHz, %s, 22 kHz %s\n",
+            o->lnb_universal ? "universal" : "manual", (long long)(lnb.lo_hz/1000000),
+            (long long)(lnb.if_hz/1000), lnb.voltage == SEC_VOLTAGE_13 ? "13 V" : "18 V",
+            lnb.tone == SEC_TONE_ON ? "ON" : "OFF");
   }
 
   dtv(p, &n, DTV_TUNE, 0);
@@ -729,6 +732,7 @@ static void usage(const char *argv0)
     "  -t, --type T         dvbt | dvbt2 | dvbc | dvbs | dvbs2 (def dvbt)\n"
     "      --freq Hz        frecuencia de satélite (o FI si --lnb-lo 0)\n"
     "      --freq-mhz MHz   frecuencia de satélite en MHz\n"
+    "      --lnb-universal   LNB universal 9750/10600, 22 kHz automático\n"
     "      --lnb-lo MHz     LO del LNB (def 9750; 0 = la freq ya es FI)\n"
     "\n"
     "  DVB-T/T2:\n"
@@ -784,7 +788,7 @@ int main(int argc, char **argv)
   double freq_mhz = 0;
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP,
-         OPT_FEC_LP, OPT_POL, OPT_NOEPG, OPT_BASEURL, OPT_JSON, OPT_LNBLO };
+         OPT_FEC_LP, OPT_POL, OPT_NOEPG, OPT_BASEURL, OPT_JSON, OPT_LNBUNIVERSAL, OPT_LNBLO };
 
   static const struct option longopts[] = {
     {"adapter",    required_argument, 0, 'a'},
@@ -803,6 +807,7 @@ int main(int argc, char **argv)
     {"output",     required_argument, 0, 'o'},
     {"base-url",   required_argument, 0, OPT_BASEURL},
     {"json",       no_argument,       0, OPT_JSON},
+    {"lnb-universal", no_argument, 0, OPT_LNBUNIVERSAL},
     {"lnb-lo",     required_argument, 0, OPT_LNBLO},
     {"verbose",    no_argument,       0, 'v'},
     {"help",       no_argument,       0, 'h'},
@@ -828,6 +833,7 @@ int main(int argc, char **argv)
       case 'o': o.outfile = optarg; break;
       case OPT_BASEURL: o.base_url = optarg; break;
       case OPT_JSON: o.with_json = 1; break;
+      case OPT_LNBUNIVERSAL: o.lnb_universal = 1; break;
       case OPT_LNBLO: o.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'v': verbose = 1; break;
       case 'h': usage(argv[0]); return 0;

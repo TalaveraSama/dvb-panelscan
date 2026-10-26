@@ -1,3 +1,25 @@
+## DVB PanelScan 0.12.0 · LNB universal automático, V/H y banda alta
+
+- Selector Modo LNB: Universal automático 9750/10600 o LO manual/fijo.
+- Universal: por debajo de 11700 MHz usa LO 9750 y 22 kHz OFF; desde 11700 MHz,
+  LO 10600 y 22 kHz ON. V/L aplica 13 V y H/R 18 V como en versiones anteriores.
+- Misma lógica compartida en escáner y captura de mux. Primero apaga tono, cambia
+  voltaje, espera estabilización y aplica tono de banda antes de sintonizar.
+- Errores de control de tono/voltaje se comunican explícitamente; no se ignoran.
+- Los TP existentes sin modo siguen manuales, sin cambiar LO silenciosamente.
+  Al editar seleccionar Universal automático para las instalaciones universales.
+  El formulario de nuevos TP lo ofrece por defecto. Manual selecciona tono OFF.
+- Modo incluido en validación, persistencia, comparación de sintonía y alias EPG.
+  No permite cambiarlo con el adaptador ocupado. No añade comandos DiSEqC.
+- 74 pruebas Python/HTTP, DOM y prueba C con ioctl simulado para ambas bandas,
+  umbral 11700, V/H, LO fijo, orden y errores. CI compila los dos motores y valida
+  paquete/instalación. La prueba de lock en la instalación TBS real queda pendiente.
+
+Ejemplos universales: 12230 V → LO 10600, FI 1630 MHz, 13 V, 22 kHz ON;
+11174 H → LO 9750, FI 1424 MHz, 18 V, 22 kHz OFF. Ver docs/LNB.md.
+
+---
+
 ## DVB PanelScan 0.11.0 · Editar transpondedores y perfil softcam por TP
 
 - Botón Editar junto a Escanear/Borrar. Reutiliza el formulario con Guardar cambios

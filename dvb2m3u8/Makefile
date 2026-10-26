@@ -5,7 +5,7 @@ LDFLAGS ?=
 TARGET  := dvb2m3u8
 SRC     := dvb2m3u8.c
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) ../dvb_lnb.h
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
 
 clean:
