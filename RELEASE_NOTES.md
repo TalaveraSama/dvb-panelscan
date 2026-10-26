@@ -1,3 +1,33 @@
+## DVB PanelScan 0.18.0 · Descifrado temporizado y salida independiente
+
+- Editar canal: retardo de descifrado entero 0–2000 ms, 500 ms por defecto;
+  persistido por TP:SID. Guardar requiere reabrir solo ese canal.
+- ECM no espera al retardo de vídeo. Los paquetes, incluidas PAT/PMT regeneradas,
+  conservan orden y pasan por el mismo límite temporal, sin adelantos de PSI.
+- Un hilo de salida independiente regula la entrega según PCR del servicio,
+  con espaciado de llegada de respaldo. Contempla wrap, PCR repetido, falta de
+  PCR, discontinuidades y pausas. No reescribe PCR/PTS/DTS ni genera CBR.
+- Margen inicial de salida 100 ms; agrupa hasta siete paquetes en 1 ms.
+  Tras un retraso reasienta reloj en lugar de recuperar todo mediante una ráfaga.
+- Edad máxima en colas: retardo + 2000 ms; hasta 65536 paquetes por cola.
+  Descartes explícitos en lugar de memoria/latencia ilimitadas. Salida lenta
+  no bloquea captura: stdout no bloqueante con plazo, UDP no bloqueante.
+- Eventos en vivo: cw_timeout_drops, output_pending, output_drops, output_late,
+  pcr_resets, pes_errors (prefijo PES, no códec completo), udp_output_drops.
+  Sin archivos ni historial de eventos.
+- Pruebas de reloj PCR/PCR repetido/wrap/fallback/recuperación, CSA con claves
+  tempranas y tardías, retardo, caducidad, orden PSI, salida asíncrona, colas,
+  API/UI y persistencia. Sanitizadores y paquete/instalación ejecutados en CI.
+- Conserva usuarios, perfiles, permisos, transpondedores, EPG y configuración.
+
+Añade latencia al directo. No repara pérdida RF/red, claves incorrectas o CW fuera
+de período. Mantiene los límites del guard de claves repetidas y de asociación
+ECM/CW. No es una copia del motor comercial Astra. La mejora en la señal del
+usuario sigue pendiente de prueba: comparar SD/HD directo y luego por Flussonic.
+Instalar con el servicio detenido; la actualización interrumpe reproducciones.
+
+---
+
 ## DVB PanelScan 0.17.0 · Selección ECM estable y CAID/PID fijo
 
 - Editar canal permite fijar CAID (hex de 4 dígitos) + ECM PID (decimal), o dejar

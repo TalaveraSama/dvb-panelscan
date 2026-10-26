@@ -413,6 +413,46 @@ static void test_input_error_counters(void)
   assert(input_tei == 1 && ring_seq == previous);
 }
 
+static void test_delayed_cw_and_descramble_margin(void)
+{
+  uint8_t cw[8] = {1,2,3,6,4,5,6,15};
+  uint8_t plain[TS_PKT], encrypted[TS_PKT];
+  memset(plain, 0x55, sizeof(plain));
+  plain[0] = 0x47; plain[1] = 1; plain[2] = 0; plain[3] = 0x10;
+  memcpy(encrypted, plain, sizeof(plain));
+  struct dvbcsa_key_s *key = dvbcsa_key_alloc();
+  assert(key);
+  dvbcsa_key_set(cw, key); dvbcsa_encrypt(key, encrypted + 4, 184);
+  encrypted[3] |= 0x80;
+  csae = csa_create(); assert(csae);
+  scram_count = scram_head = 0;
+  have_cw_even = have_cw_odd = 0;
+  memset(cw_revision, 0, sizeof(cw_revision));
+  memset(cw_used, 0, sizeof(cw_used));
+  output_parity = -1;
+  opts.descramble_delay_ms = 500;
+  uint64_t before = ring_seq;
+  buffer_service_packet(encrypted);
+  install_cw(0, cw);
+  flush_scrambled();
+  assert(ring_seq == before && scram_count == 1); /* key early, still wait margin */
+  scram_at[scram_head] -= 501000;
+  flush_scrambled();
+  assert(ring_seq == before + 1 && !scram_count);
+  assert(!memcmp(ring + (before % RING_PKTS)*TS_PKT, plain, TS_PKT));
+  have_cw_even = 0;
+  buffer_service_packet(encrypted);
+  scram_at[scram_head] -= 501000;
+  flush_scrambled();
+  assert(ring_seq == before + 1 && scram_count == 1);
+  install_cw(0, cw); /* late but within age bound */
+  flush_scrambled();
+  assert(ring_seq == before + 2 && !scram_count);
+  assert(!memcmp(ring + ((before+1) % RING_PKTS)*TS_PKT, plain, TS_PKT));
+  opts.descramble_delay_ms = 0;
+  csa_free(csae); csae = NULL; dvbcsa_key_free(key);
+}
+
 static void test_timed_descramble_and_expiry(void)
 {
   uint8_t p[TS_PKT] = {0x47, 1, 0, 0x10};
@@ -499,6 +539,7 @@ int main(void)
   test_psi_continuity_and_pointer();
   test_false_sync_headers();
   test_input_error_counters();
+  test_delayed_cw_and_descramble_margin();
   test_timed_descramble_and_expiry();
   test_bounded_output_queue();
   test_output_worker_order_and_expiry();

@@ -7,11 +7,14 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.17.0 · Selección ECM estable por canal
+## Actual: 0.18.0 · Retardo de descifrado y entrega regulada
 
-CAID/PID ECM fijo opcional en Editar canal, recuperación del CA automático y
-supresión acotada de ECM repetidos. Protección de claves por paridad, claves asociadas a paquetes en cola y
-alternativas CAID/PID ECM anunciadas en PMT. [Guía de diagnóstico](docs/TS_DESCRAMBLING.md).
+Retardo por canal de 0–2000 ms (500 ms por defecto) y salida en un hilo
+independiente, regulada por PCR con reloj de llegada como respaldo. Colas y edad
+acotadas; recuperación sin vaciar todo el retraso de golpe. No modifica PCR/PTS/DTS
+ni repara paquetes perdidos o claves incorrectas. Mantiene CAID/PID fijo y las
+protecciones anteriores. [Uso, límites y diagnóstico](docs/TS_DESCRAMBLING.md).
+Sin validación todavía con la señal real del usuario.
 
 Secciones dedicadas **Usuarios IPTV** y **Flussonic** en el menú lateral.
 Cuentas IPTV independientes con contraseña, canales permitidos, vencimiento y
@@ -336,6 +339,9 @@ eliminar tirones por cambio de claves, señal o red. La revisión histórica de
 
 ## Versión 0.5.1 · Cambio de canal y diagnóstico de tirones
 
+Sección histórica: las versiones actuales permiten múltiples servicios por mux;
+los eventos son solo en vivo y no se escriben archivos de registro.
+
 Si solo abre el SID iniciado manualmente, revisar **Streaming**: una sesión
 manual fija reserva el adaptador. **Detener este canal** la libera sin detener
 las de otros tuners. Se mantiene un SID por adaptador, varios clientes del
@@ -348,11 +354,9 @@ las restricciones de generaciones de clave: no equivale al motor completo de
 Tvheadend. Se deduplican ECM iguales pendientes y se solicita más buffer al
 kernel cuando el driver lo admite.
 
-Para diagnosticar, reproducir 30 segundos y revisar **Ver registro** o:
-
-```sh
-grep -E 'TS stats|ECM:|ECM sin|queue full|newcamd:' /var/lib/dvb-panelscan/stream-0-672.log | tail -n 30
-```
+Para diagnosticar en la versión actual, abrir **Eventos en vivo** mientras se
+reproduce el canal. Comparar muestras de la misma sesión; no hay archivo de
+registro ni historial de eventos. Ver [guía actual](docs/TS_DESCRAMBLING.md).
 
 - `tei`/`cc_errors`: indicadores acumulados del TS de entrada completo. No
   distinguen por sí solos señal del driver o del lector, y CC repetidos no

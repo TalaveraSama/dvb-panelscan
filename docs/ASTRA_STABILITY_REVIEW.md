@@ -6,7 +6,8 @@ Revisión de documentación pública de Cesbo y del código local, realizada des
 del reporte de tirones persistentes con las correcciones TS/ECM. No se accedió al
 VPS ni se verificó la configuración desplegada. No se dispone del código privado
 actual de Astra y no se afirma equivalencia con su implementación interna.
-Esta investigación no publica una nueva versión ni modifica el motor.
+Esta sección recoge la investigación inicial sobre 0.17.0; el trabajo posterior
+aprobado para 0.18.0 se enlaza al final.
 
 ## Fuentes primarias
 
@@ -30,7 +31,7 @@ Esta investigación no publica una nueva versión ni modifica el motor.
 6. Analyzer: https://astra.cesbo.com/en/tools/mpeg-ts-analyzer/
    Permite analizar una entrada HTTP con duración limitada, sin guardar la señal.
 
-## Diferencias verificadas en DVB Panel
+## Diferencias verificadas en DVB Panel 0.17.0 (antes del cambio)
 
 - `flush_scrambled()` en `tbsstream/main.c` conserva orden y limita la memoria,
   pero vacía todos los paquetes disponibles en cuanto puede hacerlo. No planifica
