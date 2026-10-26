@@ -17,6 +17,8 @@
         <a href="#" data-tab="epg">▤ &nbsp; Canales y EPG</a>
         <a href="#" data-tab="newcamd">◇ &nbsp; Acceso condicional</a>
         <a href="#" data-tab="m3u8">▷ &nbsp; Streaming</a>
+        <a href="#" data-tab="users">♙ &nbsp; Usuarios IPTV</a>
+        <a href="#" data-tab="flussonic">⇄ &nbsp; Flussonic</a>
         <a href="#" data-tab="events">≋ &nbsp; Eventos en vivo</a>
       </nav>
       <div class="sidebar-session">
@@ -456,6 +458,142 @@
           <div class="adapters" id="stInfo" aria-live="polite"></div>
         </section>
       </section>
+      <section id="tab-users" class="hidden">
+        <section class="card">
+          <div class="card-head">
+            <h2>Usuarios IPTV</h2>
+            <button id="iptvRefresh" class="btn" type="button">
+              Actualizar usuarios
+            </button>
+          </div>
+          <p>
+            Cuentas de reproducción independientes del administrador y de
+            Newcamd.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Usuario</th>
+                  <th>Estado</th>
+                  <th>Vencimiento</th>
+                  <th>Canales autorizados</th>
+                  <th>Acción</th>
+                </tr>
+              </thead>
+              <tbody id="iptvUserRows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="card" id="iptvWorkspace">
+          <h3>Administrar usuarios IPTV</h3>
+          <p>
+            Estas cuentas no administran el panel. Selecciona los canales
+            permitidos. Guardar revoca los enlaces anteriores de ese usuario.
+            Usa HTTPS o VPN.
+          </p>
+          <label
+            >Usuario existente<select id="iptvUsers">
+              <option value="">Nuevo usuario</option>
+            </select></label
+          >
+          <label
+            >Usuario<input id="iptvUsername" maxlength="64" autocomplete="off"
+          /></label>
+          <label
+            >Contraseña (12 caracteres mínimo; vacío conserva la actual)<input
+              id="iptvPassword"
+              type="password"
+              autocomplete="new-password"
+          /></label>
+          <label class="iptv-enabled"
+            ><input id="iptvEnabled" type="checkbox" checked />
+            Habilitado</label
+          >
+          <label
+            >Vencimiento (vacío = sin vencimiento)<input
+              id="iptvExpires"
+              type="datetime-local"
+          /></label>
+          <h4>Canales autorizados</h4>
+          <p class="muted">
+            Marca cada canal o selecciona todos los habilitados. No necesitan
+            estar activos para aparecer en la lista.
+          </p>
+          <button id="iptvSelectAll" class="btn" type="button">
+            Seleccionar todos los habilitados
+          </button>
+          <button id="iptvSelectNone" class="btn" type="button">
+            Quitar selección
+          </button>
+          <p id="iptvSelectedCount" role="status"></p>
+          <div
+            id="iptvChannels"
+            class="iptv-channel-list"
+            aria-label="Canales autorizados"
+          ></div>
+          <button id="iptvSave" class="btn primary" type="button">
+            Guardar usuario y generar enlaces
+          </button>
+          <label
+            >Lista M3U del usuario<input id="iptvPlaylist" readonly
+          /></label>
+          <a id="iptvDownload" class="btn hidden" download="canales.m3u8"
+            >Descargar M3U del usuario</a
+          >
+          <label
+            >Token para clientes de Flussonic<input id="iptvToken" readonly
+          /></label>
+          <p id="iptvInfo" role="status"></p>
+        </section>
+      </section>
+      <section id="tab-flussonic" class="hidden">
+        <section class="card integration-card">
+          <div class="eyebrow">DISTRIBUCIÓN Y AUTORIZACIÓN</div>
+          <h2>Flussonic</h2>
+          <p>
+            Dos conexiones independientes: Flussonic recibe las señales del
+            panel y consulta al panel para autorizar espectadores.
+          </p>
+          <h3>1. Entrada de señales desde DVB Panel</h3>
+          <p>
+            Crea una cuenta técnica en Usuarios IPTV y descarga su M3U. Usa cada
+            URL MPEG-TS como entrada HTTP en Flussonic. No uses una cuenta de
+            cliente como fuente compartida.
+          </p>
+          <button id="flussonicUsers" class="btn" type="button">
+            Ir a Usuarios IPTV
+          </button>
+          <h3>2. Autorizar clientes desde el panel</h3>
+          <label
+            >Backend de autorización Flussonic (privado)<input
+              id="iptvBackend"
+              readonly
+          /></label>
+          <p class="callout">
+            Configura esta URL privada como on_play. No la entregues a clientes.
+            Usa HTTPS/VPN y restringe el acceso desde el servidor Flussonic.
+          </p>
+          <label
+            >Canal de referencia<select id="flussonicChannel"></select
+          ></label>
+          <label
+            >Nombre seguro del stream en Flussonic<input
+              id="flussonicStreamName"
+              readonly
+          /></label>
+          <p>
+            Usa este nombre exacto para que la autorización corresponda al canal
+            seleccionado. El token del espectador se genera en Usuarios IPTV.
+          </p>
+          <p>
+            Respuesta del backend: 200 permite, 403 deniega; solicita
+            revalidación cada 30 segundos. Sin límite de conexiones ni API
+            Xtream Codes.
+          </p>
+          <p id="flussonicInfo" role="status"></p>
+        </section>
+      </section>
     </main>
 
     <footer class="footer" id="footer">—</footer>
@@ -530,68 +668,6 @@
         </p>
       </div>
       <p id="securityInfo" role="status"></p>
-      <hr />
-      <h3>Usuarios IPTV / Flussonic</h3>
-      <p>
-        Estas cuentas no administran el panel. Selecciona los canales
-        permitidos. Guardar revoca los enlaces anteriores de ese usuario. Usa
-        HTTPS o VPN.
-      </p>
-      <label
-        >Usuario existente<select id="iptvUsers">
-          <option value="">Nuevo usuario</option>
-        </select></label
-      >
-      <label
-        >Usuario<input id="iptvUsername" maxlength="64" autocomplete="off"
-      /></label>
-      <label
-        >Contraseña (12 caracteres mínimo; vacío conserva la actual)<input
-          id="iptvPassword"
-          type="password"
-          autocomplete="new-password"
-      /></label>
-      <label class="iptv-enabled"
-        ><input id="iptvEnabled" type="checkbox" checked /> Habilitado</label
-      >
-      <label
-        >Vencimiento (vacío = sin vencimiento)<input
-          id="iptvExpires"
-          type="datetime-local"
-      /></label>
-      <h4>Canales autorizados</h4>
-      <p class="muted">
-        Marca cada canal o selecciona todos los habilitados. No necesitan estar
-        activos para aparecer en la lista.
-      </p>
-      <button id="iptvSelectAll" class="btn" type="button">
-        Seleccionar todos los habilitados
-      </button>
-      <button id="iptvSelectNone" class="btn" type="button">
-        Quitar selección
-      </button>
-      <p id="iptvSelectedCount" role="status"></p>
-      <div
-        id="iptvChannels"
-        class="iptv-channel-list"
-        aria-label="Canales autorizados"
-      ></div>
-      <button id="iptvSave" class="btn primary" type="button">
-        Guardar usuario y generar enlaces
-      </button>
-      <label
-        >Backend de autorización Flussonic (privado)<input
-          id="iptvBackend"
-          readonly
-      /></label>
-      <label>Lista M3U del usuario<input id="iptvPlaylist" readonly /></label>
-      <a id="iptvDownload" class="btn hidden" download="canales.m3u8"
-        >Descargar M3U del usuario</a
-      >
-      <label
-        >Token para clientes de Flussonic<input id="iptvToken" readonly
-      /></label>
-      <p id="iptvInfo" role="status"></p>
     </dialog>
     <dialog id="astraImportDialog">
       <div class="card-head">

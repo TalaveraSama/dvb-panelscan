@@ -6,6 +6,7 @@ const dom = new JSDOM(fs.readFileSync('panel/static/index.html', 'utf8'), {
   url: 'http://panel.test/', runScripts: 'outside-only',
 });
 const w = dom.window;
+w.TextEncoder = require('node:util').TextEncoder;
 const sources = [];
 let hidden = false;
 Object.defineProperty(w.document, 'hidden', {get:()=>hidden});
@@ -26,18 +27,20 @@ const tp = {id:'tp', name:'Mux A', adapter:0, freq_mhz:10970, pol:'V', type:'dvb
 let health = {state:'ok', label:'ECM/CW continuas', latency_ms:185, successes_15s:3, window_seconds:15, last_result:0};
 let offline = false;
 const requests = [];
+let savedIptvUsers = [];
 w.fetch = async (url, options={}) => {
   if (offline && url === '/api/stream/status') throw Error('offline');
   let value;
   if (options.method === 'POST') {
     assert.equal(options.headers['X-CSRF-Token'],'test-csrf');
     const body = JSON.parse(options.body); requests.push([url,body]);
+    if (url === '/api/iptv/users') savedIptvUsers=[{username:body.username,channels:body.channels,enabled:body.enabled,expires:body.expires}];
     if (url === '/api/transponders/tp/edit') Object.assign(tp,body);
     if (url === '/api/channels/tp%3A672/edit') Object.assign(service,body);
     value = {ok:true,id:body.id || 'new-profile',token:url === '/api/iptv/users' ? 'iptv-test-token' : url === '/api/auth/media-token' ? 'test-media-token' : undefined};
     if (url.startsWith('/api/import/astra/')) value = {ok:true,preview_token:'preview-token',backup:'astra-backup.json',transponders:[{action:'crear',name:'Astra TP',adapter:8,frequency:12230,pol:'V'}],channels:1,profiles_created:0,profiles_updated:0,profile_bindings:[{astra_cam:'cam',name:'HD'}],warnings:['Preview warning']};
   } else if (url === '/api/auth/session') value = {username:'admin',csrf:'test-csrf'};
-  else if (url === '/api/iptv/users') value = {users:[],backend_url:'http://panel.test/iptv/flussonic/private-key'};
+  else if (url === '/api/iptv/users') value = {users:savedIptvUsers,backend_url:'http://panel.test/iptv/flussonic/private-key'};
   else if (url === '/api/status') value = {platform:'Linux',adapters:[]};
   else if (url === '/api/transponders') value = [tp];
   else if (url === '/api/epg/settings') value = {days:1};
@@ -177,7 +180,11 @@ const tick = () => new Promise(resolve=>setTimeout(resolve,10));
   assert(w.document.getElementById('astraPreviewText').textContent.includes('Aplicado'));
   w.document.getElementById('astraImportClose').click();
   tp.scan.services.push({sid:673,name:'Second channel'}, {sid:674,name:'Disabled channel',enabled:false});
-  w.document.getElementById('securityOpen').click(); await tick();
+  w.document.querySelector('[data-tab="users"]').click(); await tick();
+  assert(!w.document.getElementById('tab-users').classList.contains('hidden'));
+  assert.equal(w.document.getElementById('pageTitle').textContent,'Usuarios IPTV');
+  assert(!w.document.getElementById('securityDialog').contains(w.document.getElementById('iptvUsername')));
+  assert(w.document.getElementById('tab-users').contains(w.document.getElementById('iptvUsername')));
   w.document.getElementById('iptvUsername').value='viewer';
   w.document.getElementById('iptvPassword').value='viewer-password';
   const style=w.document.createElement('style');
@@ -203,8 +210,24 @@ const tick = () => new Promise(resolve=>setTimeout(resolve,10));
   w.document.getElementById('iptvSave').click(); await tick();
   const allChannelsRequest=requests.filter(([url])=>url==='/api/iptv/users').at(-1)[1];
   assert.deepEqual(allChannelsRequest.channels,['tp:672','tp:673']);
+  assert(w.document.getElementById('iptvUserRows').textContent.includes('viewer'));
+  w.document.querySelector('[data-edit-iptv="viewer"]').click();
+  assert.equal(w.document.getElementById('iptvUsername').value,'viewer');
+  assert.equal(w.document.querySelectorAll('[data-iptv-channel]:checked').length,2);
+  assert.equal(w.document.getElementById('iptvToken').value,'');
+  w.document.getElementById('iptvSave').click(); await tick();
   assert.equal(w.document.getElementById('iptvPassword').value,'');
   assert(w.document.getElementById('iptvPlaylist').value.includes('iptv-test-token'));
+  w.document.querySelector('[data-tab="flussonic"]').click(); await tick();
+  assert(w.document.getElementById('tab-users').classList.contains('hidden'));
+  assert(!w.document.getElementById('tab-flussonic').classList.contains('hidden'));
+  assert.equal(w.document.getElementById('iptvToken').value,'');
+  assert.equal(w.document.getElementById('iptvPlaylist').value,'');
+  assert(w.document.getElementById('iptvBackend').value.includes('/iptv/flussonic/'));
+  assert.equal(w.document.getElementById('flussonicStreamName').value,'dvb_' + Buffer.from('tp:672').toString('hex'));
+  w.document.getElementById('flussonicUsers').click(); await tick();
+  assert(!w.document.getElementById('tab-users').classList.contains('hidden'));
+  assert.equal(w.document.getElementById('iptvBackend').value,'');
   const loginDom = new JSDOM(fs.readFileSync('panel/static/login.html','utf8'),{runScripts:'outside-only',url:'http://panel.test/login'});
   const loginWindow = loginDom.window;
   loginWindow.fetch = async (url,options) => {

@@ -1,8 +1,8 @@
-# Usuarios IPTV y Flussonic (0.14.0)
+# Usuarios IPTV y Flussonic (0.15.0)
 
 ## Cuentas independientes
 
-En **Control de acceso → Reproducción privada → Usuarios IPTV / Flussonic**:
+En **menú lateral → Usuarios IPTV**:
 
 1. Introduce usuario, contraseña de 12–256 caracteres y marca las casillas de
    canales autorizados. En 0.14.1 puedes seleccionar todos los habilitados o
@@ -53,7 +53,8 @@ Flussonic: `name`, `token`, 200 para permitir y 403 para denegar;
 `new_session` como a `update_session`. Otros parámetros de sesión se toleran,
 pero no se usan para imponer un límite de conexiones.
 
-Copia **Backend de autorización Flussonic (privado)** desde el panel.
+Abre **menú lateral → Flussonic** y copia **Backend de autorización Flussonic (privado)**.
+El selector de canal muestra el nombre seguro exacto que debes usar en Flussonic.
 La ruta contiene una clave independiente que solo debe conocer Flussonic.
 No entregues esta URL a los clientes. Restringe además su acceso en el firewall
 al servidor Flussonic y utiliza HTTPS/VPN.
@@ -125,3 +126,17 @@ En versiones anteriores el selector múltiple requería Ctrl/Cmd o Shift; la 0.1
 usa casillas. Si copias el contenido desde un chat puede aparecer como
 `[URL](URL)` o `&amp;`; eso no es una línea válida de M3U. Descarga el archivo
 directamente desde el panel; debe contener URLs de texto con `&token=` literal.
+
+## Espacios del menú lateral (0.15.0)
+
+- **Usuarios IPTV**: tabla de cuentas con estado y cantidad de canales, botón
+  Editar, formulario de cuentas y generación/descarga de enlaces personales.
+- **Flussonic**: backend privado, instrucciones de recepción/autorización,
+  selección de canal y cálculo de nombre `dvb_...`. Configura Flussonic en su
+  propio servidor: no se afirma conectividad ni se realiza despliegue remoto.
+- **Seguridad y reproductores**: sigue gestionando el token global anterior.
+
+Mover la interfaz no requiere recrear cuentas ni regenerar tokens. Al salir de
+Usuarios IPTV se limpian los enlaces y la contraseña mostrados, no los permisos
+guardados ni la validez de los tokens. Al salir de Flussonic se oculta la clave
+privada del backend. Guardar una cuenta sí revoca sus enlaces como antes.

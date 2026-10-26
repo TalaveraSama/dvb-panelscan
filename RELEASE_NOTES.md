@@ -1,3 +1,17 @@
+## DVB PanelScan 0.15.0 · Espacios Usuarios IPTV y Flussonic
+
+- Menú lateral con Usuarios IPTV: tabla de cuentas/estado/vencimiento/permisos,
+  acceso Editar y formulario dedicado con casillas y descarga M3U.
+- Menú lateral con Flussonic: backend privado on_play, explicación de ambos roles,
+  selector de canal y nombre seguro de stream calculado desde la identidad real.
+- Seguridad y reproductores conserva solamente los enlaces privados globales.
+- Navegación limpia contraseñas/tokens al salir; no modifica cuentas, permisos,
+  backend ni tokens existentes. No administra remotamente Flussonic.
+- Pruebas DOM de navegación, edición, estilos, generación de nombre y limpieza;
+  conserva pruebas HTTP de autorización y compatibilidad del protocolo.
+
+---
+
 ## DVB PanelScan 0.14.2 · Diseño de usuarios IPTV
 
 - Corrige conflicto CSS: casillas IPTV/Habilitado de ancho fijo, no 100%.

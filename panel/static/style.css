@@ -632,7 +632,8 @@ select:focus-visible {
 #securityDialog {
   width: min(680px, 94vw);
 }
-#securityDialog input:not([type="checkbox"]) {
+:is(#securityDialog, #iptvWorkspace, #tab-flussonic)
+  input:not([type="checkbox"]) {
   width: 100%;
   font-family: monospace;
 }
@@ -1068,18 +1069,19 @@ select:focus-visible {
   box-sizing: border-box;
   overflow-x: hidden;
 }
-#securityDialog > label {
+:is(#securityDialog, #iptvWorkspace, #tab-flussonic .integration-card) > label {
   display: flex;
   flex-direction: column;
   gap: 8px;
   margin: 14px 0;
   min-width: 0;
 }
-#securityDialog > label.iptv-enabled {
+:is(#securityDialog, #iptvWorkspace, #tab-flussonic .integration-card)
+  > label.iptv-enabled {
   flex-direction: row;
   align-items: center;
 }
-#securityDialog input[type="checkbox"] {
+:is(#securityDialog, #iptvWorkspace) input[type="checkbox"] {
   width: 18px;
   height: 18px;
   min-width: 18px;
@@ -1087,13 +1089,13 @@ select:focus-visible {
   margin: 0;
   flex: 0 0 18px;
 }
-#securityDialog .iptv-channel-list {
+#iptvWorkspace .iptv-channel-list {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
   overflow-x: hidden;
 }
-#securityDialog .iptv-channel-list label {
+#iptvWorkspace .iptv-channel-list label {
   display: flex;
   flex-direction: row;
   align-items: flex-start;
@@ -1101,13 +1103,13 @@ select:focus-visible {
   min-width: 0;
   margin: 0;
 }
-#securityDialog .iptv-channel-list .iptv-channel-name {
+#iptvWorkspace .iptv-channel-list .iptv-channel-name {
   min-width: 0;
   flex: 1 1 0;
   overflow-wrap: anywhere;
   line-height: 1.4;
 }
-#securityDialog .iptv-channel-list input[type="checkbox"] {
+#iptvWorkspace .iptv-channel-list input[type="checkbox"] {
   margin-top: 2px;
 }
 #iptvSave {
@@ -1126,4 +1128,20 @@ select:focus-visible {
   display: inline-block;
   max-width: 100%;
   white-space: normal;
+}
+
+#iptvWorkspace,
+.integration-card {
+  min-width: 0;
+  overflow-x: hidden;
+}
+#iptvWorkspace input:not([type="checkbox"]),
+#iptvWorkspace select,
+.integration-card input,
+.integration-card select {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+#tab-users .card + .card {
+  margin-top: 20px;
 }

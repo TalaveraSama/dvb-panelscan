@@ -48,7 +48,16 @@ function tpInfo(t) {
 /* ------------------------------ Tabs ------------------------------ */
 let activeTab = "dashboard";
 function switchTab(tab) {
+  if (activeTab !== tab) {
+    if (activeTab === "users") {
+      clearIptvLinks();
+      $("iptvPassword").value = "";
+    }
+    if (activeTab === "flussonic") $("iptvBackend").value = "";
+  }
   activeTab = tab;
+  if (tab === "users") openIptvUsers().catch(showError);
+  if (tab === "flussonic") loadFlussonic().catch(showError);
   if (tab === "epg") loadEpg().catch(showError);
   if (tab === "events" && !document.hidden) startEvents();
   else stopEvents();
@@ -58,11 +67,21 @@ function switchTab(tab) {
     newcamd: "Acceso condicional",
     m3u8: "Distribución de señal",
     events: "Eventos en vivo · sin historial",
+    users: "Usuarios IPTV",
+    flussonic: "Integración Flussonic",
   }[tab];
   document
     .querySelectorAll("#menu a")
     .forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
-  ["dashboard", "epg", "newcamd", "m3u8", "events"].forEach((t) => {
+  [
+    "dashboard",
+    "epg",
+    "newcamd",
+    "m3u8",
+    "events",
+    "users",
+    "flussonic",
+  ].forEach((t) => {
     $("tab-" + t).classList.toggle("hidden", t !== tab);
   });
 }
@@ -1201,7 +1220,14 @@ async function loadIptvUsers() {
     getJSON("/api/transponders"),
   ]);
   iptvUsers = result.users;
-  $("iptvBackend").value = result.backend_url;
+  $("iptvUserRows").innerHTML = iptvUsers.length
+    ? iptvUsers
+        .map((user) => {
+          const expired = user.expires && user.expires <= Date.now() / 1000;
+          return `<tr><td>${esc(user.username)}</td><td>${!user.enabled ? "Deshabilitado" : expired ? "Vencido" : "Habilitado"}</td><td>${esc(user.expires ? new Date(user.expires * 1000).toLocaleString() : "Sin vencimiento")}</td><td>${user.channels.length}</td><td><button type="button" class="btn" data-edit-iptv="${esc(user.username)}">Editar</button></td></tr>`;
+        })
+        .join("")
+    : '<tr><td colspan="5">No hay usuarios IPTV. Crea el primero abajo.</td></tr>';
   $("iptvUsers").innerHTML =
     '<option value="">Nuevo usuario</option>' +
     iptvUsers
@@ -1248,14 +1274,52 @@ $("iptvSelectNone").addEventListener("click", () => {
   updateIptvSelection();
 });
 $("iptvChannels").addEventListener("change", updateIptvSelection);
-$("securityOpen").addEventListener("click", async () => {
-  try {
-    await loadIptvUsers();
-    $("iptvUsers").dispatchEvent(new Event("change"));
-  } catch (error) {
-    showError(error);
-  }
+async function openIptvUsers() {
+  await loadIptvUsers();
+  $("iptvUsers").dispatchEvent(new Event("change"));
+}
+$("iptvRefresh").addEventListener("click", () =>
+  openIptvUsers().catch(showError),
+);
+$("iptvUserRows").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-edit-iptv]");
+  if (!button) return;
+  $("iptvUsers").value = button.dataset.editIptv;
+  $("iptvUsers").dispatchEvent(new Event("change"));
+  $("iptvUsername").focus();
 });
+async function loadFlussonic() {
+  const [accounts, tps] = await Promise.all([
+    getJSON("/api/iptv/users"),
+    getJSON("/api/transponders"),
+  ]);
+  if (activeTab !== "flussonic") return;
+  $("iptvBackend").value = accounts.backend_url;
+  $("flussonicChannel").innerHTML = tps
+    .flatMap((tp) =>
+      (tp.scan?.services || [])
+        .filter((c) => c.enabled !== false)
+        .map(
+          (c) =>
+            `<option value="${esc(tp.id + ":" + c.sid)}">${esc(tp.name)} · ${esc(c.name || c.sid)}</option>`,
+        ),
+    )
+    .join("");
+  updateFlussonicName();
+  $("flussonicInfo").textContent =
+    "La configuración se realiza en Flussonic. Esta pantalla no comprueba conectividad ni modifica ese servidor.";
+}
+function updateFlussonicName() {
+  const identity = $("flussonicChannel").value;
+  $("flussonicStreamName").value = identity
+    ? "dvb_" +
+      Array.from(new TextEncoder().encode(identity), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("")
+    : "";
+}
+$("flussonicChannel").addEventListener("change", updateFlussonicName);
+$("flussonicUsers").addEventListener("click", () => switchTab("users"));
 $("iptvUsers").addEventListener("change", () => {
   const user = iptvUsers.find((u) => u.username === $("iptvUsers").value);
   $("iptvUsername").value = user?.username || "";
@@ -1296,6 +1360,7 @@ $("iptvSave").addEventListener("click", async () => {
     });
     $("iptvPassword").value = "";
     await loadIptvUsers();
+    if (activeTab !== "users") return;
     $("iptvPlaylist").value = result.token
       ? location.origin +
         "/iptv/playlist.m3u8?token=" +
@@ -1316,9 +1381,4 @@ $("iptvSave").addEventListener("click", async () => {
   } catch (error) {
     $("iptvInfo").textContent = error.message;
   }
-});
-$("securityDialog").addEventListener("close", () => {
-  clearIptvLinks();
-  for (const id of ["iptvPassword", "iptvPlaylist", "iptvToken", "iptvBackend"])
-    $(id).value = "";
 });
