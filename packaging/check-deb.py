@@ -12,6 +12,7 @@ assert subprocess.check_output(["dpkg-deb", "-f", str(package), "Version"], text
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     subprocess.run(["dpkg-deb", "-R", str(package), str(root)], check=True)
+    assert (root / "usr/bin/dvb-ncdiag").is_file()
     lib = root / "usr/lib/dvb-panelscan"
     for name in ("iptv.py", "astra_import.py", "auth.py", "server.py", "streaming.py", "health.py", "events.py", "epg.py", "VERSION"):
         assert (lib / name).is_file(), name

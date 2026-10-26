@@ -126,7 +126,7 @@ typedef struct {
   uint16_t want_sid;   /* 0 = auto (primer servicio) */
 
   char nc_host[128];
-  int nc_port;
+  int nc_port, nc_protocol;
   char nc_user[64];
   char nc_pass[64];
   uint8_t nc_deskey[14];
@@ -882,8 +882,8 @@ static void log_transport_stats(void)
 static newcamd_t *connect_cam(char *error, size_t size)
 {
   if (opts.cam_socket[0]) return newcamd_connect_local(opts.cam_socket, error, size);
-  return newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
-                         opts.nc_user, opts.nc_pass, error, size);
+  return newcamd_connect_proto(opts.nc_host, opts.nc_port, opts.nc_deskey,
+                         opts.nc_user, opts.nc_pass, opts.nc_protocol, error, size);
 }
 
 /* Returns false for an obsolete response. Keys are never installed across a
@@ -905,6 +905,7 @@ static int accept_ecm_result(const ecm_req_t *request, int result,
     ca_last_progress = monotonic_ms();
   } else {
     have_cw_even = have_cw_odd = 0;
+    csa_clear_keys(csae);
     if (result != -1) {
       ca_failures++;
       /* A known-working CA deserves a recovery window, not a carousel after
@@ -1019,6 +1020,7 @@ static void select_ca(int selected)
   ca_failures = ca_rotate = ca_worked = 0;
   ca_last_progress = monotonic_ms();
   have_cw_even = have_cw_odd = 0;
+  csa_clear_keys(csae);
   memset(cw_revision, 0, sizeof(cw_revision));
   memset(cw_used, 0, sizeof(cw_used));
   memset(cw_value, 0, sizeof(cw_value));
@@ -1354,7 +1356,7 @@ int main(int argc, char **argv)
   signal(SIGPIPE, SIG_IGN);
   memset(&opts, 0, sizeof(opts));
   opts.adapter = 0; opts.frontend = 0; opts.delsys = SYS_DVBT;
-  opts.nc_port = 15050; opts.http_port = 9981;
+  opts.nc_port = 15050; opts.nc_protocol = 525; opts.http_port = 9981;
   opts.descramble_delay_ms = 500;
   opts.pol = 'H';
   opts.lnb_lo_hz = 9750000000LL;   /* universal Ku, banda baja (9750 MHz) */
@@ -1367,7 +1369,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE, OPT_LNBUNIVERSAL, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER, OPT_CAID, OPT_ECM_PID, OPT_SHIFT };
+         OPT_BASE, OPT_LNBUNIVERSAL, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER, OPT_CAID, OPT_ECM_PID, OPT_SHIFT, OPT_NCPROTO };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -1385,6 +1387,7 @@ int main(int argc, char **argv)
     {"descramble-delay-ms", required_argument, 0, OPT_SHIFT},
     {"caid", required_argument, 0, OPT_CAID},
     {"ecm-pid", required_argument, 0, OPT_ECM_PID},
+    {"newcamd-proto", required_argument, 0, OPT_NCPROTO},
     {"newcamd", required_argument, 0, OPT_NEWCAMD},
     {"deskey", required_argument, 0, OPT_DESKEY},
     {"user", required_argument, 0, OPT_USER},
@@ -1412,6 +1415,11 @@ int main(int argc, char **argv)
       case 'F': opts.frontend = atoi(optarg); break;
       case 't': type = optarg; break;
       case 's': opts.want_sid = (uint16_t)atoi(optarg); break;
+      case OPT_NCPROTO:
+        if (strcmp(optarg, "524") && strcmp(optarg, "525")) {
+          fprintf(stderr, "--newcamd-proto must be 524 or 525\n"); return 1;
+        }
+        opts.nc_protocol = atoi(optarg); break;
       case OPT_SHIFT: {
         char *end; errno = 0;
         unsigned long value = strtoul(optarg, &end, 10);
@@ -1495,7 +1503,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "Panel roles: --mux-only --stdout (DVB capture), "
                 "--stdin --sid N --stdout --cam-socket PATH (service), "
                 "--caid HEX --ecm-pid DEC (lock CA), "
-                "--ca-broker PATH --newcamd HOST:PORT (shared CA)\n"
+                "--ca-broker PATH --newcamd HOST:PORT --newcamd-proto 525|524 (default 525)\n"
                 "--descramble-delay-ms 0..2000 (default 500; paced output always enabled)\n");
         fprintf(stderr, "Uso: %s -t dvbs --freq-mhz 11836 --symbol-rate 27500000 "
                 "--newcamd 192.168.1.2:15050 --deskey <hex14bytes> --udp 239.1.1.1:1234\n", argv[0]);
@@ -1508,8 +1516,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "--caid and --ecm-pid must be supplied together\n"); return 1;
   }
   if (opts.ca_broker[0])
-    return newcamd_broker(opts.ca_broker, opts.nc_host, opts.nc_port,
-                         opts.nc_deskey, opts.nc_user, opts.nc_pass);
+    return newcamd_broker_proto(opts.ca_broker, opts.nc_host, opts.nc_port,
+                         opts.nc_deskey, opts.nc_user, opts.nc_pass, opts.nc_protocol);
   if (opts.stdin_ts && opts.mux_only) {
     fprintf(stderr, "--stdin and --mux-only are mutually exclusive\n"); return 1;
   }

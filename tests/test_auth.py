@@ -126,6 +126,7 @@ class AuthHTTPTests(unittest.TestCase):
     def test_protected_routes_and_public_login(self):
         for path in (
             "/api/status",
+            "/api/diag",
             "/api/newcamd",
             "/api/events",
             "/api/playlist.m3u8",
@@ -148,6 +149,49 @@ class AuthHTTPTests(unittest.TestCase):
         self.assertEqual(self.request('/api/import/astra/preview',{})[0],401)
         cookie, csrf=self.login()
         self.assertEqual(self.request('/api/import/astra/preview',{},cookie)[0],403)
+
+    def test_diagnostics_authenticated_csrf_local_only_and_no_parameters(self):
+        from types import SimpleNamespace
+        self.assertEqual(self.request("/api/diag/selftest", {})[0], 401)
+        cookie, csrf = self.login()
+        self.assertEqual(self.request("/api/diag/selftest", {}, cookie)[0], 403)
+        self.assertEqual(self.request("/api/diag/selftest", {}, cookie, csrf,
+                                     {"Origin": "https://evil.test"})[0], 403)
+        token = self.panel._auth.rotate_media_token()
+        self.assertEqual(self.request("/api/diag?token=" + token)[0], 401)
+        with patch.object(self.panel.subprocess, "run") as run:
+            code, _, body = self.request("/api/diag", cookie=cookie)
+            self.assertEqual(code, 200)
+            self.assertIs(json.loads(body)["network_probe"], False)
+            run.assert_not_called()
+            self.assertEqual(self.request("/api/diag/selftest", {"host": "evil.test"}, cookie, csrf)[0], 400)
+            run.assert_not_called()
+        with patch.object(self.panel, "find_ncdiag", return_value="/fixed/dvb-ncdiag"), patch.object(
+                self.panel.subprocess, "run", return_value=SimpleNamespace(returncode=0,
+                    stdout=b'{"ok":true,"csa":true,"network_probe":false}')) as run:
+            code, _, body = self.request("/api/diag/selftest", {}, cookie, csrf)
+            self.assertEqual(code, 200)
+            self.assertTrue(json.loads(body)["csa"])
+            self.assertEqual(run.call_args.args[0], ["/fixed/dvb-ncdiag", "--selftest", "--json"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 5)
+            self.assertEqual(run.call_args.kwargs["stderr"], self.panel.subprocess.DEVNULL)
+        self.assertEqual(list(Path(self.tmp.name).glob("*.log")), [])
+
+    def test_selftest_errors_sanitized_and_concurrency_bounded(self):
+        from types import SimpleNamespace
+        cookie, csrf = self.login()
+        with patch.object(self.panel, "find_ncdiag", return_value=None):
+            self.assertEqual(self.request("/api/diag/selftest", {}, cookie, csrf)[0], 503)
+        with patch.object(self.panel, "find_ncdiag", return_value="/fixed/dvb-ncdiag"), patch.object(
+                self.panel.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout=b"SECRET_SENTINEL")):
+            code, _, body = self.request("/api/diag/selftest", {}, cookie, csrf)
+            self.assertEqual(code, 502)
+            self.assertNotIn(b"SECRET_SENTINEL", body)
+        self.panel._diag_lock.acquire()
+        try:
+            self.assertEqual(self.request("/api/diag/selftest", {}, cookie, csrf)[0], 429)
+        finally:
+            self.panel._diag_lock.release()
 
     def test_login_csrf_origin_and_logout(self):
         cookie, csrf = self.login()

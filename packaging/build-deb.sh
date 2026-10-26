@@ -15,6 +15,7 @@ make -C tbsstream
 rm -rf "$DEST"
 mkdir -p "$DEST/DEBIAN" "$DEST/usr/bin" "$DEST/usr/lib/dvb-panelscan/static" "$DEST/lib/systemd/system" "$DEST/usr/share/doc/dvb-panelscan"
 install -m755 dvb2m3u8/dvb2m3u8 tbsstream/tbsstream "$DEST/usr/bin/"
+install -m755 tbsstream/tools/ncdiag "$DEST/usr/bin/dvb-ncdiag"
 install -m644 VERSION "$DEST/usr/lib/dvb-panelscan/"
 install -m644 panel/iptv.py panel/astra_import.py panel/auth.py panel/server.py panel/streaming.py panel/health.py panel/events.py panel/epg.py "$DEST/usr/lib/dvb-panelscan/"
 install -m644 panel/static/* "$DEST/usr/lib/dvb-panelscan/static/"

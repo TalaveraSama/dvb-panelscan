@@ -306,12 +306,55 @@ def profile_config(identity="default"):
     return STATE["profiles"][identity]
 
 
+_diag_lock = threading.Lock()
+
+
+def find_ncdiag():
+    binary = find_tbsstream(_cfg["tbsstream"])
+    candidates = ([os.path.join(os.path.dirname(binary), "dvb-ncdiag")] if binary else [])
+    candidates.append(os.path.join(BASE_DIR, "..", "tbsstream", "tools", "ncdiag"))
+    return next((os.path.realpath(p) for p in candidates if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+
+
+def ca_diagnostics():
+    # Inspect existing managed processes; NEVER dial Ncam or expose argv/keys.
+    with _streams.lock:
+        brokers = [b.status() for b in _streams.brokers.values()]
+        fields = ("channel_id", "adapter", "pid", "running", "clients", "pinned",
+                  "reconnect_waiting", "ca_pid", "mux_pid", "bytes_received", "ecm")
+        sessions = [{k: v for k, v in row.items() if k in fields} for row in _streams.status()]
+    return {"version": VERSION, "network_probe": False, "protocols": [525, 524],
+            "cipher": "DVB-CSA (libdvbcsa)", "aes_supported": False,
+            "selftest_available": find_ncdiag() is not None, "brokers": brokers, "sessions": sessions}
+
+
+def csa_selftest():
+    if not _diag_lock.acquire(blocking=False):
+        return 429, {"ok": False, "error": "Ya hay una prueba local en curso"}
+    try:
+        binary = find_ncdiag()
+        if not binary:
+            return 503, {"ok": False, "error": "Instala dvb-ncdiag del paquete actual"}
+        try:
+            result = subprocess.run([binary, "--selftest", "--json"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            value = json.loads(result.stdout)
+            if result.returncode != 0 or value != {"ok": True, "csa": True, "network_probe": False}:
+                return 502, {"ok": False, "error": "Falló la autoprueba CSA local"}
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return 502, {"ok": False, "error": "No se pudo completar la autoprueba CSA local"}
+        return 200, {"ok": True, "csa": True, "network_probe": False}
+    finally:
+        _diag_lock.release()
+
+
 def newcamd_identity(nc):
     # Config identity, not profile name or binary path. DNS case and DES-key
     # spelling must not create a second broker for the same configuration.
     return (str(nc.get("host", "")).strip().lower(), int(nc.get("port", 5000)),
             nc.get("user", ""), nc.get("pass", ""),
-            str(nc.get("deskey", "")).replace(":", "").replace(" ", "").lower())
+            str(nc.get("deskey", "")).replace(":", "").replace(" ", "").lower(),
+            int(nc.get("proto", 525)))
 
 
 def validate_profile(body, previous=None):
@@ -322,6 +365,10 @@ def validate_profile(body, previous=None):
                 raise ValueError("Campo Newcamd inválido: " + key)
             result[key] = body[key].strip() if key in ("host", "name", "deskey") else body[key]
     result["port"] = int(body.get("port", result.get("port", 5000)))
+    proto = str(body.get("proto", result.get("proto", 525)))
+    if proto not in ("524", "525"):
+        raise ValueError("Protocolo Newcamd: usa 524 o 525")
+    result["proto"] = int(proto)
     key = result.get("deskey", "").replace(":", "").replace(" ", "")
     if not result.get("host") or not 1 <= result["port"] <= 65535:
         raise ValueError("Servidor o puerto inválidos")
@@ -535,7 +582,7 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
         cmd += ["--udp", destination]
     ca = [binary, "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
           "--deskey", nc.get("deskey", ""), "--user", nc.get("user", ""),
-          "--pass", nc.get("pass", "")]
+          "--pass", nc.get("pass", ""), "--newcamd-proto", str(nc.get("proto", 525))]
     log = os.path.join(DATA_DIR, "stream-%d-%d.log" % (normalized["adapter"], sid))
     mux_log = os.path.join(DATA_DIR, "mux-%d.log" % normalized["adapter"])
     # Exclude the acquisition timeout: it does not change the RF tuning.
@@ -698,6 +745,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/iptv/users":
             return self._send(200, {"users": _iptv.listing(),
                 "backend_url": self._origin() + "/iptv/flussonic/" + _iptv.data["backend_key"]})
+        if path == "/api/diag":
+            return self._send(200, ca_diagnostics())
         if path == "/api/status":
             return self._send(200, {
                 "version": VERSION, "platform": platform.system(), "linux": is_linux(),
@@ -945,6 +994,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if path == "/api/auth/media-token":
                 return self._send(200, {"ok": True, "token": _auth.rotate_media_token()})
+
+        if path == "/api/diag/selftest":
+            if body:
+                return self._send(400, {"error": "La autoprueba local no acepta parámetros ni credenciales"})
+            status, result = csa_selftest()
+            return self._send(status, result)
 
         if path == "/api/iptv/users":
             try:

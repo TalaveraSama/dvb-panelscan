@@ -6,7 +6,7 @@ import tempfile
 import shutil
 import threading
 import time
-from health import ECMHealth
+from health import ECMHealth, BrokerHealth
 from events import EventBus, DiagnosticReader
 
 
@@ -206,7 +206,10 @@ class Broker:
             self.process = subprocess.Popen(command + ["--ca-broker", self.path],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, start_new_session=True)
-            self.diagnostics = DiagnosticReader(self.process, events, "ca")
+            self.health = BrokerHealth()
+            self.diagnostic_lock = threading.Lock()
+            self.diagnostics = DiagnosticReader(self.process, events, "ca",
+                                                health=self.health, lock=self.diagnostic_lock)
             deadline = time.monotonic() + 3
             while not os.path.exists(self.path):
                 if self.process.poll() is not None or time.monotonic() >= deadline:
@@ -215,6 +218,11 @@ class Broker:
         except Exception:
             self.stop()
             raise
+
+    def status(self):
+        with self.diagnostic_lock:
+            return {"pid": self.process.pid, "running": self.process.poll() is None,
+                    **self.health.snapshot(self.process.poll() is None)}
 
     def stop(self):
         process = getattr(self, "process", None)

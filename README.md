@@ -7,7 +7,21 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.18.1 · Reutilización de sesión al reconectar
+## Actual: 0.19.0 · Diagnóstico CA y validación Newcamd
+
+Nueva pestaña **Diagnóstico CA**, protegida por la sesión administrativa:
+consulta brokers/canales existentes, CAID anunciado y número de proveedores;
+la **autoprueba CSA es local y no abre otra conexión a Ncam**. Sin logs en disco,
+credenciales ni claves en el diagnóstico. Protocolo por perfil **525** (por defecto)
+o **524** (servidores antiguos), también disponible por CLI.
+
+Se valida la longitud real de los mensajes Newcamd, sin aceptar padding como CW,
+se conservan secuencia/tabla y se rechazan respuestas de 32 bytes sin truncarlas.
+CSA procesa el payload completo, incluidos bytes residuales, y mantiene cifrados
+los paquetes sin clave. [Cambios adaptados del código recibido y límites](docs/MEJORAS.md).
+No incorpora AES/CSA3 ni certifica reproducción real con TBS/Ncam.
+
+### Reconexión HTTP (desde 0.18.1)
 
 El último cierre HTTP conserva hasta 10 segundos la sesión bajo demanda para
 que el mismo canal reconecte sin recrear worker/mux/broker Newcamd. Detener/editar

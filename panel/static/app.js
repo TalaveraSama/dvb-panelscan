@@ -59,12 +59,14 @@ function switchTab(tab) {
   if (tab === "users") openIptvUsers().catch(showError);
   if (tab === "flussonic") loadFlussonic().catch(showError);
   if (tab === "epg") loadEpg().catch(showError);
+  if (tab === "diag") loadDiagnostics().catch(showError);
   if (tab === "events" && !document.hidden) startEvents();
   else stopEvents();
   $("pageTitle").textContent = {
     dashboard: "Vista general",
     epg: "Canales y programación",
     newcamd: "Acceso condicional",
+    diag: "Diagnóstico CA · sin conexiones adicionales",
     m3u8: "Distribución de señal",
     events: "Eventos en vivo · sin historial",
     users: "Usuarios",
@@ -77,6 +79,7 @@ function switchTab(tab) {
     "dashboard",
     "epg",
     "newcamd",
+    "diag",
     "m3u8",
     "events",
     "users",
@@ -598,6 +601,7 @@ async function loadProfileForm(identity) {
     nc.name || (identity === "default" ? "Predeterminado" : "");
   $("nc_host").value = nc.host || "";
   $("nc_port").value = nc.port || 5000;
+  $("nc_proto").value = String(nc.proto || 525);
   $("nc_user").value = nc.user || "";
   $("nc_pass").value = nc.pass || "";
   $("nc_deskey").value = nc.deskey || "";
@@ -631,6 +635,7 @@ async function saveNewcamd(e) {
     name: $("nc_name").value,
     host: $("nc_host").value,
     port: Number($("nc_port").value),
+    proto: Number($("nc_proto").value),
     user: $("nc_user").value,
     pass: $("nc_pass").value,
     deskey: $("nc_deskey").value.trim(),
@@ -1402,5 +1407,28 @@ $("iptvSave").addEventListener("click", async () => {
       `Guardado con ${channels.length} canales autorizados. Enlaces anteriores de este usuario revocados. Descarga la M3U directamente, sin copiar texto del chat.`;
   } catch (error) {
     $("iptvInfo").textContent = error.message;
+  }
+});
+
+
+/* Diagnostics deliberately has no event subscription or periodic probe. */
+async function loadDiagnostics() {
+  const state = await getJSON("/api/diag");
+  $("diagState").textContent = JSON.stringify(state, null, 2);
+  $("diagSelftest").disabled = !state.selftest_available;
+}
+$("diagRefresh").addEventListener("click", () => loadDiagnostics().catch(showError));
+$("diagSelftest").addEventListener("click", async () => {
+  $("diagSelftest").disabled = true;
+  $("diagResult").textContent = "Ejecutando autoprueba local, sin conexión a Ncam…";
+  try {
+    const result = await postJSON("/api/diag/selftest", {});
+    $("diagResult").textContent = result.ok
+      ? "CSA local: correcta. No verifica señal TBS, suscripción ni reproducción real."
+      : (result.error || "Falló la autoprueba CSA");
+  } catch (error) {
+    $("diagResult").textContent = error.message;
+  } finally {
+    $("diagSelftest").disabled = false;
   }
 });

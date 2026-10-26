@@ -1,3 +1,37 @@
+## DVB PanelScan 0.19.0 · Diagnóstico CA y endurecimiento Newcamd
+
+Integración adaptada de `CODIGO-A-APLICAR.md`, no reemplazo de sus 18 archivos.
+
+- Diagnóstico CA autenticado: procesos y conexiones administradas existentes,
+  último CAID anunciado, número de proveedores, protocolo y telemetría ECM.
+  No inicia un canal ni una conexión Ncam para consultar el estado.
+- Autoprueba CSA local desde el panel y `dvb-ncdiag --selftest [--json]`.
+  POST con CSRF, sin parámetros/credenciales, tiempo y concurrencia acotados.
+  No imprime CW/ECM ni guarda registros. El paquete instala `dvb-ncdiag`.
+- Newcamd 525 por defecto y 524 seleccionable por perfil/CLI. Identidad del
+  broker incluye el protocolo; perfiles existentes sin ese campo siguen en 525.
+- Se excluyen padding/checksum de la longitud lógica recibida; declaraciones
+  imposibles se rechazan. Las CW CSA deben tener exactamente 16 bytes.
+  Respuestas de 32 bytes generan error explícito de formato no soportado,
+  con claves de salida vacías; no se truncan ni se anuncian como AES válido.
+- Se mantienen correlación por secuencia/tabla y aislamiento por servicio.
+  Respuestas ajenas no renuevan el deadline del cliente directo.
+  CARD_DATA valida límites antes de leer proveedores; no expone seriales.
+- CSA: estado de claves por paridad, reset, lista de paquetes, conteo de pendientes
+  y estadísticas en API C. Se conserva el payload completo y batching nativo;
+  se añade una regresión que demuestra la corrupción al truncarlo a múltiplos de 8.
+- `make -C tbsstream test` y pruebas 524/525 de login, tarjeta, keepalive,
+  secuencias obsoletas, longitudes, CW no soportadas y broker multicanal.
+- Se preservan mux compartido, broker persistente, gracia HTTP de 10 segundos,
+  autenticación/CSRF, perfiles por canal, EPG/UTC, IPTV y eventos solo en vivo.
+
+Ver `docs/MEJORAS.md` para las partes que no se copiaron y su justificación.
+Las pruebas son sintéticas: no confirman que el pegón inicial o los rechazos
+CAID/CW de Ncam estén resueltos con la señal real del usuario. Sin despliegue en VPS.
+Actualizar interrumpe los canales. No se fusiona automáticamente el PR.
+
+---
+
 ## DVB PanelScan 0.18.1 · Reconexión HTTP sin recrear canal y broker
 
 - Al salir el último reproductor de una sesión bajo demanda ya iniciada, el panel

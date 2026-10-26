@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "panel"))
-from health import ECMHealth
+from health import ECMHealth, BrokerHealth
 
 
 class HealthTests(unittest.TestCase):
@@ -44,6 +44,11 @@ class HealthTests(unittest.TestCase):
         Path(self.path).write_text("ECM: sid=672 caid=1802 time_ms=180 result=0 cw_mask=3 at_ms=1000\n" * 2)
         self.assertEqual(self.health.snapshot(now=100)["state"], "error")
 
+    def test_unsupported_cw_is_explicitly_red(self):
+        self.event(100, -4, 0)
+        self.assertEqual(self.health.snapshot(now=100)["state"], "error")
+        self.assertIn("no soportado", self.health.snapshot(now=100)["label"])
+
     def test_clear_and_inactive_are_not_failure(self):
         self.health.ingest("PMT: sid=672 pcr=1 video=1 audio=2 ecm=-1 caid=0000 nes=2")
         self.assertEqual(self.health.snapshot(now=100)["state"], "clear")
@@ -63,3 +68,23 @@ class HealthTests(unittest.TestCase):
         with open(self.path, "a") as log:
             log.write("123\nECM: sid=672 caid=1802 time_ms=180 result=0 cw_mask=3 at_ms=102000 pid=123\n")
         self.assertEqual(self.health.snapshot(now=103)["state"], "ok")
+
+
+class BrokerHealthTests(unittest.TestCase):
+    def test_only_latest_card_metadata_no_raw_text_or_secrets(self):
+        health = BrokerHealth()
+        health.ingest("CA card: caid=0B00 providers=2 protocol=525")
+        self.assertIsNone(health.snapshot()["card_caid"])
+        health.ingest("CA broker: connected (login + card data)")
+        health.ingest("CA card: caid=0B00 providers=2 protocol=525")
+        health.ingest("password=SECRET_SENTINEL cw=SECRET_SENTINEL")
+        state = health.snapshot()
+        self.assertTrue(state["connected"])
+        self.assertEqual((state["card_caid"], state["providers"], state["protocol"]), ("0B00", 2, 525))
+        self.assertNotIn("SECRET_SENTINEL", str(state))
+        health.ingest("CA broker: upstream transport/protocol error; reconnecting")
+        self.assertFalse(health.snapshot()["connected"])
+        self.assertIsNone(health.snapshot()["card_caid"])
+        health.ingest("CA broker: connected (login + card data)")
+        self.assertEqual(health.snapshot()["connect_count"], 2)
+        self.assertFalse(health.snapshot(running=False)["connected"])

@@ -67,7 +67,8 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
     if match:
         latency, result, mask, _ = map(int, match.groups())
         success = result == 0 and mask != 0
-        bus.publish("ecm", "ECM/CW recibida" if success else "ECM sin CW válida",
+        label = "ECM/CW recibida" if success else ("Formato CW no soportado · se requiere DVB-CSA" if result == -4 else "ECM sin CW válida")
+        bus.publish("ecm", label,
                     "info" if success else "error", channel, adapter,
                     latency_ms=latency, result=result, cw_available=bool(mask))
         return

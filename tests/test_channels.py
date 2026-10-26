@@ -40,6 +40,26 @@ class ChannelSettingsTests(unittest.TestCase):
             return response.code, json.load(response)
         with response: return response.status, json.load(response)
 
+    def test_newcamd_protocol_validation_identity_and_broker_command(self):
+        default = self.panel.validate_profile(self.config)
+        self.assertEqual(default["proto"], 525)
+        legacy = self.panel.validate_profile({**self.config, "proto": "524"})
+        self.assertEqual(legacy["proto"], 524)
+        self.assertEqual(self.panel.newcamd_identity(default), self.panel.newcamd_identity(self.config))
+        self.assertNotEqual(self.panel.newcamd_identity(default), self.panel.newcamd_identity(legacy))
+        for invalid in ("526", "auto", True, 524.0, None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.panel.validate_profile({**self.config, "proto": invalid})
+        identity = self.call("/api/newcamd/profiles", legacy)[1]["id"]
+        self.panel._load()
+        self.assertEqual(self.call("/api/newcamd/profiles/" + identity)[1]["proto"], 524)
+        with patch.object(self.panel, "find_tbsstream", return_value="/test/tbsstream"), patch.object(
+                self.panel._streams, "acquire", return_value="session") as acquire:
+            self.panel._session_start(self.panel.STATE["transponders"][0], nc=legacy, sid=672)
+            cmd = acquire.call_args.kwargs["broker_command"]
+            self.assertEqual(cmd[cmd.index("--newcamd-proto")+1], "524")
+            self.assertNotIn("--newcamd-proto", acquire.call_args.args[2])
+
     def test_fixed_caid_ecm_settings_validation_and_command(self):
         code, response = self.call("/api/channels/a%3A672/edit", {"caid": "0b00", "ecm_pid": 5169})
         self.assertEqual(code, 200)

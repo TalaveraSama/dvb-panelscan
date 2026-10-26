@@ -20,3 +20,6 @@ dist/
 
 # temporary upstream source reviews
 .cache/
+
+# compiled local CSA diagnostic
+tbsstream/tools/ncdiag

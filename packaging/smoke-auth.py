@@ -34,6 +34,10 @@ if sys.argv[1] == "configure":
 else:
     settings = call("/api/epg/settings")
     assert settings["days"] == 2 and settings["utc_offset_minutes"] == -360
+diagnostic = call("/api/diag")
+assert diagnostic["network_probe"] is False and diagnostic["selftest_available"]
+assert diagnostic["brokers"] == [] and diagnostic["sessions"] == []
+assert call("/api/diag/selftest", {}, session["csrf"]) == {"ok": True, "csa": True, "network_probe": False}
 call("/api/auth/logout", {}, session["csrf"])
 try:
     call("/api/status")

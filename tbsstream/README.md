@@ -139,3 +139,33 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
 ## Licencia
 
 GPLv3 (reutiliza código de TVHeadend: `cwc.c`, `tvhcsa.c`, `crypt_md5`).
+
+
+## Diagnóstico local y protocolo (0.19.0)
+
+`make` compila el motor y `tools/ncdiag`. `make test` ejecuta CSA, framing/login/
+tarjeta Newcamd 524/525, broker compartido y autoprueba local. Requiere los mismos
+paquetes de desarrollo que el motor (`libdvbcsa-dev`, `libssl-dev`, compilador C).
+Se admiten `CPPFLAGS`, `CFLAGS`, `LDFLAGS`, `LIBS`, `PREFIX` y `DESTDIR` estándar.
+
+```sh
+make -C tbsstream test
+tbsstream/tools/ncdiag --selftest --json
+# Instalado por el paquete: dvb-ncdiag --selftest --json
+```
+
+No acepta servidor, usuario, contraseña, DES key ni archivo ECM. No abre sockets,
+no imprime material de claves y no demuestra que un canal real esté descifrado.
+
+`--newcamd-proto 525|524` selecciona el framing tanto del cliente directo como
+del broker. No hay autodetección ni conexión de prueba adicional. 525 es el valor
+por defecto; 524 utiliza cabecera de 8 bytes y SID en bytes 6–7, sin los campos
+CAID/proveedor que 525 lleva en su cabecera. El panel permite elegirlo por perfil.
+CW de 32 bytes: error `NC_ECM_UNSUPPORTED` (-4), no soporte AES/CSA3.
+
+Las API CSA requieren sincronización externa si se comparten entre hilos.
+`csa_have_keys` indica disponibilidad de **ambas** paridades; `csa_clear_keys`
+invalida ambas sin reiniciar estadísticas. `csa_descramble[_ex/_list]` devuelve
+el número de paquetes con payload procesado; `pending` cuenta falta de clave,
+no paquetes TS inválidos. Paquetes sin clave/TS inválidos permanecen sin modificar.
+Los contadores son del wrapper C; no son prueba de integridad de vídeo.

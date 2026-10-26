@@ -19,6 +19,7 @@ jobs:
         run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
       - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev libdvbcsa-dev
       - run: make -C dvb2m3u8 && make -C tbsstream
+      - run: make -C tbsstream test
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: |
           node --check panel/static/app.js

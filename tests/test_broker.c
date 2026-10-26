@@ -6,7 +6,7 @@
 
 static void request(newcamd_t *worker, uint16_t sid, uint8_t marker)
 {
-  uint8_t bytes[13] = {sid >> 8, sid, 0x18, 2, 0,0,0,0, 0,3, 0x80,0,marker};
+  uint8_t bytes[16] = {sid >> 8, sid, 0x18, 2, 0,0,0,0, 0,6, 0x80,0,3,marker,0,0};
   assert(send_full(worker->fd, bytes, sizeof(bytes)) == 0);
 }
 
@@ -26,7 +26,7 @@ static uint16_t read_ecm(newcamd_t *server, uint16_t sid)
   return (bytes[2] << 8) | bytes[3];
 }
 
-int main(void)
+static void test_broker(int protocol)
 {
   signal(SIGPIPE, SIG_IGN);
   char directory[] = "/tmp/dvb-broker-test-XXXXXX";
@@ -40,15 +40,15 @@ int main(void)
   uint8_t key[14] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14}, spread[16];
   des_key_spread(key, spread);
   newcamd_t *upstream = calloc(1, sizeof(*upstream));
-  upstream->fd = pair[0]; des_set_keys(upstream, spread);
+  upstream->protocol=protocol; upstream->fd = pair[0]; des_set_keys(upstream, spread);
   pid_t child = fork();
   assert(child >= 0);
   if (!child) {
     close(pair[1]);
-    _exit(broker_loop(listener, upstream, "unused", 0, key, "", ""));
+    _exit(broker_loop(listener, upstream, "unused", 0, key, "", "", protocol));
   }
   close(pair[0]); close(listener); free(upstream);
-  newcamd_t server = {.fd = pair[1]}; des_set_keys(&server, spread);
+  newcamd_t server = {.fd = pair[1], .protocol=protocol}; des_set_keys(&server, spread);
   char error[128] = {0};
   newcamd_t *a = newcamd_connect_local(addr.sun_path, error, sizeof(error));
   newcamd_t *b = newcamd_connect_local(addr.sun_path, error, sizeof(error));
@@ -82,9 +82,20 @@ int main(void)
   uint8_t nok[] = {0x80, 0, 0}; server.seq = seq_a - 1;
   assert(nc_send_msg(&server, nok, 3, 0,0,0, NULL) == 0);
   assert(recv_full(a->fd, reply, sizeof(reply), 1000) == 0 && (int8_t)reply[0] == -2);
+  /* A 32-byte non-CSA reply is an explicit unsupported error, not truncated CW. */
+  request(a,672,7); seq_a=read_ecm(&server,672);
+  uint8_t aes[35]={0x80,0,32}; memset(aes+3,0x77,32); server.seq=seq_a-1;
+  assert(nc_send_msg(&server,aes,sizeof(aes),0,0,0,NULL)==0);
+  assert(recv_full(a->fd,reply,sizeof(reply),1000)==0 && (int8_t)reply[0]==NC_ECM_UNSUPPORTED);
+  for (int i=1;i<17;i++) assert(reply[i]==0);
   newcamd_close(a); newcamd_close(b); close(server.fd);
   kill(child, SIGTERM); int status; assert(waitpid(child, &status, 0) == child);
   unlink(addr.sun_path); rmdir(directory);
   puts("Shared Newcamd: out-of-order CW, cache, isolated deadline, late reply and NOK passed");
+}
+
+int main(void)
+{
+  test_broker(525); test_broker(524);
   return 0;
 }

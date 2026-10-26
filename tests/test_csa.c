@@ -38,8 +38,60 @@ static void test_mixed_clusters(void)
   free(ts); free(plain);
 }
 
+static void test_missing_keys_list_and_invalid_packets(void)
+{
+  uint8_t p[2*188], saved[2*188];
+  memset(p, 0x55, sizeof(p));
+  for (int i=0; i<2; i++) { p[i*188]=0x47; p[i*188+1]=1; p[i*188+3]=i ? 0xd0 : 0x90; }
+  uint8_t cw[8] = {1,2,3,6,4,5,6,15};
+  struct dvbcsa_key_s *k = dvbcsa_key_alloc(); assert(k); dvbcsa_key_set(cw,k);
+  for (int i=0;i<2;i++) dvbcsa_encrypt(k,p+i*188+4,184);
+  memcpy(saved,p,sizeof(p));
+  csa_t *c = csa_create(); assert(c);
+  int pending = -1;
+  assert(csa_descramble_ex(c,p,2,&pending)==0 && pending==2);
+  assert(!memcmp(p,saved,sizeof(p)) && !csa_have_keys(c));
+  csa_set_key_even(c,cw);
+  assert(csa_descramble_ex(c,p,2,&pending)==1 && pending==1);
+  assert(!memcmp(p+188,saved+188,188));
+  csa_set_key_odd(c,cw); assert(csa_have_keys(c));
+  uint8_t *list[2] = {p+188,p};
+  assert(csa_descramble_list(c,list,2)==1);
+  csa_clear_keys(c); assert(!csa_have_keys(c));
+  memcpy(p,saved,sizeof(p));
+  assert(csa_descramble_ex(c,p,2,&pending)==0 && pending==2);
+  p[3] = 0xb0; p[4] = 183; /* invalid AFC=3 offset; unchanged */
+  csa_set_key_even(c,cw);
+  assert(csa_descramble(c,p,1)==0 && p[3]==0xb0);
+  csa_stats_t stats; csa_get_stats(c,&stats);
+  assert(stats.pkt_decrypted==2 && stats.pkt_nokey==5 && stats.pkt_invalid==1);
+  csa_free(c); dvbcsa_key_free(k);
+}
+
+static void test_truncating_payload_is_not_a_valid_fix(void)
+{
+  uint8_t plain[188], encrypted[188], truncated[188];
+  uint8_t cw[8]={1,2,3,6,4,5,6,15};
+  for (int i=0;i<188;i++) plain[i]=(i*3+1)&255;
+  plain[0]=0x47; plain[1]=1; plain[2]=0; plain[3]=0x30; plain[4]=8; plain[5]=0;
+  memcpy(encrypted,plain,188);
+  struct dvbcsa_key_s *k=dvbcsa_key_alloc(); assert(k); dvbcsa_key_set(cw,k);
+  dvbcsa_encrypt(k,encrypted+13,175); /* FULL payload, not 168 */
+  encrypted[3] |= 0x80;
+  memcpy(truncated,encrypted,188);
+  struct dvbcsa_bs_key_s *bk=dvbcsa_bs_key_alloc(); assert(bk); dvbcsa_bs_key_set(cw,bk);
+  struct dvbcsa_bs_batch_s batch[2]={{.data=truncated+13,.len=168},{.data=NULL,.len=0}};
+  dvbcsa_bs_decrypt(bk,batch,184);
+  assert(memcmp(truncated+13,plain+13,175)); /* submitted truncation corrupts real payload */
+  csa_t *c=csa_create(); assert(c); csa_set_key_even(c,cw);
+  assert(csa_descramble(c,encrypted,1)==1 && !memcmp(encrypted,plain,188));
+  csa_free(c); dvbcsa_bs_key_free(bk); dvbcsa_key_free(k);
+}
+
 int main(void) {
   test_mixed_clusters();
+  test_missing_keys_list_and_invalid_packets();
+  test_truncating_payload_is_not_a_valid_fix();
   uint8_t cw[8] = {1,2,3,6,4,5,6,15};
   uint8_t ts[188], expected[188];
   csa_t *c = csa_create();

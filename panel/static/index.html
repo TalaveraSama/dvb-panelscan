@@ -15,6 +15,7 @@
       <nav class="menu" id="menu">
         <a href="#" data-tab="dashboard" class="active">◫ &nbsp; Dashboard</a>
         <a href="#" data-tab="epg">▤ &nbsp; Canales y EPG</a>
+        <a href="#" data-tab="diag">⌕ &nbsp; Diagnóstico CA</a>
         <a href="#" data-tab="newcamd">◇ &nbsp; Acceso condicional</a>
         <a href="#" data-tab="m3u8">▷ &nbsp; Streaming</a>
         <a href="#" data-tab="users">♙ &nbsp; Usuarios</a>
@@ -317,6 +318,19 @@
       </section>
 
       <!-- ===================== NEWCAMD ===================== -->
+      <section id="tab-diag" class="hidden">
+        <div class="card">
+          <h2>Diagnóstico de acceso condicional</h2>
+          <p>Consulta los brokers y canales existentes sin abrir otra conexión a Ncam.
+             No muestra contraseñas, DES keys, ECM, CW ni números de tarjeta; no guarda logs.</p>
+          <p>La autoprueba verifica CSA local con datos sintéticos; no confirma la validez de una suscripción ni que un canal real esté descifrado. AES/CSA3 no están soportados.</p>
+          <button id="diagRefresh" class="btn" type="button">Actualizar estado</button>
+          <button id="diagSelftest" class="btn primary" type="button">Autoprueba CSA · sin red</button>
+          <p id="diagResult" role="status" aria-live="polite"></p>
+          <pre id="diagState"></pre>
+        </div>
+      </section>
+
       <section id="tab-newcamd" class="hidden">
         <section class="card">
           <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
@@ -352,6 +366,7 @@
                 type="number"
                 value="5000"
             /></label>
+            <label>Protocolo <select id="nc_proto"><option value="525">525 (predeterminado)</option><option value="524">524 (servidores antiguos)</option></select></label>
             <label>Usuario <input id="nc_user" value="" /></label>
             <label
               >Contraseña

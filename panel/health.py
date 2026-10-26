@@ -66,6 +66,8 @@ class ECMHealth:
         elif self.last_at is None:
             state, label = (("error", "Sin ECM/CW reciente") if self.encrypted and now-self.created > 15
                             else ("waiting", "Esperando ECM/PMT"))
+        elif self.result == -4:
+            state, label = "error", "Formato CW no soportado · se requiere DVB-CSA"
         elif self.result != 0 or not self.mask or age is None or age > 15:
             state, label = "error", "ECM/CW no disponible"
         elif len(self.recent) >= 2:
@@ -76,3 +78,27 @@ class ECMHealth:
                 "latency_ms": self.latency, "cw_mask": self.mask,
                 "success_age_seconds": None if age is None else round(age, 1),
                 "successes_15s": len(self.recent), "window_seconds": 15}
+
+
+class BrokerHealth:
+    """Latest non-secret card/connection state only; no transcript or payloads."""
+    def __init__(self):
+        self.connected = False
+        self.connect_count = 0
+        self.card_caid = self.providers = self.protocol = None
+
+    def ingest(self, line):
+        if line == "CA broker: connected (login + card data)":
+            self.connected = True
+            self.connect_count += 1
+        elif line.startswith("CA broker:") and ("reconnecting" in line or "connection failed" in line):
+            self.connected = False
+            self.card_caid = self.providers = self.protocol = None
+        match = re.fullmatch(r"CA card: caid=([0-9A-F]{4}) providers=(\d{1,3}) protocol=(524|525)", line)
+        if match and self.connected:
+            self.card_caid, self.providers, self.protocol = match[1], int(match[2]), int(match[3])
+
+    def snapshot(self, running=True):
+        return {"connected": bool(running and self.connected),
+                "connect_count": self.connect_count, "card_caid": self.card_caid,
+                "providers": self.providers, "protocol": self.protocol}

@@ -1149,3 +1149,5 @@ select:focus-visible {
 #iptvWorkspace > label.hidden {
   display: none;
 }
+
+#diagState { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 36rem; overflow: auto; }
