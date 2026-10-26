@@ -1196,7 +1196,10 @@ $("astraApply").addEventListener("click", () => runAstraImport(true));
 // IPTV accounts never grant administrative or Newcamd access.
 let iptvUsers = [];
 async function loadIptvUsers() {
-  const result = await getJSON("/api/iptv/users");
+  const [result, availableTransponders] = await Promise.all([
+    getJSON("/api/iptv/users"),
+    getJSON("/api/transponders"),
+  ]);
   iptvUsers = result.users;
   $("iptvBackend").value = result.backend_url;
   $("iptvUsers").innerHTML =
@@ -1207,18 +1210,52 @@ async function loadIptvUsers() {
           `<option value="${esc(u.username)}">${esc(u.username)}${u.enabled ? "" : " (deshabilitado)"}</option>`,
       )
       .join("");
-  $("iptvChannels").innerHTML = transponders
+  $("iptvChannels").innerHTML = availableTransponders
     .flatMap((tp) =>
-      (tp.scan?.services || []).map(
-        (c) =>
-          `<option value="${esc(tp.id + ":" + c.sid)}">${esc(tp.name)} · ${esc(c.name || c.sid)}</option>`,
-      ),
+      (tp.scan?.services || [])
+        .filter((c) => c.enabled !== false)
+        .map(
+          (c) =>
+            `<label><input type="checkbox" data-iptv-channel value="${esc(tp.id + ":" + c.sid)}"> ${esc(tp.name)} · ${esc(c.name || c.sid)}</label>`,
+        ),
     )
     .join("");
+  updateIptvSelection();
 }
-$("securityOpen").addEventListener("click", () =>
-  loadIptvUsers().catch(showError),
-);
+function iptvChannelInputs() {
+  return Array.from($("iptvChannels").querySelectorAll("[data-iptv-channel]"));
+}
+function updateIptvSelection() {
+  const inputs = iptvChannelInputs();
+  $("iptvSelectedCount").textContent =
+    `${inputs.filter((input) => input.checked).length} de ${inputs.length} canales seleccionados`;
+}
+function clearIptvLinks() {
+  $("iptvPlaylist").value = $("iptvToken").value = "";
+  $("iptvDownload").removeAttribute("href");
+  $("iptvDownload").classList.add("hidden");
+}
+$("iptvSelectAll").addEventListener("click", () => {
+  iptvChannelInputs().forEach((input) => {
+    input.checked = true;
+  });
+  updateIptvSelection();
+});
+$("iptvSelectNone").addEventListener("click", () => {
+  iptvChannelInputs().forEach((input) => {
+    input.checked = false;
+  });
+  updateIptvSelection();
+});
+$("iptvChannels").addEventListener("change", updateIptvSelection);
+$("securityOpen").addEventListener("click", async () => {
+  try {
+    await loadIptvUsers();
+    $("iptvUsers").dispatchEvent(new Event("change"));
+  } catch (error) {
+    showError(error);
+  }
+});
 $("iptvUsers").addEventListener("change", () => {
   const user = iptvUsers.find((u) => u.username === $("iptvUsers").value);
   $("iptvUsername").value = user?.username || "";
@@ -1230,13 +1267,24 @@ $("iptvUsers").addEventListener("change", () => {
         .toISOString()
         .slice(0, 16)
     : "";
-  for (const option of $("iptvChannels").options)
-    option.selected = user?.channels.includes(option.value) || false;
-  $("iptvPlaylist").value = $("iptvToken").value = "";
+  for (const input of iptvChannelInputs())
+    input.checked = user?.channels.includes(input.value) || false;
+  updateIptvSelection();
+  clearIptvLinks();
 });
 $("iptvSave").addEventListener("click", async () => {
   try {
     const username = $("iptvUsername").value;
+    const channels = iptvChannelInputs()
+      .filter((input) => input.checked)
+      .map((input) => input.value);
+    if (
+      !channels.length &&
+      !confirm(
+        "Ningún canal seleccionado. Este usuario recibirá una lista vacía. ¿Guardar?",
+      )
+    )
+      return;
     const result = await postJSON("/api/iptv/users", {
       username,
       password: $("iptvPassword").value,
@@ -1244,7 +1292,7 @@ $("iptvSave").addEventListener("click", async () => {
       expires: $("iptvExpires").value
         ? new Date($("iptvExpires").value).getTime() / 1000
         : 0,
-      channels: Array.from($("iptvChannels").selectedOptions, (o) => o.value),
+      channels,
     });
     $("iptvPassword").value = "";
     await loadIptvUsers();
@@ -1254,13 +1302,23 @@ $("iptvSave").addEventListener("click", async () => {
         encodeURIComponent(result.token)
       : "";
     $("iptvToken").value = result.token || "";
+    if (result.token) {
+      $("iptvDownload").href = $("iptvPlaylist").value;
+      $("iptvDownload").classList.remove("hidden");
+    } else clearIptvLinks();
+    $("iptvUsers").value = username;
+    iptvChannelInputs().forEach((input) => {
+      input.checked = channels.includes(input.value);
+    });
+    updateIptvSelection();
     $("iptvInfo").textContent =
-      "Guardado. Enlaces anteriores de este usuario revocados. Guarda el token para Flussonic.";
+      `Guardado con ${channels.length} canales autorizados. Enlaces anteriores de este usuario revocados. Descarga la M3U directamente, sin copiar texto del chat.`;
   } catch (error) {
     $("iptvInfo").textContent = error.message;
   }
 });
 $("securityDialog").addEventListener("close", () => {
+  clearIptvLinks();
   for (const id of ["iptvPassword", "iptvPlaylist", "iptvToken", "iptvBackend"])
     $(id).value = "";
 });

@@ -67,6 +67,24 @@ class IPTVTests(unittest.TestCase):
         self.assertEqual(self.request("/iptv/playlist.m3u8")[0], 401)
         self.assertEqual(self.request("/iptv/playlist.m3u8?username=viewer&password=bad")[0], 401)
 
+    def test_multiple_inactive_channels_and_raw_m3u(self):
+        self.panel.STATE["transponders"].append({"id": "other", "scan": {"services": [{"sid": 30, "name": "Other mux"}]}})
+        self.store.save_user({**self.user, "channels": ["tp:10", "tp:20", "other:30"]})
+        token = self.store.token("viewer")
+        self.assertFalse(self.panel._streams.status())
+        status, text, headers = self.request("/iptv/playlist.m3u8?token=" + token)
+        self.assertEqual(status, 200)
+        self.assertIn('attachment; filename="canales.m3u8"', headers["Content-Disposition"])
+        self.assertEqual(text.count("#EXTINF:"), 3)
+        urls = [line for line in text.splitlines() if line.startswith("http")]
+        self.assertEqual(len(urls), 3)
+        self.assertNotIn("&amp;", text)
+        self.assertNotIn("](http", text)
+        for url in urls:
+            from urllib.parse import urlparse, parse_qs
+            self.assertEqual(parse_qs(urlparse(url).query)["token"], [token])
+        self.assertFalse(self.panel._streams.status())
+
     def test_no_admin_or_legacy_access(self):
         for path in ("/api/iptv/users", "/api/transponders", "/api/epg.xml", "/stream/channel/tp:10"):
             self.assertEqual(self.request(path + "?token=" + self.token)[0], 401)

@@ -4,9 +4,11 @@
 
 En **Control de acceso → Reproducción privada → Usuarios IPTV / Flussonic**:
 
-1. Introduce usuario, contraseña de 12–256 caracteres y canales autorizados.
+1. Introduce usuario, contraseña de 12–256 caracteres y marca las casillas de
+   canales autorizados. En 0.14.1 puedes seleccionar todos los habilitados o
+   quitar la selección; el contador indica cuántos permisos se guardarán.
 2. Opcionalmente establece vencimiento en hora local del navegador.
-3. Guarda y copia la lista y el token del usuario. Ningún canal seleccionado significa
+3. Guarda y usa **Descargar M3U del usuario**, o copia la URL de lista y el token. Ningún canal seleccionado significa
    ningún canal autorizado; no existe un permiso implícito para canales futuros.
 4. Para editar selecciona un usuario. Contraseña vacía conserva la actual.
    Guardar siempre revoca sus tokens anteriores; deshabilitar revoca su acceso.
@@ -110,3 +112,16 @@ no pueden revocarse. Comprueba la configuración de tu versión de Flussonic.
 Referencias del protocolo:
 https://flussonic.com/doc/api/authorization/
 https://flussonic.com/doc/authorize-clients/
+
+## Si la lista solo contiene un canal
+
+La lista muestra los canales habilitados que se autorizaron explícitamente al
+usuario, no solamente los que tienen espectadores. No hace falta iniciarlos.
+Selecciona el usuario, marca los canales (o todos los habilitados), guarda y
+utiliza la nueva URL: el token anterior queda revocado. Los permisos existentes
+no se amplían automáticamente al actualizar.
+
+En versiones anteriores el selector múltiple requería Ctrl/Cmd o Shift; la 0.14.1
+usa casillas. Si copias el contenido desde un chat puede aparecer como
+`[URL](URL)` o `&amp;`; eso no es una línea válida de M3U. Descarga el archivo
+directamente desde el panel; debe contener URLs de texto con `&token=` literal.

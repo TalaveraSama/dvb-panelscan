@@ -559,9 +559,23 @@
           id="iptvExpires"
           type="datetime-local"
       /></label>
-      <label
-        >Canales autorizados<select id="iptvChannels" multiple size="8"></select
-      ></label>
+      <h4>Canales autorizados</h4>
+      <p class="muted">
+        Marca cada canal o selecciona todos los habilitados. No necesitan estar
+        activos para aparecer en la lista.
+      </p>
+      <button id="iptvSelectAll" class="btn" type="button">
+        Seleccionar todos los habilitados
+      </button>
+      <button id="iptvSelectNone" class="btn" type="button">
+        Quitar selección
+      </button>
+      <p id="iptvSelectedCount" role="status"></p>
+      <div
+        id="iptvChannels"
+        class="iptv-channel-list"
+        aria-label="Canales autorizados"
+      ></div>
       <button id="iptvSave" class="btn primary" type="button">
         Guardar usuario y generar enlaces
       </button>
@@ -571,6 +585,9 @@
           readonly
       /></label>
       <label>Lista M3U del usuario<input id="iptvPlaylist" readonly /></label>
+      <a id="iptvDownload" class="btn hidden" download="canales.m3u8"
+        >Descargar M3U del usuario</a
+      >
       <label
         >Token para clientes de Flussonic<input id="iptvToken" readonly
       /></label>

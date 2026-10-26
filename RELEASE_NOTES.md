@@ -1,3 +1,17 @@
+## DVB PanelScan 0.14.1 · Selección IPTV y descarga M3U
+
+- Selección de canales mediante casillas independientes, botones seleccionar todos
+  los habilitados / quitar selección y contador visible. Ya no requiere Ctrl/Cmd.
+- Conserva la selección tras guardar y avisa si se guarda sin canales.
+- Descarga directa de M3U UTF-8 con Content-Disposition: attachment; evita copiar
+  enlaces convertidos a Markdown/HTML por chats. Los parámetros usan & literal.
+- Pruebas DOM de múltiples canales y descarga, y HTTP de tres canales inactivos
+  de dos transpondedores: no requiere abrir sesiones ni activar siempre-activo.
+- No amplía automáticamente los permisos de usuarios existentes. Selecciona sus
+  canales y guarda; esto revoca el token anterior de esa cuenta.
+
+---
+
 ## DVB PanelScan 0.14.0 · Usuarios IPTV / Flussonic
 
 - Gestión desde Reproducción privada: usuarios IPTV separados de administrador y

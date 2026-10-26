@@ -794,7 +794,14 @@ class Handler(BaseHTTPRequestHandler):
                 identity = urllib.parse.unquote(urllib.parse.urlparse(line).path.rsplit("/", 1)[-1])
                 if _iptv.allowed(self.iptv_token, identity):
                     lines.extend((pending, line + "&token=" + urllib.parse.quote(self.iptv_token)))
-        return self._send(200, "\n".join(lines) + "\n", "application/vnd.apple.mpegurl")
+        playlist = ("\n".join(lines) + "\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="canales.m3u8"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(playlist)))
+        self.end_headers()
+        self.wfile.write(playlist)
 
     def _flussonic(self, path, qs):
         secret = path[len("/iptv/flussonic/"):]

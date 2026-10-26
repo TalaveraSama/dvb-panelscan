@@ -1044,3 +1044,21 @@ select:focus-visible {
   background: var(--bg);
   border-radius: 10px;
 }
+
+.iptv-channel-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border, #2b4151);
+  border-radius: 8px;
+  padding: 12px;
+}
+.iptv-channel-list label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+}
+.iptv-channel-list input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+}
