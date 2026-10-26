@@ -7,7 +7,15 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.9.0 · Login y panel renovado
+## Actual: 0.10.0 · Mosaico de canales
+
+Canales y EPG incluye vista Mosaico/Tabla con grupos por transpondedor, tarjetas
+compactas, estados ECM/TS y bitrate calculado a partir de bytes recibidos. Los
+menús permiten editar, abrir, ver programas/eventos y detener un solo canal.
+No se inventan niveles de señal ni errores PES. No certifica vídeo decodificado.
+Ver [mosaico y métricas](docs/CHANNEL_MOSAIC.md).
+
+### Login y panel renovado (0.9.0)
 
 Login obligatorio, administrador sin contraseña predeterminada, sesiones con
 logout, CSRF y enlaces privados para reproductores. Antes de actualizar leer

@@ -1,3 +1,27 @@
+## DVB PanelScan 0.10.0 · Mosaico de canales por transpondedor
+
+- Vista compacta en Canales y EPG inspirada en monitores de headend, con diseño
+  propio: grupos de transpondedor, adaptador, frecuencia, polarización y SR.
+- Tarjetas con nombre/logo, SID, perfil, programa actual y menú de editar,
+  abrir TS, consultar programación/eventos y detener solo el canal seleccionado.
+- Bitrate real del TS recibido por servicio, calculado entre muestras de bytes
+  del worker. Primera muestra: Midiendo; muestras antiguas, reinicios y saltos
+  de contador se descartan. No se mide el bitrate de vídeo decodificado.
+- Verde: CW recientes; azul: TS activo; ámbar: espera, falta de TS nuevo o falta
+  de telemetría; rojo: error ECM/entrada; gris: inactivo/deshabilitado.
+- Cambio entre Mosaico y Tabla y búsqueda por nombre/proveedor. Actualización
+  sin reconstruir tarjetas ni cerrar menús en cada sondeo.
+- No se inventan valores de señal, calidad, BER, UNC o errores PES: el backend
+  aún no los expone. No se activa ni sintoniza un canal solo por mostrarlo.
+- Conserva login, tokens, perfiles, recepción, EPG y eventos sin archivos.
+- 69 pruebas Python/HTTP, DOM con pruebas de bitrate/reset/estados/menús/filtros,
+  sanitizadores C y verificación del paquete Debian.
+
+No incluye código ni recursos de Astra/Cesbo. El parecido es funcional y visual;
+no implica afiliación ni equivalencia de sus métricas de análisis TS.
+
+---
+
 ## DVB PanelScan 0.9.0 · Login y panel renovado
 
 **Cambio de acceso:** después de actualizar, configurar el administrador con

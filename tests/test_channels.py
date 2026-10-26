@@ -188,3 +188,13 @@ class ChannelSettingsTests(unittest.TestCase):
             page=response.read().decode()
         self.assertIn('v'+version,page)
         self.assertNotIn('@VERSION@',page)
+
+    def test_mosaic_group_metadata_keeps_channel_identity(self):
+        tp=self.panel.STATE['transponders'][0]
+        tp.update(adapter=3,pol='V',symbol_rate=30000000,name='Amazonas')
+        groups=self.call('/api/epg')[1]
+        self.assertEqual(groups[0]['adapter'],3)
+        self.assertEqual(groups[0]['pol'],'V')
+        self.assertEqual(groups[0]['symbol_rate'],30000000)
+        self.assertEqual(groups[0]['services'][0]['channel_id'],'a:672')
+        self.assertEqual(groups[1]['services'][0]['channel_id'],'b:672')

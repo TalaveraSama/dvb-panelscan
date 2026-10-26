@@ -267,7 +267,7 @@ async function loadEpg() {
 
 function renderEpg() {
   const body = $("epgBody");
-  const filter = ($("epgFilter").value || "").toLowerCase();
+  const filter = ($("epgFilter").value || "").trim().toLowerCase();
   let rows = [];
   for (const tp of epg) {
     for (const s of tp.services || []) {
@@ -288,6 +288,7 @@ function renderEpg() {
     }
   }
   $("epgCount").textContent = rows.length ? `(${rows.length})` : "";
+  renderMosaic();
   body.innerHTML =
     rows.join("") || '<tr><td colspan="8" class="muted">Sin EPG</td></tr>';
   body
@@ -296,6 +297,139 @@ function renderEpg() {
       b.addEventListener("click", () => deleteChannel(b.dataset.delch)),
     );
 }
+
+// Compact transponder/channel monitor. Measurements stay in RAM, never logs.
+let bitrateSamples = new Map();
+let channelRates = new Map();
+let mosaicOffline = false;
+function sampleChannelRates(sessions, now = performance.now()) {
+  const samples = new Map();
+  const rates = new Map();
+  for (const session of sessions) {
+    if (!session.running || !Number.isFinite(session.bytes_received)) continue;
+    const previous = bitrateSamples.get(session.channel_id);
+    const elapsed = previous ? now - previous.time : 0;
+    const delta = previous ? session.bytes_received - previous.bytes : -1;
+    const valid =
+      previous &&
+      previous.pid === session.pid &&
+      elapsed > 0 &&
+      elapsed <= 10000 &&
+      delta >= 0;
+    rates.set(session.channel_id, valid ? (delta * 8) / elapsed : null);
+    samples.set(session.channel_id, {
+      time: now,
+      bytes: session.bytes_received,
+      pid: session.pid,
+    });
+  }
+  bitrateSamples = samples;
+  channelRates = rates;
+}
+function renderMosaic() {
+  const filter = $("epgFilter").value.trim().toLowerCase();
+  $("channelMosaic").innerHTML =
+    epg
+      .map((tp) => {
+        const services = (tp.services || []).filter(
+          (s) =>
+            !filter ||
+            ((s.name || "") + " " + (s.provider || ""))
+              .toLowerCase()
+              .includes(filter),
+        );
+        if (!services.length) return "";
+        return `<section class="mux-monitor" aria-label="${esc(tp.transponder || tp.transponder_id)}">
+      <header class="mux-heading"><div><span class="eyebrow">TRANSPONDEDOR · ADAPTADOR ${esc(tp.adapter ?? "—")}</span><h3>${esc(tp.transponder || tp.transponder_id)}</h3><small>${esc(tp.freq_mhz || "—")} MHz ${esc(tp.pol || "")} · ${esc((tp.type || "").toUpperCase())} · SR ${esc(tp.symbol_rate || "—")}</small></div><span class="mux-count" data-mux-count="${esc(tp.transponder_id)}">${services.length} canales</span></header>
+      <div class="channel-grid">${services
+        .map((s) => {
+          const id = tp.transponder_id + ":" + s.sid;
+          return `<article class="channel-tile tile-idle" data-tile-channel="${esc(id)}" data-enabled="${s.enabled !== false}" data-mux="${esc(tp.transponder_id)}">
+          <div class="tile-top">${s.logo ? `<img class="tile-logo" src="${esc(s.logo)}" alt="" loading="lazy">` : ""}<strong title="${esc(s.name)}">${esc(s.name || "Servicio " + s.sid)}</strong>
+          <details class="tile-menu"><summary aria-label="Acciones para ${esc(s.name)}">⋯</summary><div><button type="button" data-edit-channel="${esc(id)}">Editar / perfil</button><a href="/stream/channel/${encodeURIComponent(id)}?profile=pass" target="_blank" rel="noopener">Abrir TS</a><button type="button" data-epg-channel="${esc(id)}">Programas (${esc(s.epg_events || 0)})</button><button type="button" data-events-channel="${esc(id)}">Eventos en vivo</button><button type="button" data-stop-single="${esc(id)}">Detener canal</button></div></details></div>
+          <div class="tile-rate" data-tile-rate>—</div><div class="tile-status" data-tile-status>Inactivo</div>
+          <div class="tile-meta">SID ${esc(s.sid)} · ${esc(s.profile_name || "Predeterminado")}</div>
+          ${s.now ? `<div class="tile-programme" title="${esc(s.now)}">${esc(s.now)}</div>` : ""}
+        </article>`;
+        })
+        .join("")}</div></section>`;
+      })
+      .join("") ||
+    '<div class="mosaic-empty">No hay canales que mostrar. Escanea un transpondedor o cambia la búsqueda.</div>';
+  updateMosaic(mosaicOffline);
+}
+function updateMosaic(offline = false) {
+  mosaicOffline = offline;
+  document.querySelectorAll("[data-tile-channel]").forEach((tile) => {
+    const id = tile.dataset.tileChannel;
+    const session = offline ? null : streamHealth.get(id);
+    const rate = channelRates.get(id);
+    let state = "idle",
+      label = "Inactivo";
+    if (offline) {
+      state = "warning";
+      label = "Sin telemetría";
+    } else if (tile.dataset.enabled === "false") {
+      label = "Deshabilitado";
+    } else if (session?.input_error || session?.ecm?.state === "error") {
+      state = "error";
+      label = session.input_error || session.ecm.label || "Error ECM/CW";
+    } else if (session?.running) {
+      state =
+        rate === 0
+          ? "warning"
+          : session.ecm?.state === "ok"
+            ? "good"
+            : session.ecm?.state === "waiting"
+              ? "warning"
+              : "active";
+      label =
+        rate === 0
+          ? "Sin nuevo TS"
+          : session.ecm?.state === "ok"
+            ? "CW recientes"
+            : session.ecm?.label || "TS activo";
+    }
+    tile.className = "channel-tile tile-" + state;
+    tile.querySelector("[data-tile-rate]").textContent = offline
+      ? "—"
+      : session?.running
+        ? rate == null
+          ? "Midiendo…"
+          : Math.round(rate).toLocaleString() + " kbit/s"
+        : "—";
+    const status = tile.querySelector("[data-tile-status]");
+    status.textContent = label;
+    status.title =
+      label + ". El estado de CW/TS no certifica vídeo decodificado.";
+  });
+  document.querySelectorAll("[data-mux-count]").forEach((label) => {
+    const tiles = [...document.querySelectorAll("[data-tile-channel]")].filter(
+      (tile) => tile.dataset.mux === label.dataset.muxCount,
+    );
+    const active = offline
+      ? 0
+      : tiles.filter(
+          (tile) => streamHealth.get(tile.dataset.tileChannel)?.running,
+        ).length;
+    label.textContent = offline
+      ? `${tiles.length} canales · sin telemetría`
+      : `${active} activos / ${tiles.length} visibles`;
+  });
+}
+function setChannelsView(mosaic) {
+  $("channelMosaic").classList.toggle("hidden", !mosaic);
+  $("epgTableWrap").classList.toggle("hidden", mosaic);
+  for (const [id, pressed] of [
+    ["mosaicView", mosaic],
+    ["tableView", !mosaic],
+  ]) {
+    $(id).classList.toggle("selected", pressed);
+    $(id).setAttribute("aria-pressed", String(pressed));
+  }
+}
+$("mosaicView").addEventListener("click", () => setChannelsView(true));
+$("tableView").addEventListener("click", () => setChannelsView(false));
 
 $("epgRefresh").addEventListener("click", () => loadEpg().catch(showError));
 $("epgSettingsForm").addEventListener("submit", async (event) => {
@@ -410,6 +544,7 @@ async function saveNewcamd(e) {
   await loadStream();
 }
 function updateHealthBadges(offline = false) {
+  updateMosaic(offline);
   document.querySelectorAll("[data-health]").forEach((badge) => {
     const health = streamHealth.get(badge.dataset.health)?.ecm;
     badge.className = "ecm-badge ecm-" + (health?.state || "idle");
@@ -520,6 +655,7 @@ async function downloadM3u8(e) {
 
 async function loadStream() {
   const st = await getJSON("/api/stream/status");
+  sampleChannelRates(st.sessions || []);
   streamHealth = new Map((st.sessions || []).map((s) => [s.channel_id, s]));
   updateHealthBadges();
   $("metricStream").textContent = st.running ? "Activo" : "Detenido";
@@ -745,6 +881,8 @@ setInterval(
   () =>
     loadStream().catch((error) => {
       streamHealth.clear();
+      bitrateSamples.clear();
+      channelRates.clear();
       updateHealthBadges(true);
       showError(error);
     }),

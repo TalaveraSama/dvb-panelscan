@@ -321,6 +321,7 @@ def epg_aggregate():
                 continue
             out.append({
                 "transponder_id": t.get("id"),
+                "adapter": t.get("adapter", 0), "pol": t.get("pol"), "symbol_rate": t.get("symbol_rate"),
                 "transponder": t.get("name"),
                 "type": t.get("type"),
                 "freq_mhz": t.get("freq_mhz"),

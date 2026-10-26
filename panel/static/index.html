@@ -182,9 +182,34 @@
       <section id="tab-epg" class="hidden">
         <section class="card">
           <div class="card-head">
-            <h2>EPG <span id="epgCount" class="muted"></span></h2>
+            <h2>Canales y EPG <span id="epgCount" class="muted"></span></h2>
             <div class="actions">
-              <input id="epgFilter" type="search" placeholder="Filtrar…" />
+              <div
+                class="view-switch"
+                role="group"
+                aria-label="Vista de canales"
+              >
+                <button
+                  type="button"
+                  class="btn selected"
+                  id="mosaicView"
+                  aria-pressed="true"
+                >
+                  ▦ Mosaico</button
+                ><button
+                  type="button"
+                  class="btn"
+                  id="tableView"
+                  aria-pressed="false"
+                >
+                  ☷ Tabla
+                </button>
+              </div>
+              <input
+                id="epgFilter"
+                type="search"
+                placeholder="Buscar canal o proveedor…"
+              />
               <a class="btn" href="/api/epg.xml" target="_blank"
                 >XMLTV (xui.one/xcode)</a
               >
@@ -229,7 +254,17 @@
             programas ni horarios. Se actualiza al escanear o mientras el
             transpondedor esté recibiéndose; no resintoniza otros canales.
           </p>
-          <div class="table-wrap">
+          <div class="mosaic-legend">
+            <span class="legend-good">● CW recientes</span
+            ><span class="legend-active">● TS activo</span
+            ><span class="legend-warning">● Atención</span
+            ><span class="legend-error">● Error</span><span>○ Inactivo</span
+            ><span
+              >Bitrate de TS recibido · no certifica vídeo decodificado</span
+            >
+          </div>
+          <div id="channelMosaic"></div>
+          <div class="table-wrap hidden" id="epgTableWrap">
             <table>
               <thead>
                 <tr>
