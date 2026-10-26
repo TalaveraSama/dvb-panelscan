@@ -56,6 +56,23 @@ class ChannelSettingsTests(unittest.TestCase):
         self.assertNotIn("caid", self.panel.STATE["channels"]["a:672"])
         self.assertNotIn("ecm_pid", self.panel.STATE["channels"]["a:672"])
 
+    def test_descramble_delay_validation_persistence_and_command(self):
+        self.assertEqual(self.panel.transponder_views()[0]["scan"]["services"][0]["descramble_delay_ms"], 500)
+        tp = self.panel.STATE["transponders"][0]
+        with patch.object(self.panel, "find_tbsstream", return_value="/test/tbsstream"), patch.object(self.panel._streams, "acquire", return_value="session") as acquire:
+            for delay in (0, 500, 2000):
+                with self.subTest(delay=delay), patch.object(self.panel._streams, "stop_channel") as stop:
+                    self.assertEqual(self.call("/api/channels/a:672/edit", {"descramble_delay_ms": delay})[0], 200)
+                    stop.assert_called_once_with("a:672")
+                    self.panel._load()
+                    self.panel._session_start(tp, nc=self.config, sid=672)
+                    cmd = acquire.call_args.args[2]
+                    self.assertEqual(cmd[cmd.index("--descramble-delay-ms") + 1], str(delay))
+                    self.assertEqual(self.panel.transponder_views()[0]["scan"]["services"][0]["descramble_delay_ms"], delay)
+        for delay in (-1, 2001, True, "500", None, 1.5):
+            self.assertEqual(self.call("/api/channels/a:672/edit", {"descramble_delay_ms": delay})[0], 400)
+        self.assertEqual(self.panel.STATE["channels"]["a:672"]["descramble_delay_ms"], 2000)
+
     def profile(self):
         code, response = self.call("/api/newcamd/profiles", self.config)
         self.assertEqual(code,200); return response["id"]

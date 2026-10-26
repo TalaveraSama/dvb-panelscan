@@ -9,7 +9,7 @@ OBJS    := main.o newcamd.o csa.o
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
 
-main.o: ../dvb_lnb.h
+main.o: ../dvb_lnb.h pacing.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<

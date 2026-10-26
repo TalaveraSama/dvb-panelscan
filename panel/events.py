@@ -92,9 +92,9 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
         return
     if line.startswith("TS stats:"):
         stats = {key: int(value) for key, value in re.findall(
-            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities|ca_switch_drops|queue_full_drops|ecm_repeats)=(\d+)", line)}
+            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities|ca_switch_drops|queue_full_drops|ecm_repeats|cw_timeout_drops|output_pending|output_drops|output_late|pcr_resets|pes_errors)=(\d+)", line)}
         if stats:
-            level = "warning" if any(value for key, value in stats.items() if key not in ("pending", "ecm_repeats")) else "info"
+            level = "warning" if any(value for key, value in stats.items() if key not in ("pending", "ecm_repeats", "output_pending")) else "info"
             bus.publish("stats", "Estadísticas TS (acumuladas)", level, channel, adapter, stats=stats)
         return
     match = PMT.search(line)
@@ -110,6 +110,7 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
         ("login rechazado", "Login Newcamd rechazado", "error"),
         ("datos de tarjeta", "No se recibieron datos de tarjeta", "error"),
         ("unrecognized option", "Motor incompatible: opción no reconocida", "error"),
+        ("output stalled", "Entrega bloqueada: el canal necesita reconexión", "error"),
         ("queue full", "Cola de servicio llena; paquetes descartados", "error"),
         ("ECM deadline", "Tiempo de espera ECM agotado en el broker", "error"),
         ("connected", "Conexión de acceso condicional establecida", "info"),

@@ -271,6 +271,7 @@ def channel_view(tp, service):
     result.update(channel_id=identity, sid=service["sid"])
     result.setdefault("logo", LOGOS.get(" ".join(str(result.get("name", "")).casefold().split()), ""))
     result.setdefault("enabled", True)
+    result.setdefault("descramble_delay_ms", 500)
     result["profile_inherited"] = "newcamd_profile" not in STATE["channels"].get(identity, {})
     result["newcamd_profile"] = channel_profile(tp, service["sid"])
     profile = (STATE["newcamd"] if result["newcamd_profile"] == "default" else
@@ -516,7 +517,8 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     # Workers never open/tune DVB devices. Newcamd credentials stay in the
     # single broker, not in every service process.
     cmd = [binary, "--stdin", "--sid", str(sid), "--stdout", "--verbose",
-           "--http-port", str(http_port)]
+           "--http-port", str(http_port),
+           "--descramble-delay-ms", str(settings.get("descramble_delay_ms", 500))]
     if settings.get("caid") and settings.get("ecm_pid"):
         cmd += ["--caid", settings["caid"], "--ecm-pid", str(settings["ecm_pid"])]
     if not isinstance(udp, (list, tuple)) or any(not isinstance(u, str) for u in udp):
@@ -1038,7 +1040,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 tp, sid = resolve_channel(identity)
                 identity = channel_id(tp, sid)
-                allowed = {"name", "group", "number", "logo", "enabled", "newcamd_profile", "caid", "ecm_pid"}
+                allowed = {"name", "group", "number", "logo", "enabled", "newcamd_profile", "caid", "ecm_pid", "descramble_delay_ms"}
                 if set(body) - allowed:
                     raise ValueError("Campo de canal no admitido; el SID no se modifica")
                 settings = dict(STATE["channels"].get(identity, {}))
@@ -1058,6 +1060,11 @@ class Handler(BaseHTTPRequestHandler):
                     if number not in (None, "") and (isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 99999):
                         raise ValueError("Número de canal inválido (1–99999)")
                     settings["number"] = number or None
+                if "descramble_delay_ms" in body:
+                    delay = body["descramble_delay_ms"]
+                    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 2000:
+                        raise ValueError("Retardo de descifrado inválido (0–2000 ms)")
+                    settings["descramble_delay_ms"] = delay
                 if "caid" in body or "ecm_pid" in body:
                     caid = body.get("caid", settings.get("caid", ""))
                     pid = body.get("ecm_pid", settings.get("ecm_pid"))

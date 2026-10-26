@@ -33,6 +33,8 @@ jobs:
           /tmp/test-eit-scan
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-lnb tests/test_lnb.c
           /tmp/test-lnb
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-pacing tests/test_pacing.c
+          /tmp/test-pacing
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-transport tests/test_transport.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
           /tmp/test-transport
           gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-newcamd tests/test_newcamd.c -lcrypto

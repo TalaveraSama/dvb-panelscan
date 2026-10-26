@@ -413,6 +413,72 @@ static void test_input_error_counters(void)
   assert(input_tei == 1 && ring_seq == previous);
 }
 
+static void test_timed_descramble_and_expiry(void)
+{
+  uint8_t p[TS_PKT] = {0x47, 1, 0, 0x10};
+  scram_head = scram_count = 0;
+  opts.descramble_delay_ms = 500;
+  uint64_t before = ring_seq;
+  buffer_service_packet(p);
+  flush_scrambled();
+  assert(scram_count == 1 && ring_seq == before);
+  scram_at[scram_head] -= 501000;
+  flush_scrambled();
+  assert(!scram_count && ring_seq == before + 1);
+  have_cw_even = 0;
+  p[3] = 0x90;
+  buffer_service_packet(p);
+  scram_at[scram_head] -= 501000;
+  flush_scrambled();
+  assert(scram_count == 1 && ring_seq == before + 1);
+  /* Expired payload must not be decrypted later or remain forever. */
+  uint64_t dropped = cw_timeout_drops;
+  scram_at[scram_head] -= 2100000;
+  flush_scrambled();
+  assert(!scram_count && cw_timeout_drops == dropped + 1);
+  opts.descramble_delay_ms = 0;
+}
+
+static void test_bounded_output_queue(void)
+{
+  uint8_t p[TS_PKT] = {0x47, 1, 0, 0x10};
+  output_async = 1;
+  output_count = output_head = 0;
+  uint64_t before = output_drops;
+  for (unsigned i = 0; i < OUTPUT_MAX + 1; i++) queue_output(p, monotonic_us());
+  assert(output_count == 1 && output_drops == before + OUTPUT_MAX);
+  assert(output_reset);
+  output_async = 0;
+  output_count = output_head = 0;
+}
+
+static void test_output_worker_order_and_expiry(void)
+{
+  output_async = output_running = 1;
+  output_count = output_head = 0;
+  opts.descramble_delay_ms = 0;
+  uint8_t p[TS_PKT] = {0x47, 1, 0, 0x10};
+  uint64_t before = ring_seq, dropped = output_drops;
+  queue_output(p, monotonic_us() - 3000000); /* stale: never emitted */
+  for (int i = 0; i < 20; i++) { p[2] = i; queue_output(p, monotonic_us()); }
+  pthread_t thread;
+  assert(!pthread_create(&thread, NULL, output_worker, NULL));
+  struct timespec until;
+  clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += 3;
+  pthread_mutex_lock(&ring_mutex);
+  while (ring_seq < before + 20)
+    assert(!pthread_cond_timedwait(&ring_cond, &ring_mutex, &until));
+  for (int i = 0; i < 20; i++) assert(ring[((before+i) % RING_PKTS)*TS_PKT+2] == i);
+  pthread_mutex_unlock(&ring_mutex);
+  pthread_mutex_lock(&output_mutex);
+  output_running = 0;
+  pthread_cond_signal(&output_cond);
+  pthread_mutex_unlock(&output_mutex);
+  pthread_join(thread, NULL);
+  assert(output_drops == dropped + 1);
+  output_async = 0;
+}
+
 int main(void)
 {
   test_fragmented_reads();
@@ -427,6 +493,9 @@ int main(void)
   test_psi_continuity_and_pointer();
   test_false_sync_headers();
   test_input_error_counters();
+  test_timed_descramble_and_expiry();
+  test_bounded_output_queue();
+  test_output_worker_order_and_expiry();
   puts("TS fragmentation, PCR forwarding, ring batching and TCP tests passed");
   return 0;
 }

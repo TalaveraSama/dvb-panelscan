@@ -654,6 +654,12 @@
           todos.
         </p>
         <label
+          >Retardo de descifrado (ms)
+          <input id="ch_delay" type="number" min="0" max="2000" step="1" required value="500" />
+        </label>
+        <p class="callout">500 ms por defecto. Añade latencia al directo para esperar claves;
+          0 desactiva este retardo, no la entrega regulada. No repara paquetes perdidos ni claves incorrectas.</p>
+        <label
           ><input id="ch_enabled" type="checkbox" /> Canal habilitado</label
         >
         <p class="callout">

@@ -18,3 +18,11 @@ class CASelectionCLI(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(b"--caid", result.stderr)
                 self.assertNotIn(b"/dev/dvb", result.stderr)
+
+    def test_invalid_delay_fails_before_tuning(self):
+        for value in ("-1", "2001", "true", "500ms", ""):
+            with self.subTest(value=value):
+                result = subprocess.run([str(BINARY), "--descramble-delay-ms", value], capture_output=True, timeout=3)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"--descramble-delay-ms", result.stderr)
+                self.assertNotIn(b"/dev/dvb", result.stderr)

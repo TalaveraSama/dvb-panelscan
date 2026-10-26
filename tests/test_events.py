@@ -77,6 +77,17 @@ class EventTests(unittest.TestCase):
         self.assertEqual(event["level"], "warning")
         viewer.close()
 
+    def test_output_diagnostics_are_live_structured_and_allowlisted(self):
+        bus = EventBus()
+        view = bus.subscribe()
+        diagnostic_event(bus, "TS stats: cw_timeout_drops=7 output_pending=8 output_drops=9 output_late=2 pcr_resets=3 pes_errors=4 secret=123", "channel")
+        record = view.read()[0]
+        self.assertEqual(record["stats"], dict(cw_timeout_drops=7, output_pending=8, output_drops=9, output_late=2, pcr_resets=3, pes_errors=4))
+        self.assertEqual(record["level"], "warning")
+        diagnostic_event(bus, "TS stats: output_pending=10", "channel")
+        self.assertEqual(view.read()[0]["level"], "info")
+        view.close()
+
     def test_ecm_repeats_are_not_reported_as_transport_loss(self):
         bus = EventBus(); viewer = bus.subscribe()
         diagnostic_event(bus, "TS stats: tei=0 cc_errors=0 pending=0 ecm_repeats=15 ca_switch_drops=0 queue_full_drops=0", "channel")
