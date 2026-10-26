@@ -20,6 +20,21 @@ Es un reensamblado del código de TVHeadend: el **protocolo newcamd** está
 portado de `src/descrambler/cwc.c`, el **CSA** de `src/descrambler/tvhcsa.c`
 (vía libdvbcsa), y la sintonización/demux de `dvb2m3u8`.
 
+## Roles multicanal usados por el panel (0.6.0)
+
+- `--mux-only --stdout`: sintoniza y entrega todo el multiplex, sin CA ni remux.
+- `--stdin --sid N --stdout --cam-socket PATH`: procesa un servicio desde stdin,
+  sin abrir ningún dispositivo DVB; genera PAT/PMT propias y descifra con su CSA.
+- `--ca-broker PATH --newcamd HOST:PORT --deskey ... --user ... --pass ...`:
+  endpoint UNIX privado y una conexión Newcamd para varios servicios, con ECM
+  pendientes correlacionados por secuencia y deadline individual de 5000 ms.
+
+El panel administra el reparto, las suscripciones y la limpieza. Varias URLs de
+un mismo mux comparten captura y broker; los ejemplos CLI monolíticos de abajo
+siguen disponibles, pero no deben ejecutarse en paralelo sobre un mismo tuner.
+Ver [arquitectura y pruebas](../docs/MULTICHANNEL.md). La cola CW es ahora de
+65536 paquetes por servicio; la aplicación temporal completa de CW sigue pendiente.
+
 ## Dependencias
 
 - Linux con headers DVB (`linux/dvb/*`).
@@ -90,29 +105,67 @@ Ejemplo: `00:01:02:03:04:05:06:07:08:09:0a:0b:0c:0d`.
 5. **CSA**: descifra los paquetes con bit de scrambling usando libdvbcsa
    (port de `tvhcsa.c`). Los paquetes scrambled que llegan **antes** de tener la
    CW se **guardan en una cola** y se descifran en orden cuando llega la clave
-   (evita cortes al inicio y en el cambio de clave).
+   (espera acotada; no garantiza evitar cortes en los cambios de clave).
 6. **Remux**: genera PAT y PMT **limpios** (sin descriptores CA) y los inyecta
    periódicamente; reenvía los ES descifrados y descarta los ECM.
 7. **Salida**: UDP (con `sendto`) y HTTP (ring buffer + servidor mínimo).
 
-## Avisos importantes
+## Avisos importantes (0.6.0)
 
-- ⚠️ **Sin probar en este entorno** (no hay Linux ni hardware DVB ni servidor
-  newcamd aquí). Compílalo en Linux y pruébalo con hardware real.
-- La conexión newcamd es **asíncrona** (hilo CA + cola de ECM), así que el hilo
-  principal no se detiene esperando la CW. Si falla el servidor newcamd, se
-  sigue reenviando el TS pero sin descifrar (paquetes scrambled en cola).
-- El **cambio de clave** (crypto period, cada ~10 s en CSA) se amortigua con la
-  cola de paquetes scrambled, pero no llega a la precisión de TVHeadend
-  (que predice el cambio y hace switchover exacto). Para un headend es
-  suficiente; para una precisión total haría falta rastrear el crypto period.
-- El **formato del ECM enviado** (sección sin los 4 bytes de CRC) es la
-  convención más común, pero puede variar entre servidores newcamd; si un
-  servidor no responde CW, es el primer punto a ajustar en `enqueue_ecm()`.
-- DVB-S: la frecuencia se pasa ya convertida por el LNB (sin DiSEqC/rotor).
-- Para multicast fuera de la LAN hay que ajustar el TTL del socket
-  (`IP_MULTICAST_TTL`) — aquí se deja el valor por defecto (1).
+- Compilación y regresiones con ASan/UBSan verificadas en Ubuntu mediante
+  Actions. Falta validación end-to-end de esta versión con hardware y acceso
+  condicional autorizados.
+- Un servicio por proceso. La cola guarda en orden todos los paquetes del
+  servicio, incluido PCR/audio claros, mientras espera una CW. Su límite es
+  65536 paquetes; un desbordamiento se registra y contabiliza.
+- CSA descifra en lotes de hasta 64 paquetes disponibles. No se añade espera
+  para llenar el lote; se drena al terminar cada lectura y durante pausas DVR.
+- No se implementa el seguimiento temporal completo de generaciones de CW
+  de Tvheadend. No se garantiza resolver cortes de período criptográfico.
+- Los ECM pendientes idénticos se deduplican; `ECM: ... time_ms=... result=...`
+  informa latencia/resultado sin imprimir claves. La sección privada se envía
+  completa, no se trunca arbitrariamente ni se elude autorización del servidor.
+- `TS stats` cada 5 s informa contadores acumulados de TEI y saltos CC del
+  mux de entrada, descartes/pendientes de servicio/ECM y trabajo CSA. No
+  repara pérdidas ni certifica vídeo correcto por recibir CW.
+- Se solicita un buffer demux de 4 MiB si el driver admite el ioctl; de lo
+  contrario se registra el error y se conserva su configuración por defecto.
+- `--stdout` entrega TS al panel, manteniendo diagnósticos en stderr.
+- HTTP entrega TS continuo; su playlist M3U de canales **no es HLS**. Un
+  empaquetador HLS externo no corrige claves fuera de período o datos perdidos.
+- Para multicast fuera de la LAN hace falta configurar el TTL adecuadamente.
+
 
 ## Licencia
 
 GPLv3 (reutiliza código de TVHeadend: `cwc.c`, `tvhcsa.c`, `crypt_md5`).
+
+
+## Diagnóstico local y protocolo (0.19.0)
+
+`make` compila el motor y `tools/ncdiag`. `make test` ejecuta CSA, framing/login/
+tarjeta Newcamd 524/525, broker compartido y autoprueba local. Requiere los mismos
+paquetes de desarrollo que el motor (`libdvbcsa-dev`, `libssl-dev`, compilador C).
+Se admiten `CPPFLAGS`, `CFLAGS`, `LDFLAGS`, `LIBS`, `PREFIX` y `DESTDIR` estándar.
+
+```sh
+make -C tbsstream test
+tbsstream/tools/ncdiag --selftest --json
+# Instalado por el paquete: dvb-ncdiag --selftest --json
+```
+
+No acepta servidor, usuario, contraseña, DES key ni archivo ECM. No abre sockets,
+no imprime material de claves y no demuestra que un canal real esté descifrado.
+
+`--newcamd-proto 525|524` selecciona el framing tanto del cliente directo como
+del broker. No hay autodetección ni conexión de prueba adicional. 525 es el valor
+por defecto; 524 utiliza cabecera de 8 bytes y SID en bytes 6–7, sin los campos
+CAID/proveedor que 525 lleva en su cabecera. El panel permite elegirlo por perfil.
+CW de 32 bytes: error `NC_ECM_UNSUPPORTED` (-4), no soporte AES/CSA3.
+
+Las API CSA requieren sincronización externa si se comparten entre hilos.
+`csa_have_keys` indica disponibilidad de **ambas** paridades; `csa_clear_keys`
+invalida ambas sin reiniciar estadísticas. `csa_descramble[_ex/_list]` devuelve
+el número de paquetes con payload procesado; `pending` cuenta falta de clave,
+no paquetes TS inválidos. Paquetes sin clave/TS inválidos permanecen sin modificar.
+Los contadores son del wrapper C; no son prueba de integridad de vídeo.

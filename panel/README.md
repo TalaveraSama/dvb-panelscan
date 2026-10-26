@@ -12,7 +12,7 @@ descifrado newcamd y streaming UDP/HTTP.
 | **Transponders** | Agregar / listar / borrar / escanear transponders. Se guardan en `transponders.json`. |
 | **Canales y EPG** | Tabla de canales con SID, nombre, proveedor, TV/Radio y **EPG now/next**. Filtro de búsqueda. |
 | **M3U8** | Exporta `#EXTM3U` con `tvg-id`, `tvg-name`, `group-title` (acepta `?base_url=`). |
-| **Newcamd** | Servidor + puerto + usuario + contraseña + DES key (14 bytes hex). Se guarda en `newcamd.json`. |
+| **Newcamd** | Servidor + puerto + usuario + contraseña + DES key (14 bytes hex). Se guarda en `newcamd.json` con permisos 0600. |
 | **Streaming** | Arranca/para `tbsstream` (descifrado newcamd + salida UDP + HTTP). |
 
 ## Arrancar
@@ -42,7 +42,7 @@ Abrir **http://<ip>:8081**.
 
 ## Notas
 
-- El panel debe correr como **root** (acceso a `/dev/dvb` y al LNB).
+- El servicio empaquetado usa el usuario `dvb-panel` y el grupo `video`; no necesita root si `/dev/dvb` tiene permisos adecuados.
 - El transponder se define por: **tipo, frecuencia de satélite (MHz), LNB LO, SR, pol, adaptador**.
   La frecuencia de satélite se convierte a FI con el LNB LO (9750 = universal Ku baja).
 - El escaneo usa `dvb2m3u8` (que ya incluye el fix del voltaje del LNB y el filtro
@@ -67,3 +67,17 @@ http://<host>:<puerto>/stream/channelid/<sid>?profile=pass
 ## Licencia
 
 GPLv3.
+
+Para instalar en Ubuntu y consultar limitaciones de acceso condicional, ver [README principal](../README.md#release-040--ubuntu). El test TCP no valida login ni descifrado.
+
+## Desde 0.5.0
+
+Las URLs automáticas son `/stream/channel/<transponder_id>:<SID>?profile=pass`.
+Reexportar M3U y XMLTV después de actualizar. Varias reproducciones del mismo
+canal comparten proceso; otro canal en el mismo tuner o escaneo concurrente se
+rechaza. Modo manual y M3U usan el mismo gestor. Registros por servicio
+`stream-<adapter>-<SID>.log` visibles en Streaming. El endpoint de estado incluye
+`sessions`; **Detener todas** las cierra y desconecta reproductores.
+`--stdout` entrega TS del binario al panel sin UDP local. Ver README principal
+y notas de versión para límites y migración; los ejemplos SID-only anteriores
+siguen disponibles solo si el SID no es ambiguo.

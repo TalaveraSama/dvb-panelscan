@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <linux/dvb/frontend.h>
+#include "../dvb_lnb.h"
 #include <linux/dvb/version.h>
 #include <linux/dvb/dmx.h>
 
@@ -207,6 +208,15 @@ static void decode_text(char *dst, size_t cap, const uint8_t *src, int len)
 /* =========================================================================
  *  Modelo de datos: servicios encontrados
  * ========================================================================= */
+typedef struct epg_event {
+  uint16_t id;
+  time_t start, stop;
+  char title[256], description[1024];
+  struct epg_event *next;
+} epg_event_t;
+static int epg_event_count;
+static int current_tsid = -1;
+
 typedef struct service {
   uint16_t sid;
   uint16_t pmt_pid;
@@ -216,6 +226,8 @@ typedef struct service {
   char provider[128];
   char now[256];
   char next_title[256];
+  epg_event_t *events;
+  int event_count;
   struct service *next;
 } service_t;
 
@@ -258,7 +270,7 @@ static void parse_pat(const uint8_t *b, int len)
 {
   if (len < 8) return;
   uint16_t tsid = be16(b);
-  (void)tsid;
+  current_tsid = tsid;
   for (int i = 5; i + 4 <= len; i += 4) {
     uint16_t prog = be16(b + i);
     uint16_t pid  = ((uint16_t)(b[i+2] & 0x1F) << 8) | b[i+3];
@@ -324,41 +336,55 @@ static void parse_nit(const uint8_t *b, int len)
 
 static void parse_eit(uint8_t tid, const uint8_t *b, int len)
 {
-  /* now/next solo en present/following (0x4E/0x4F); el schedule se ignora */
-  if (tid != TID_EIT_PF_ACTUAL && tid != TID_EIT_PF_OTHER) return;
-  if (len < 11) return;
-  uint16_t sid = be16(b);
-  int i = 11;
-  int ev = 0;
-  while (i + 12 <= len) {
-    uint16_t eid = be16(b + i);
-    (void)eid;
-    time_t start = dvb_time(be16(b + i + 2), b + i + 4);
-    int dll = ((b[i+10] & 0x0F) << 8) | b[i+11];
-    const uint8_t *d = b + i + 12;
-    int dlen = dll;
-    if (i + 12 + dll > len) break;
-
-    char title[256]; title[0] = 0;
-    for (int j = 0; j + 2 <= dlen; ) {
-      uint8_t tag = d[j], dl = d[j+1];
-      if (j + 2 + dl > dlen) break;
-      if (tag == DESC_SHORT_EVENT && dl >= 5) {
-        int nlen = d[j + 5];
-        if (nlen > 0 && 6 + nlen <= dl)
-          decode_text(title, sizeof(title), d + j + 6, nlen);
+  /* Only actual-TS EIT: never mix equal SIDs from another satellite/mux. */
+  if (tid != 0x4e && (tid < 0x50 || tid > 0x5f)) return;
+  if (len < 11 || !(b[2] & 1) || current_tsid < 0 || be16(b+5) != current_tsid) return;
+  service_t *service = service_find(be16(b));
+  if (!service) return;
+  time_t now = time(NULL);
+  for (int i = 11; i+12 <= len; ) {
+    const uint8_t *event = b+i;
+    int dll = ((event[10] & 15) << 8) | event[11];
+    if (i+12+dll > len) return;
+    i += 12+dll;
+    int valid = 1;
+    for (int j=4; j<10; j++)
+      if ((event[j] >> 4) > 9 || (event[j] & 15) > 9) valid=0;
+    if (!valid || bcd2i(event[4])>23 || bcd2i(event[5])>59 || bcd2i(event[6])>59 ||
+        bcd2i(event[8])>59 || bcd2i(event[9])>59 || be16(event+2)==0xffff) continue;
+    time_t start = dvb_time(be16(event+2),event+4);
+    time_t duration = bcd2i(event[7])*3600+bcd2i(event[8])*60+bcd2i(event[9]);
+    if (duration <= 0 || start+duration <= now || start >= now+14*86400) continue;
+    char title[256] = {0}, description[1024] = {0};
+    const uint8_t *d = event+12;
+    for (int j=0; j+2<=dll; ) {
+      int tag=d[j], dl=d[j+1];
+      if (j+2+dl>dll) return;
+      if (tag==DESC_SHORT_EVENT && dl>=5 && !title[0]) {
+        int n=d[j+5];
+        if (5+n<=dl) {
+          int textlen=d[j+6+n];
+          if (5+n+textlen<=dl) {
+            decode_text(title,sizeof(title),d+j+6,n);
+            decode_text(description,sizeof(description),d+j+7+n,textlen);
+          }
+        }
       }
-      j += 2 + dl;
+      j+=2+dl;
     }
-
-    service_t *s = service_find(sid);
-    if (s && title[0]) {
-      if (ev == 0 && !s->now[0])  { snprintf(s->now,  sizeof(s->now),  "%s", title); }
-      if (ev == 1 && !s->next_title[0]) { snprintf(s->next_title, sizeof(s->next_title), "%s", title); }
+    epg_event_t *entry;
+    for (entry=service->events; entry && entry->id!=be16(event); entry=entry->next) {}
+    if (!entry) {
+      if (service->event_count>=2048 || epg_event_count>=20000) continue;
+      entry=calloc(1,sizeof(*entry));
+      if (!entry) continue;
+      entry->id=be16(event); entry->next=service->events; service->events=entry;
+      service->event_count++; epg_event_count++;
     }
-    ev++;
-    i += 12 + dll;
-    (void)start;
+    entry->start=start; entry->stop=start+duration;
+    snprintf(entry->title,sizeof(entry->title),"%s",title);
+    snprintf(entry->description,sizeof(entry->description),"%s",description);
+    if (start<=now && title[0]) snprintf(service->now,sizeof(service->now),"%s",title);
   }
 }
 
@@ -424,7 +450,7 @@ static void process_sections(secbuf_t *sb)
   while (sb->len >= 3) {
     int slen = ((sb->buf[1] & 0x0F) << 8) | sb->buf[2];
     int total = 3 + slen;
-    if (slen > 1021 || total <= 3) { sb->len = 0; return; }  /* sección corrupta */
+    if (slen > (sb->pid == PID_EIT ? 4093 : 1021) || total <= 3) { sb->len = 0; return; }  /* sección corrupta */
     if (sb->len < total) break;                    /* sección incompleta */
     if ((sb->buf[1] & 0x80) && crc32_mpeg(sb->buf, total) == 0)
       handle_section(sb->pid, sb->buf);            /* solo secciones largas */
@@ -433,40 +459,30 @@ static void process_sections(secbuf_t *sb)
   }
 }
 
+static void append_section(secbuf_t *sb, const uint8_t *data, int len)
+{
+  while (len > 0) {
+    int take = (int)sizeof(sb->buf)-sb->len;
+    if (take > len) take=len;
+    if (!take) { sb->len=0; return; }
+    memcpy(sb->buf+sb->len,data,take); sb->len+=take;
+    data+=take; len-=take;
+    process_sections(sb);
+  }
+}
+
 static void feed_section(uint16_t pid, const uint8_t *data, int len, int pusi)
 {
-  secbuf_t *sb = secbuf_get(pid);
-  if (!sb) return;
-
+  secbuf_t *sb=secbuf_get(pid);
+  if (!sb || len<=0) return;
   if (pusi) {
-    if (len < 1) return;
-    int pointer = data[0];
-    const uint8_t *p = data + 1;
-    int plen = len - 1;
-    if (pointer > 0) {
-      int take = pointer < plen ? pointer : plen;
-      if (sb->len + take < (int)sizeof(sb->buf)) {
-        memcpy(sb->buf + sb->len, p, take);
-        sb->len += take;
-        process_sections(sb);
-      }
-      p += take;
-      plen -= take;
-    }
-    if (plen > 0) {
-      if (sb->len + plen < (int)sizeof(sb->buf)) {
-        memcpy(sb->buf + sb->len, p, plen);
-        sb->len += plen;
-        process_sections(sb);
-      }
-    }
-  } else {
-    if (sb->len + len < (int)sizeof(sb->buf)) {
-      memcpy(sb->buf + sb->len, data, len);
-      sb->len += len;
-      process_sections(sb);
-    }
+    int pointer=data[0]; data++; len--;
+    if (pointer>len) { sb->len=0; return; }
+    if (pointer && sb->len) append_section(sb,data,pointer);
+    data+=pointer; len-=pointer;
+    sb->len=0; /* PUSI is a fresh section boundary even after packet loss. */
   }
+  append_section(sb,data,len);
 }
 
 /* =========================================================================
@@ -504,6 +520,7 @@ typedef struct {
   int adapter, frontend;
   int delsys;          /* SYS_DVBT / DVBT2 / DVBC_ANNEX_A / DVBS / DVBS2 */
   int64_t freq_hz;     /* frecuencia de satélite; si lnb_lo_hz=0 es la FI */
+  int lnb_universal;
   int64_t lnb_lo_hz;   /* LO del LNB (0 = sin conversión, freq ya es FI) */
   uint32_t bandwidth_hz;
   uint32_t symbol_rate;
@@ -532,9 +549,9 @@ static int frontend_tune(int fd, const opts_t *o)
   dtv(p, &n, DTV_DELIVERY_SYSTEM, (uint32_t)o->delsys);
   /* Conversión frecuencia de satélite -> FI con el LO del LNB (si aplica).
      El driver TBS (TBSECP3) espera la FI en kHz, no en Hz. */
-  int64_t if_hz = o->freq_hz;
-  if (o->lnb_lo_hz > 0 && o->freq_hz > o->lnb_lo_hz)
-    if_hz = o->freq_hz - o->lnb_lo_hz;
+  int satellite = o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2;
+  dvb_lnb_plan_t lnb = dvb_lnb_plan(o->freq_hz, o->lnb_lo_hz, o->pol, o->lnb_universal);
+  int64_t if_hz = satellite ? lnb.if_hz : o->freq_hz;
   dtv(p, &n, DTV_FREQUENCY, (uint32_t)(if_hz / 1000));
   dtv(p, &n, DTV_INVERSION, INVERSION_AUTO);
 
@@ -572,11 +589,12 @@ static int frontend_tune(int fd, const opts_t *o)
 
   /* Polarización LNB por voltaje ANTES de sintonizar: alimenta el LNB y
      selecciona la polarización. Si se hace DESPUÉS, el tuner no engancha. */
-  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
-    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
-                       ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
-    ioctl(fd, FE_SET_VOLTAGE, v);
-    usleep(300000);   /* dejar estabilizar el LNB */
+  if (satellite) {
+    if (dvb_lnb_apply(fd, &lnb) < 0) return -1;
+    fprintf(stderr, "LNB %s: LO %lld MHz, FI %lld kHz, %s, 22 kHz %s\n",
+            o->lnb_universal ? "universal" : "manual", (long long)(lnb.lo_hz/1000000),
+            (long long)(lnb.if_hz/1000), lnb.voltage == SEC_VOLTAGE_13 ? "13 V" : "18 V",
+            lnb.tone == SEC_TONE_ON ? "ON" : "OFF");
   }
 
   dtv(p, &n, DTV_TUNE, 0);
@@ -657,9 +675,26 @@ static void emit_json(const opts_t *o, FILE *out)
     json_str(out, s->name);
     fputs(", \"provider\": ", out); json_str(out, s->provider[0] ? s->provider : network_name);
     fprintf(out, ", \"type\": %u", s->type);
+    time_t display_now = time(NULL), next_start = 0;
+    s->now[0] = s->next_title[0] = 0;
+    for (epg_event_t *event=s->events; event; event=event->next) {
+      if (event->start<=display_now && event->stop>display_now)
+        snprintf(s->now,sizeof(s->now),"%s",event->title);
+      if (event->start>display_now && (!next_start || event->start<next_start)) {
+        next_start=event->start; snprintf(s->next_title,sizeof(s->next_title),"%s",event->title);
+      }
+    }
     if (s->now[0])  { fputs(", \"now\": ", out);  json_str(out, s->now); }
     if (s->next_title[0]) { fputs(", \"next\": ", out); json_str(out, s->next_title); }
-    fputc('}', out);
+    fputs(", \"events\": [", out);
+    int first_event = 1;
+    for (epg_event_t *event=s->events; event; event=event->next) {
+      fprintf(out,"%s{\"event_id\":%u,\"start\":%lld,\"stop\":%lld,\"title\":",
+              first_event ? "" : ",", event->id, (long long)event->start, (long long)event->stop);
+      json_str(out,event->title); fputs(",\"description\":",out); json_str(out,event->description);
+      fputc('}',out); first_event=0;
+    }
+    fputs("]}", out);
     first = 0;
   }
   fputs("\n  ]\n}\n", out);
@@ -697,6 +732,7 @@ static void usage(const char *argv0)
     "  -t, --type T         dvbt | dvbt2 | dvbc | dvbs | dvbs2 (def dvbt)\n"
     "      --freq Hz        frecuencia de satélite (o FI si --lnb-lo 0)\n"
     "      --freq-mhz MHz   frecuencia de satélite en MHz\n"
+    "      --lnb-universal   LNB universal 9750/10600, 22 kHz automático\n"
     "      --lnb-lo MHz     LO del LNB (def 9750; 0 = la freq ya es FI)\n"
     "\n"
     "  DVB-T/T2:\n"
@@ -752,7 +788,7 @@ int main(int argc, char **argv)
   double freq_mhz = 0;
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP,
-         OPT_FEC_LP, OPT_POL, OPT_NOEPG, OPT_BASEURL, OPT_JSON, OPT_LNBLO };
+         OPT_FEC_LP, OPT_POL, OPT_NOEPG, OPT_BASEURL, OPT_JSON, OPT_LNBUNIVERSAL, OPT_LNBLO };
 
   static const struct option longopts[] = {
     {"adapter",    required_argument, 0, 'a'},
@@ -771,6 +807,7 @@ int main(int argc, char **argv)
     {"output",     required_argument, 0, 'o'},
     {"base-url",   required_argument, 0, OPT_BASEURL},
     {"json",       no_argument,       0, OPT_JSON},
+    {"lnb-universal", no_argument, 0, OPT_LNBUNIVERSAL},
     {"lnb-lo",     required_argument, 0, OPT_LNBLO},
     {"verbose",    no_argument,       0, 'v'},
     {"help",       no_argument,       0, 'h'},
@@ -796,6 +833,7 @@ int main(int argc, char **argv)
       case 'o': o.outfile = optarg; break;
       case OPT_BASEURL: o.base_url = optarg; break;
       case OPT_JSON: o.with_json = 1; break;
+      case OPT_LNBUNIVERSAL: o.lnb_universal = 1; break;
       case OPT_LNBLO: o.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'v': verbose = 1; break;
       case 'h': usage(argv[0]); return 0;

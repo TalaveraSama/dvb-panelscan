@@ -38,11 +38,13 @@
 #include <netdb.h>
 
 #include <linux/dvb/frontend.h>
+#include "../dvb_lnb.h"
 #include <linux/dvb/version.h>
 #include <linux/dvb/dmx.h>
 
 #include "newcamd.h"
 #include "csa.h"
+#include "pacing.h"
 
 /* -------------------------------------------------------------------------
  * Constantes
@@ -88,12 +90,23 @@ typedef struct {
   int ecm_pid;
   uint16_t caid;
   uint32_t provid;
+  struct { uint16_t caid, pid; } ca[16];
+  int ca_count;
 
-  struct { uint8_t type; uint16_t pid; int descramble; } es[MAX_ES];
+  uint8_t program_descriptors[1024];
+  int program_descriptors_len;
+  struct {
+    uint8_t type;
+    uint16_t pid;
+    int descramble, descriptors_len;
+    uint8_t descriptors[1024];
+  } es[MAX_ES];
   int nes;
 } service_t;
 
 static service_t svc;
+static char m3u8_body[512];
+static pthread_mutex_t playlist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* -------------------------------------------------------------------------
  * Opciones globales
@@ -102,15 +115,18 @@ typedef struct {
   int adapter, frontend;
   int delsys;
   int64_t freq_hz;     /* frecuencia de satélite; si lnb_lo_hz=0 es la FI */
+  int lnb_universal;
   int64_t lnb_lo_hz;
   uint32_t bandwidth_hz, symbol_rate;
   int mod, fec, fec_hp, fec_lp, tx_mode, guard, hier, rolloff;
   char pol;
 
+  unsigned preferred_caid, preferred_ecm_pid;
+  unsigned descramble_delay_ms;
   uint16_t want_sid;   /* 0 = auto (primer servicio) */
 
   char nc_host[128];
-  int nc_port;
+  int nc_port, nc_protocol;
   char nc_user[64];
   char nc_pass[64];
   uint8_t nc_deskey[14];
@@ -119,10 +135,27 @@ typedef struct {
   struct { char host[128]; int port; int multicast; } udp[8];
   int nudp;
   int http_port;
+  int stdout_ts;
+  int stdin_ts, mux_only;
+  char cam_socket[108], ca_broker[108];
   char m3u8_base[256];
 } opts_t;
 
 static opts_t opts;
+
+static void refresh_playlist(unsigned sid)
+{
+  char base[256];
+  if (opts.m3u8_base[0])
+    snprintf(base, sizeof(base), "%s", opts.m3u8_base);
+  else
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", opts.http_port);
+  pthread_mutex_lock(&playlist_mutex);
+  snprintf(m3u8_body, sizeof(m3u8_body),
+           "#EXTM3U\n#EXTINF:-1 tvg-id=\"%u\",Canal %u\n%s/stream.ts\n", sid, sid, base);
+  pthread_mutex_unlock(&playlist_mutex);
+}
+
 
 /* -------------------------------------------------------------------------
  * Sintonización DVB
@@ -140,9 +173,9 @@ static int frontend_tune(int fd, const opts_t *o)
   dtv(p, &n, DTV_DELIVERY_SYSTEM, (uint32_t)o->delsys);
   /* Conversión frecuencia de satélite -> FI con el LO del LNB (si aplica).
      El driver TBS (TBSECP3) espera la FI en kHz, no en Hz. */
-  int64_t if_hz = o->freq_hz;
-  if (o->lnb_lo_hz > 0 && o->freq_hz > o->lnb_lo_hz)
-    if_hz = o->freq_hz - o->lnb_lo_hz;
+  int satellite = o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2;
+  dvb_lnb_plan_t lnb = dvb_lnb_plan(o->freq_hz, o->lnb_lo_hz, o->pol, o->lnb_universal);
+  int64_t if_hz = satellite ? lnb.if_hz : o->freq_hz;
   dtv(p, &n, DTV_FREQUENCY, (uint32_t)(if_hz / 1000));
   dtv(p, &n, DTV_INVERSION, INVERSION_AUTO);
 
@@ -177,11 +210,12 @@ static int frontend_tune(int fd, const opts_t *o)
   }
   /* Polarización LNB por voltaje ANTES de sintonizar: alimenta el LNB y
      selecciona la polarización. Si se hace DESPUÉS, el tuner no engancha. */
-  if (o->delsys == SYS_DVBS || o->delsys == SYS_DVBS2) {
-    fe_sec_voltage_t v = (o->pol == 'V' || o->pol == 'L' || o->pol == 'v' || o->pol == 'l')
-                         ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18;
-    ioctl(fd, FE_SET_VOLTAGE, v);
-    usleep(300000);   /* dejar estabilizar el LNB */
+  if (satellite) {
+    if (dvb_lnb_apply(fd, &lnb) < 0) return -1;
+    fprintf(stderr, "LNB %s: LO %lld MHz, FI %lld kHz, %s, 22 kHz %s\n",
+            o->lnb_universal ? "universal" : "manual", (long long)(lnb.lo_hz/1000000),
+            (long long)(lnb.if_hz/1000), lnb.voltage == SEC_VOLTAGE_13 ? "13 V" : "18 V",
+            lnb.tone == SEC_TONE_ON ? "ON" : "OFF");
   }
 
   dtv(p, &n, DTV_TUNE, 0);
@@ -208,7 +242,10 @@ static int wait_lock(int fd, int timeout_s)
 /* -------------------------------------------------------------------------
  * Reensamblado de secciones
  * ------------------------------------------------------------------------- */
-typedef struct { uint16_t pid; uint8_t buf[4096]; int len; } secbuf_t;
+typedef struct {
+  uint16_t pid; uint8_t buf[4096]; int len;
+  int cc_seen, last_cc, wait_pusi;
+} secbuf_t;
 static secbuf_t secbufs[4];
 static int nsecbufs = 0;
 
@@ -216,10 +253,19 @@ static secbuf_t *secbuf_get(uint16_t pid)
 {
   for (int i = 0; i < nsecbufs; i++)
     if (secbufs[i].pid == pid) return &secbufs[i];
+  for (int i = 0; i < nsecbufs; i++) {
+    if (secbufs[i].pid == 0x1fff) {
+      memset(&secbufs[i], 0, sizeof(secbufs[i]));
+      secbufs[i].pid = pid;
+      secbufs[i].wait_pusi = 1;
+      return &secbufs[i];
+    }
+  }
   if (nsecbufs >= 4) return NULL;
   secbuf_t *sb = &secbufs[nsecbufs++];
   memset(sb, 0, sizeof(*sb));
   sb->pid = pid;
+  sb->wait_pusi = 1;
   return sb;
 }
 
@@ -233,7 +279,7 @@ static void process_sections(secbuf_t *sb)
     int total = 3 + slen;
     if (slen > 1021 || total <= 3) { sb->len = 0; return; }
     if (sb->len < total) break;
-    if ((sb->buf[1] & 0x80) && crc32_mpeg(sb->buf, total) == 0)
+    if (!(sb->buf[1] & 0x80) || crc32_mpeg(sb->buf, total) == 0)
       handle_section(sb->pid, sb->buf, slen);
     memmove(sb->buf, sb->buf + total, sb->len - total);
     sb->len -= total;
@@ -245,28 +291,34 @@ static void feed_section(uint16_t pid, const uint8_t *data, int len, int pusi)
   secbuf_t *sb = secbuf_get(pid);
   if (!sb) return;
   if (pusi) {
-    if (len < 1) return;
-    int pointer = data[0];
-    const uint8_t *p = data + 1;
-    int plen = len - 1;
-    if (pointer > 0) {
-      int take = pointer < plen ? pointer : plen;
-      if (sb->len + take < (int)sizeof(sb->buf)) {
-        memcpy(sb->buf + sb->len, p, take);
-        sb->len += take;
-        process_sections(sb);
-      }
-      p += take; plen -= take;
+    if (len < 1 || data[0] > len - 1) {
+      sb->len = 0; sb->wait_pusi = 1;
+      return;
     }
-    if (plen > 0 && sb->len + plen < (int)sizeof(sb->buf)) {
-      memcpy(sb->buf + sb->len, p, plen);
-      sb->len += plen;
+    int pointer = data[0];
+    /* The pointer completes ONLY the previous section. The boundary after it
+     * starts a fresh section, even if that previous one was lost/incomplete. */
+    if (sb->len && pointer && sb->len + pointer <= (int)sizeof(sb->buf)) {
+      memcpy(sb->buf + sb->len, data + 1, pointer);
+      sb->len += pointer;
       process_sections(sb);
     }
-  } else if (sb->len + len < (int)sizeof(sb->buf)) {
+    sb->len = 0;
+    sb->wait_pusi = 0;
+    int remaining = len - 1 - pointer;
+    if (remaining > 0 && remaining <= (int)sizeof(sb->buf)) {
+      memcpy(sb->buf, data + 1 + pointer, remaining);
+      sb->len = remaining;
+      process_sections(sb);
+      if (!sb->len) sb->wait_pusi = 1;
+    }
+  } else if (!sb->wait_pusi && sb->len + len <= (int)sizeof(sb->buf)) {
     memcpy(sb->buf + sb->len, data, len);
     sb->len += len;
     process_sections(sb);
+    if (!sb->len) sb->wait_pusi = 1;
+  } else if (sb->len + len > (int)sizeof(sb->buf)) {
+    sb->len = 0; sb->wait_pusi = 1;
   }
 }
 
@@ -282,31 +334,156 @@ static int udp_socks[8];
 static struct sockaddr_storage udp_addr[8];
 static socklen_t udp_addrlen[8];
 static int nudp_global;
+static uint64_t udp_output_drops;
+static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void output_packet(const uint8_t *pkt)
 {
+  if (opts.stdout_ts) {
+    size_t left = TS_PKT;
+    const uint8_t *p = pkt;
+    while (left) {
+      ssize_t n = write(STDOUT_FILENO, p, left);
+      if (n < 0 && errno == EINTR) continue;
+      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        struct pollfd ready = { .fd = STDOUT_FILENO, .events = POLLOUT };
+        if (poll(&ready, 1, 500) > 0) continue;
+        fprintf(stderr, "output stalled: restarting service required\n");
+      }
+      if (n <= 0) exit(EXIT_FAILURE);
+      p += n;
+      left -= (size_t)n;
+    }
+  }
   pthread_mutex_lock(&ring_mutex);
   memcpy(ring + (size_t)(ring_seq % RING_PKTS) * TS_PKT, pkt, TS_PKT);
   ring_seq++;
   pthread_cond_broadcast(&ring_cond);
   pthread_mutex_unlock(&ring_mutex);
 
-  for (int i = 0; i < nudp_global; i++)
-    sendto(udp_socks[i], pkt, TS_PKT, 0, (struct sockaddr *)&udp_addr[i], udp_addrlen[i]);
+  for (int i = 0; i < nudp_global; i++) {
+    if (sendto(udp_socks[i], pkt, TS_PKT, MSG_DONTWAIT,
+               (struct sockaddr *)&udp_addr[i], udp_addrlen[i]) != TS_PKT) {
+      pthread_mutex_lock(&output_mutex);
+      udp_output_drops++;
+      pthread_mutex_unlock(&output_mutex);
+    }
+  }
 }
 
-/* Lectura bloqueante de un paquete para un cliente HTTP (seq = siguiente). */
+/* Separate bounded output queue. Capture/CA never sleep on the output clock.
+ * The TS thread is the only producer; one worker owns the PCR clock. */
+#define OUTPUT_MAX 65536
+typedef struct { uint8_t pkt[TS_PKT]; uint64_t arrival; int pcr_pid; } output_item_t;
+static output_item_t output_q[OUTPUT_MAX];
+static unsigned output_head, output_count;
+static int output_async, output_running, output_reset;
+static uint64_t output_epoch;
+static pthread_cond_t output_cond = PTHREAD_COND_INITIALIZER;
+static uint64_t output_drops, output_late, output_clock_resets, output_pes_errors;
+
+static uint64_t monotonic_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static void queue_output(const uint8_t *pkt, uint64_t arrival)
+{
+  if (!output_async) { output_packet(pkt); return; }
+  pthread_mutex_lock(&output_mutex);
+  if (output_count == OUTPUT_MAX) {
+    output_drops += output_count;
+    output_count = output_head = 0;
+    output_reset = 1; output_epoch++;
+  }
+  output_item_t *item = &output_q[(output_head + output_count) % OUTPUT_MAX];
+  memcpy(item->pkt, pkt, TS_PKT);
+  item->arrival = arrival;
+  item->pcr_pid = svc.pcr_pid;
+  output_count++;
+  pthread_cond_signal(&output_cond);
+  pthread_mutex_unlock(&output_mutex);
+}
+
+static void *output_worker(void *unused)
+{
+  (void)unused;
+  ts_clock_t clock = {0};
+  for (;;) {
+    output_item_t items[7];
+    unsigned count = 0;
+    uint64_t due = 0, first_due = 0, epoch;
+    pthread_mutex_lock(&output_mutex);
+    while (output_running && !output_count) pthread_cond_wait(&output_cond, &output_mutex);
+    if (!output_running) { pthread_mutex_unlock(&output_mutex); break; }
+    if (output_reset) { memset(&clock, 0, sizeof(clock)); output_reset = 0; }
+    epoch = output_epoch;
+    while (output_count && count < 7) {
+      output_item_t *item = &output_q[output_head];
+      uint64_t now = monotonic_us();
+      if (now > item->arrival + (opts.descramble_delay_ms + 2000ULL) * 1000) {
+        output_drops++; output_head = (output_head + 1) % OUTPUT_MAX; output_count--;
+        memset(&clock, 0, sizeof(clock));
+        continue;
+      }
+      ts_clock_t next = clock;
+      uint64_t target = ts_schedule(&next, item->pkt, item->pcr_pid, item->arrival, now);
+      if (count && target > first_due + 1000) break;
+      if (!count) first_due = target;
+      clock = next;
+      output_late += clock.late; clock.late = 0;
+      output_clock_resets += clock.resets; clock.resets = 0;
+      items[count++] = *item;
+      due = target;
+      output_head = (output_head + 1) % OUTPUT_MAX; output_count--;
+    }
+    pthread_mutex_unlock(&output_mutex);
+    if (!count) continue;
+    struct timespec deadline = { .tv_sec = due / 1000000, .tv_nsec = (due % 1000000) * 1000 };
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL) == EINTR) {}
+    pthread_mutex_lock(&output_mutex);
+    int obsolete = epoch != output_epoch;
+    if (obsolete) output_drops += count;
+    pthread_mutex_unlock(&output_mutex);
+    if (!obsolete) for (unsigned i = 0; i < count; i++) output_packet(items[i].pkt);
+  }
+  return NULL;
+}
+
+/* Batch up to seven TS packets without waiting for a full batch. */
 static int ring_read(uint64_t *client_seq, uint8_t *out)
 {
   pthread_mutex_lock(&ring_mutex);
   while (*client_seq >= ring_seq)
     pthread_cond_wait(&ring_cond, &ring_mutex);
-  if (ring_seq > RING_PKTS && *client_seq < ring_seq - RING_PKTS) { /* muy lento */
+  if (ring_seq > RING_PKTS && *client_seq < ring_seq - RING_PKTS) {
+    LOGV("HTTP: slow client, ring overrun\n");
     *client_seq = ring_seq - RING_PKTS;
   }
-  memcpy(out, ring + (size_t)(*client_seq % RING_PKTS) * TS_PKT, TS_PKT);
-  (*client_seq)++;
+  int count = 0;
+  while (*client_seq < ring_seq && count < 7) {
+    memcpy(out + count * TS_PKT,
+           ring + (size_t)(*client_seq % RING_PKTS) * TS_PKT, TS_PKT);
+    (*client_seq)++;
+    count++;
+  }
   pthread_mutex_unlock(&ring_mutex);
+  return count;
+}
+
+/* TCP may accept fewer bytes than requested, even on a blocking socket. */
+static int http_write_all(int fd, const void *data, size_t len)
+{
+  const uint8_t *p = data;
+  while (len) {
+    ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    p += n;
+    len -= (size_t)n;
+  }
   return 0;
 }
 
@@ -348,12 +525,19 @@ static int build_pmt(uint8_t *sec)
   sec[i++] = 0; sec[i++] = 0;
   sec[i++] = (uint8_t)(0xE0 | (svc.pcr_pid >> 8));
   sec[i++] = (uint8_t)(svc.pcr_pid & 0xff);
-  sec[i++] = 0xF0; sec[i++] = 0x00;      /* program_info_length = 0 */
+  int pil = svc.program_descriptors_len;
+  sec[i++] = (uint8_t)(0xf0 | (pil >> 8)); sec[i++] = (uint8_t)pil;
+  memcpy(sec + i, svc.program_descriptors, pil);
+  i += pil;
   for (int e = 0; e < svc.nes; e++) {
+    int dl = svc.es[e].descriptors_len;
+    if (i + 5 + dl + 4 > 1024) return 0;
     sec[i++] = svc.es[e].type;
     sec[i++] = (uint8_t)(0xE0 | (svc.es[e].pid >> 8));
     sec[i++] = (uint8_t)(svc.es[e].pid & 0xff);
-    sec[i++] = 0xF0; sec[i++] = 0x00;    /* ES_info_length = 0 (sin CA) */
+    sec[i++] = (uint8_t)(0xf0 | (dl >> 8)); sec[i++] = (uint8_t)dl;
+    memcpy(sec + i, svc.es[e].descriptors, dl);
+    i += dl;
   }
   int slen = i - 3 + 4;
   sec[1] = (uint8_t)(0xB0 | (slen >> 8));
@@ -366,16 +550,53 @@ static int build_pmt(uint8_t *sec)
   return i;
 }
 
-static void make_psi_packet(uint16_t pid, uint8_t *cc, const uint8_t *sec, int slen, uint8_t *out)
+/* A PSI section can span multiple TS packets. Only the first has a pointer. */
+static void buffer_service_packet(const uint8_t *pkt);
+static void flush_scrambled(void);
+static void output_psi(uint16_t pid, uint8_t *cc, const uint8_t *sec, int len)
 {
-  memset(out, 0xFF, TS_PKT);
-  out[0] = 0x47;
-  out[1] = (uint8_t)(0x40 | (pid >> 8));
-  out[2] = (uint8_t)(pid & 0xff);
-  out[3] = (uint8_t)(0x10 | ((*cc) & 0x0F));   /* payload only + CC */
-  (*cc) = ((*cc) + 1) & 0x0F;
-  out[4] = 0;                                  /* pointer_field = 0 */
-  memcpy(out + 5, sec, slen);
+  int first = 1;
+  while (len > 0) {
+    uint8_t out[TS_PKT];
+    memset(out, 0xff, sizeof(out));
+    out[0] = 0x47;
+    out[1] = (uint8_t)((first ? 0x40 : 0) | (pid >> 8));
+    out[2] = (uint8_t)pid;
+    out[3] = (uint8_t)(0x10 | (*cc & 15));
+    *cc = (*cc + 1) & 15;
+    int offset = 4;
+    if (first) out[offset++] = 0;
+    int size = len < TS_PKT - offset ? len : TS_PKT - offset;
+    memcpy(out + offset, sec, size);
+    /* Generated PSI follows the same time/order boundary as service payload. */
+    buffer_service_packet(out);
+    flush_scrambled();
+    sec += size;
+    len -= size;
+    first = 0;
+  }
+}
+
+static uint64_t psi_due_ms;
+static uint64_t monotonic_ms(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static void emit_psi(void)
+{
+  static uint8_t pat_cc, pmt_cc;
+  if (!svc.ready || !svc.pmt_pid) return;
+  uint64_t now = monotonic_ms();
+  if (now < psi_due_ms) return;
+  uint8_t pat[64], pmt[1024];
+  int plen = build_pat(pat), mlen = build_pmt(pmt);
+  if (mlen <= 0) return;
+  output_psi(PID_PAT, &pat_cc, pat, plen);
+  output_psi(svc.pmt_pid, &pmt_cc, pmt, mlen);
+  psi_due_ms = now + 100;
 }
 
 /* -------------------------------------------------------------------------
@@ -387,20 +608,60 @@ static csa_t *csae = NULL;
 /* Estado de claves (protegido por csa_mutex) */
 static pthread_mutex_t csa_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int have_cw_even = 0, have_cw_odd = 0;
+/* A present key is not necessarily fresh for the next use of its parity. */
+static uint8_t cw_value[2][8];
+static uint64_t cw_revision[2], cw_used[2];
+static int output_parity = -1;
+/* CA selection changes only on the TS thread. Responses carry its generation. */
+static uint64_t ca_generation = 1;
+static int ca_selected, ca_failures, ca_rotate;
+static uint64_t ca_last_progress;
+static int ca_worked;
+
+static void install_cw(int parity, const uint8_t key[8])
+{
+  static const uint8_t zero[8];
+  if (!memcmp(key, zero, 8)) return;
+  if (!cw_revision[parity] || memcmp(cw_value[parity], key, 8)) {
+    memcpy(cw_value[parity], key, 8);
+    cw_revision[parity]++;
+  }
+  if (parity) { csa_set_key_odd(csae, key); have_cw_odd = 1; }
+  else { csa_set_key_even(csae, key); have_cw_even = 1; }
+}
 
 /* Cola de ECM (hilo principal -> hilo CA) */
 #define ECMQ_MAX 64
-typedef struct { uint8_t sec[1024]; int len; uint16_t sid, caid; uint32_t provid; } ecm_req_t;
+typedef struct { uint8_t sec[1024]; int len; uint16_t sid, caid; uint32_t provid; uint64_t generation; } ecm_req_t;
 static ecm_req_t ecm_q[ECMQ_MAX];
 static int ecm_q_head = 0, ecm_q_tail = 0, ecm_q_count = 0;
+/* Full-section retransmission suppression; fresh ECM content is never delayed. */
+static ecm_req_t recent_ecm[2];
+static uint64_t recent_ecm_at[2];
 static pthread_mutex_t ecm_q_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ecm_q_cond = PTHREAD_COND_INITIALIZER;
 
 /* Buffer de paquetes scrambled sin CW (solo se toca desde el hilo principal) */
-#define SCRAM_MAX 4096
+#define SCRAM_MAX 65536 /* 12 MiB per active service; bounded, not a latency target */
 static uint8_t scram_buf[SCRAM_MAX * TS_PKT];
-static uint8_t scram_odd[SCRAM_MAX];
-static int scram_count = 0;
+static int scram_head = 0, scram_count = 0;
+/* Keep an already available key with its queued packet: a later ECM must not
+ * decrypt older buffered payload with a newly installed same-parity key. */
+static uint8_t scram_cw[SCRAM_MAX][8];
+static uint64_t scram_revision[SCRAM_MAX], scram_at[SCRAM_MAX];
+static uint64_t cw_timeout_drops;
+static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
+static uint64_t ecm_queue_drops, ca_switch_drops, queue_full_drops, ecm_repeats;
+static uint64_t sync_losses, sync_bytes, invalid_ts, psi_discontinuities;
+
+static void reset_sections(void)
+{
+  for (int i = 0; i < nsecbufs; i++) {
+    secbufs[i].len = secbufs[i].cc_seen = 0;
+    secbufs[i].wait_pusi = 1;
+  }
+}
+static uint8_t cc_seen[8192], last_cc[8192];
 
 static volatile int ca_running = 1;
 
@@ -408,7 +669,8 @@ static int pid_forward(uint16_t pid)
 {
   for (int i = 0; i < svc.nes; i++)
     if (svc.es[i].pid == pid) return 1;
-  return pid == PID_PAT || pid == svc.pmt_pid;
+  return pid == PID_PAT || pid == svc.pmt_pid ||
+         (svc.pcr_pid != 0x1fff && pid == svc.pcr_pid);
 }
 
 /* Encolar un ECM (no bloquea) */
@@ -416,49 +678,251 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
                         const uint8_t *sec, int len)
 {
   if (len <= 0 || len > (int)sizeof(ecm_q[0].sec)) return;
+  pthread_mutex_lock(&csa_mutex);
+  uint64_t generation = ca_generation;
+  pthread_mutex_unlock(&csa_mutex);
   pthread_mutex_lock(&ecm_q_mutex);
+  int parity = sec[0] == 0x81;
+  uint64_t now = monotonic_ms();
+  ecm_req_t *recent = &recent_ecm[parity];
+  if (recent->generation == generation && recent->sid == sid && recent->caid == caid &&
+      recent->provid == provid && recent->len == len && now - recent_ecm_at[parity] < 1000 &&
+      !memcmp(recent->sec, sec, len)) {
+    ecm_repeats++;
+    pthread_mutex_unlock(&ecm_q_mutex);
+    return;
+  }
+  /* Do not let identical queued retransmissions age later ECM requests. */
+  for (int i = 0; i < ecm_q_count; i++) {
+    ecm_req_t *pending = &ecm_q[(ecm_q_head + i) % ECMQ_MAX];
+    if (pending->sid == sid && pending->caid == caid && pending->provid == provid &&
+        pending->len == len && !memcmp(pending->sec, sec, len)) {
+      pthread_mutex_unlock(&ecm_q_mutex);
+      return;
+    }
+  }
   if (ecm_q_count < ECMQ_MAX) {
     ecm_req_t *r = &ecm_q[ecm_q_tail];
     memcpy(r->sec, sec, len);
     r->len = len; r->sid = sid; r->caid = caid; r->provid = provid;
+    r->generation = generation;
+    *recent = *r;
+    recent_ecm_at[parity] = now;
     ecm_q_tail = (ecm_q_tail + 1) % ECMQ_MAX;
     ecm_q_count++;
     pthread_cond_signal(&ecm_q_cond);
+  } else {
+    ecm_queue_drops++;
   }
   pthread_mutex_unlock(&ecm_q_mutex);
 }
 
-/* Guardar un paquete scrambled sin CW (hilo principal) */
-static void buffer_scrambled(const uint8_t *pkt, int odd)
+/* Keep the entire selected service in order, including clear audio/PCR.
+ * A missing key at the head must not let later packets overtake it. */
+static void flush_scrambled(void)
 {
-  if (scram_count < SCRAM_MAX) {
-    memcpy(scram_buf + (size_t)scram_count * TS_PKT, pkt, TS_PKT);
-    scram_odd[scram_count] = (uint8_t)odd;
-    scram_count++;
+  uint8_t batch[64 * TS_PKT];
+  static uint64_t wait_due;
+  while (scram_count) {
+    uint64_t now_us = monotonic_us();
+    uint64_t age = now_us - scram_at[scram_head];
+    if (age > (opts.descramble_delay_ms + 2000ULL) * 1000) {
+      scram_head = (scram_head + 1) % SCRAM_MAX; scram_count--;
+      service_drops++; cw_timeout_drops++;
+      continue;
+    }
+    if (age < opts.descramble_delay_ms * 1000ULL) break;
+    int count = 0, encrypted = 0;
+    pthread_mutex_lock(&csa_mutex);
+    int batch_parity = -1;
+    uint8_t batch_key[8] = {0};
+    uint64_t batch_revision = 0;
+    while (count < scram_count && count < 64) {
+      int slot = (scram_head + count) % SCRAM_MAX;
+      const uint8_t *pkt = scram_buf + slot * TS_PKT;
+      if (now_us - scram_at[slot] < opts.descramble_delay_ms * 1000ULL) break;
+      if (pkt[3] & 0x80) {
+        int parity = !!(pkt[3] & 0x40);
+        int available = parity ? have_cw_odd : have_cw_even;
+        uint64_t revision = scram_revision[slot] ? scram_revision[slot] : cw_revision[parity];
+        const uint8_t *key = scram_revision[slot] ? scram_cw[slot] : cw_value[parity];
+        int stale = parity != output_parity && cw_used[parity] &&
+                    revision <= cw_used[parity];
+        if (!available || stale) {
+          uint64_t now = monotonic_ms();
+          if (now >= wait_due) {
+            LOGV("CW wait: parity=%d stale=%d pending=%d\n", parity, stale, scram_count);
+            wait_due = now + 5000;
+          }
+          break;
+        }
+        if (batch_parity >= 0 && (parity != batch_parity || revision != batch_revision ||
+                                 memcmp(key, batch_key, 8))) break;
+        /* Returning to a previously used parity requires a different CW.
+         * Repeated ECM replies must not revalidate a key from an old period. */
+        batch_parity = parity;
+        batch_revision = revision;
+        memcpy(batch_key, key, 8);
+        encrypted++;
+      }
+      memcpy(batch + count * TS_PKT, pkt, TS_PKT);
+      count++;
+    }
+    if (encrypted) {
+      if (batch_parity) csa_set_key_odd(csae, batch_key);
+      else csa_set_key_even(csae, batch_key);
+      csa_descramble(csae, batch, count);
+      /* Restore the latest key for the next batch. */
+      if (batch_parity) csa_set_key_odd(csae, cw_value[1]);
+      else csa_set_key_even(csae, cw_value[0]);
+      csa_batches++;
+      csa_packets += encrypted;
+      output_parity = batch_parity;
+      cw_used[batch_parity] = batch_revision;
+    }
+    pthread_mutex_unlock(&csa_mutex);
+    if (!count) break;
+    for (int i = 0; i < count; i++) {
+      uint8_t *pkt = batch + i * TS_PKT;
+      int pid = ((pkt[1] & 31) << 8) | pkt[2];
+      int off = 4;
+      if (pkt[3] & 0x20) off += 1 + pkt[4];
+      /* Only inspect complete PES prefixes at an ES payload-unit start.
+       * Split prefixes are not errors; this is not a full PES decoder. */
+      if ((pkt[1] & 0x40) && (pkt[3] & 0x10) && off + 3 <= TS_PKT &&
+          (pid == svc.video_pid || pid == svc.audio_pid) &&
+          (pkt[off] || pkt[off+1] || pkt[off+2] != 1)) output_pes_errors++;
+      queue_output(pkt, scram_at[(scram_head + i) % SCRAM_MAX]);
+    }
+    scram_head = (scram_head + count) % SCRAM_MAX;
+    scram_count -= count;
   }
 }
 
-/* Descifrar los paquetes bufferizados cuya CW ya esté disponible (hilo principal) */
-static void flush_scrambled(void)
+static void buffer_service_packet(const uint8_t *pkt)
 {
-  for (int i = 0; i < scram_count; i++) {
-    uint8_t *pkt = scram_buf + (size_t)i * TS_PKT;
-    int ok = 0;
+  if (scram_count >= 64) flush_scrambled();
+  if (scram_count == SCRAM_MAX) {
+    /* Bounded startup/failure buffering. Never silently keep stale payload. */
+    service_drops += scram_count;
+    queue_full_drops += scram_count;
+    LOGV("TS: service queue full waiting for CW; dropped %d packets\n", scram_count);
+    scram_head = scram_count = 0;
+  }
+  int tail = (scram_head + scram_count) % SCRAM_MAX;
+  memcpy(scram_buf + tail * TS_PKT, pkt, TS_PKT);
+  scram_at[tail] = monotonic_us();
+  scram_revision[tail] = 0;
+  if (pkt[3] & 0x80) {
+    int parity = !!(pkt[3] & 0x40);
     pthread_mutex_lock(&csa_mutex);
-    if (scram_odd[i] ? have_cw_odd : have_cw_even) {
-      csa_descramble(csae, pkt, 1);
-      ok = 1;
+    int available = parity ? have_cw_odd : have_cw_even;
+    if (available && (parity == output_parity || !cw_used[parity] ||
+                      cw_revision[parity] > cw_used[parity])) {
+      memcpy(scram_cw[tail], cw_value[parity], 8);
+      scram_revision[tail] = cw_revision[parity];
     }
     pthread_mutex_unlock(&csa_mutex);
-    if (ok) output_packet(pkt);   /* sin CW: se descarta */
   }
-  scram_count = 0;
+  scram_count++;
+}
+
+/* Input diagnostics, not a claim that CC errors can be repaired. Ignore
+ * adaptation-only packets for CC increments and honor discontinuity flags. */
+static void observe_transport(const uint8_t *pkt, unsigned pid)
+{
+  int afc = (pkt[3] >> 4) & 3;
+  if (pkt[1] & 0x80) {
+    input_tei++;
+    cc_seen[pid] = 0;
+    return;
+  }
+  if ((afc & 2) && pkt[4] >= 1 && pkt[4] <= 183 && (pkt[5] & 0x80))
+    cc_seen[pid] = 0;
+  if (!(afc & 1) || pid == 0x1fff) return;
+  unsigned cc = pkt[3] & 15;
+  if (cc_seen[pid] && cc != last_cc[pid] && cc != ((last_cc[pid] + 1) & 15))
+    input_cc_errors++;
+  last_cc[pid] = cc;
+  cc_seen[pid] = 1;
+}
+
+static void log_transport_stats(void)
+{
+  static uint64_t due;
+  uint64_t now = monotonic_ms();
+  if (now < due) return;
+  pthread_mutex_lock(&ecm_q_mutex);
+  int queued = ecm_q_count;
+  uint64_t dropped = ecm_queue_drops;
+  pthread_mutex_unlock(&ecm_q_mutex);
+  pthread_mutex_lock(&output_mutex);
+  unsigned output_pending = output_count;
+  uint64_t odrops = output_drops, olate = output_late, oresets = output_clock_resets, udrops = udp_output_drops;
+  pthread_mutex_unlock(&output_mutex);
+  LOGV("TS stats: tei=%llu cc_errors=%llu service_drops=%llu pending=%d "
+       "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu "
+       "sync_losses=%llu sync_bytes=%llu invalid_ts=%llu psi_discontinuities=%llu "
+       "ca_switch_drops=%llu queue_full_drops=%llu ecm_repeats=%llu "
+       "cw_timeout_drops=%llu output_pending=%u output_drops=%llu "
+       "output_late=%llu pcr_resets=%llu pes_errors=%llu udp_output_drops=%llu\n",
+       (unsigned long long)input_tei, (unsigned long long)input_cc_errors,
+       (unsigned long long)service_drops, scram_count, queued,
+       (unsigned long long)dropped, (unsigned long long)csa_batches,
+       (unsigned long long)csa_packets, (unsigned long long)sync_losses,
+       (unsigned long long)sync_bytes, (unsigned long long)invalid_ts,
+       (unsigned long long)psi_discontinuities, (unsigned long long)ca_switch_drops,
+       (unsigned long long)queue_full_drops, (unsigned long long)ecm_repeats,
+       (unsigned long long)cw_timeout_drops, output_pending, (unsigned long long)odrops,
+       (unsigned long long)olate, (unsigned long long)oresets, (unsigned long long)output_pes_errors,
+       (unsigned long long)udrops);
+  due = now + 5000;
+}
+
+static newcamd_t *connect_cam(char *error, size_t size)
+{
+  if (opts.cam_socket[0]) return newcamd_connect_local(opts.cam_socket, error, size);
+  return newcamd_connect_proto(opts.nc_host, opts.nc_port, opts.nc_deskey,
+                         opts.nc_user, opts.nc_pass, opts.nc_protocol, error, size);
+}
+
+/* Returns false for an obsolete response. Keys are never installed across a
+ * PMT/CA generation boundary. Callers do not hold queue or CSA locks. */
+static int accept_ecm_result(const ecm_req_t *request, int result,
+                             const uint8_t even[8], const uint8_t odd[8])
+{
+  static const uint8_t zero[8];
+  pthread_mutex_lock(&csa_mutex);
+  if (request->generation != ca_generation) {
+    pthread_mutex_unlock(&csa_mutex);
+    return 0;
+  }
+  if (!result && (memcmp(even, zero, 8) || memcmp(odd, zero, 8))) {
+    install_cw(0, even);
+    install_cw(1, odd);
+    ca_failures = 0;
+    ca_worked = 1;
+    ca_last_progress = monotonic_ms();
+  } else {
+    have_cw_even = have_cw_odd = 0;
+    csa_clear_keys(csae);
+    if (result != -1) {
+      ca_failures++;
+      /* A known-working CA deserves a recovery window, not a carousel after
+       * two transient NOKs. Never rotate away from an explicit user lock. */
+      if (!opts.preferred_caid && ca_failures >= (ca_worked ? 3 : 2) &&
+          (!ca_worked || monotonic_ms() - ca_last_progress >= 15000)) ca_rotate = 1;
+    }
+  }
+  pthread_mutex_unlock(&csa_mutex);
+  return 1;
 }
 
 /* Hilo CA: envía ECMs y actualiza las CW (el bloqueo de red ocurre aquí) */
 static void *ca_thread(void *arg)
 {
   newcamd_t *cam = arg;
+  unsigned retry_delay = 1;
   while (ca_running) {
     ecm_req_t r;
     pthread_mutex_lock(&ecm_q_mutex);
@@ -469,20 +933,37 @@ static void *ca_thread(void *arg)
     ecm_q_head = (ecm_q_head + 1) % ECMQ_MAX;
     ecm_q_count--;
     pthread_mutex_unlock(&ecm_q_mutex);
+    pthread_mutex_lock(&csa_mutex);
+    int current = r.generation == ca_generation;
+    pthread_mutex_unlock(&csa_mutex);
+    if (!current) continue;
 
-    uint8_t even[8], odd[8];
-    if (cam && newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
-                                r.sec, r.len, even, odd, 1500) == 0) {
-      pthread_mutex_lock(&csa_mutex);
-      csa_set_key_even(csae, even);
-      csa_set_key_odd(csae, odd);
-      have_cw_even = 1;
-      have_cw_odd = 1;
-      pthread_mutex_unlock(&csa_mutex);
-      LOGV("CW actualizada (par/impar)\n");
-    } else {
-      LOGV("ECM sin respuesta\n");
+    if (!cam) {
+      char error[256] = {0};
+      cam = connect_cam(error, sizeof(error));
+      if (!cam) {
+        fprintf(stderr, "newcamd: %s; retry in %u s\n", error, retry_delay);
+        sleep(retry_delay);
+        if (retry_delay < 30) retry_delay = retry_delay > 15 ? 30 : retry_delay * 2;
+        continue;
+      }
+      retry_delay = 1;
+      fprintf(stderr, "newcamd: %s connected\n",
+              opts.cam_socket[0] ? "local broker" : "upstream (login + card data)");
     }
+    uint8_t even[8], odd[8];
+    uint64_t requested = monotonic_ms();
+    int result = newcamd_send_ecm(cam, r.sid, r.caid, r.provid,
+                                 r.sec, r.len, even, odd, 5000);
+    const uint8_t empty_cw[8] = {0};
+    unsigned cw_mask = result == 0 ?
+      ((memcmp(even, empty_cw, 8) ? 1 : 0) | (memcmp(odd, empty_cw, 8) ? 2 : 0)) : 0;
+    if (result == -1) { newcamd_close(cam); cam = NULL; }
+    if (!accept_ecm_result(&r, result, even, odd)) continue;
+    LOGV("ECM: sid=%u caid=%04X time_ms=%llu result=%d cw_mask=%u at_ms=%llu pid=%ld\n",
+         r.sid, r.caid, (unsigned long long)(monotonic_ms() - requested), result,
+         cw_mask, (unsigned long long)monotonic_ms(), (long)getpid());
+
   }
   return NULL;
 }
@@ -497,60 +978,147 @@ static int is_audio(uint8_t t)
          t == 0x81 || t == 0x82 || t == 0x87;
 }
 
+/* Preserve non-CA descriptors; reject malformed tables without partial updates. */
+static int copy_descriptors(uint8_t *out, const uint8_t *in, int len,
+                            service_t *service)
+{
+  int used = 0;
+  for (int j = 0; j < len; ) {
+    if (j + 2 > len) return -1;
+    int size = 2 + in[j+1];
+    if (j + size > len) return -1;
+    if (in[j] == DESC_CA) {
+      if (size < 6) return -1;
+      uint16_t caid = ((uint16_t)in[j+2] << 8) | in[j+3];
+      uint16_t pid = ((in[j+4] & 0x1f) << 8) | in[j+5];
+      int duplicate = 0;
+      for (int c = 0; c < service->ca_count; c++)
+        if (service->ca[c].caid == caid && service->ca[c].pid == pid) duplicate = 1;
+      if (!duplicate && service->ca_count < 16 && pid > 0 && pid < 0x1fff) {
+        service->ca[service->ca_count].caid = caid;
+        service->ca[service->ca_count++].pid = pid;
+      }
+      if (service->ecm_pid < 0) {
+        service->caid = ((uint16_t)in[j+2] << 8) | in[j+3];
+        service->ecm_pid = ((in[j+4] & 0x1f) << 8) | in[j+5];
+      }
+    } else {
+      memcpy(out + used, in + j, size);
+      used += size;
+    }
+    j += size;
+  }
+  return used;
+}
+
+/* Main TS thread owns the candidate index and pending payload. */
+static void select_ca(int selected)
+{
+  pthread_mutex_lock(&csa_mutex);
+  ca_selected = selected;
+  ca_generation++;
+  ca_failures = ca_rotate = ca_worked = 0;
+  ca_last_progress = monotonic_ms();
+  have_cw_even = have_cw_odd = 0;
+  csa_clear_keys(csae);
+  memset(cw_revision, 0, sizeof(cw_revision));
+  memset(cw_used, 0, sizeof(cw_used));
+  memset(cw_value, 0, sizeof(cw_value));
+  output_parity = -1;
+  pthread_mutex_unlock(&csa_mutex);
+  pthread_mutex_lock(&ecm_q_mutex);
+  ecm_q_count = ecm_q_head = ecm_q_tail = 0;
+  pthread_mutex_unlock(&ecm_q_mutex);
+  /* Reuse obsolete ECM assemblers without moving PAT/PMT buffers: parse_pmt
+   * may be executing through a pointer to one of those buffers right now. */
+  for (int i = 0; i < nsecbufs; i++) {
+    if (secbufs[i].pid != PID_PAT && secbufs[i].pid != svc.pmt_pid) {
+      memset(&secbufs[i], 0, sizeof(secbufs[i]));
+      secbufs[i].pid = 0x1fff;
+      secbufs[i].wait_pusi = 1;
+    }
+  }
+  pthread_mutex_lock(&output_mutex);
+  output_drops += output_count;
+  output_count = output_head = 0;
+  output_reset = 1; output_epoch++;
+  pthread_mutex_unlock(&output_mutex);
+  /* Payload waiting for an incompatible CA must not leak into the new context. */
+  service_drops += scram_count;
+  ca_switch_drops += scram_count;
+  scram_head = scram_count = 0;
+  if (svc.ca_count && selected >= 0)
+    LOGV("CA select: sid=%u caid=%04X ecm=%u candidate=%d/%d\n",
+         svc.sid, svc.ca[selected].caid, svc.ca[selected].pid, selected + 1, svc.ca_count);
+  else if (opts.preferred_caid)
+    LOGV("CA locked missing: sid=%u caid=%04X ecm=%u\n", svc.sid,
+         opts.preferred_caid, opts.preferred_ecm_pid);
+}
+
+static int preferred_ca_index(const service_t *service)
+{
+  if (!opts.preferred_caid) return 0;
+  for (int i = 0; i < service->ca_count; i++)
+    if (service->ca[i].caid == opts.preferred_caid &&
+        service->ca[i].pid == opts.preferred_ecm_pid) return i;
+  return -1;
+}
+
 static void parse_pmt(const uint8_t *b, int len)
 {
-  if (len < 9) return;
+  if (len < 9 || len > 1017) return;
   uint16_t sid = ((uint16_t)b[0] << 8) | b[1];
-  if (opts.want_sid && sid != opts.want_sid) return;
-  if (!svc.ready || svc.sid != sid) {   /* (re)inicializar servicio */
-    uint16_t pmt_pid = svc.pmt_pid, tsid = svc.tsid;
-    memset(&svc, 0, sizeof(svc));
-    svc.sid = sid;
-    svc.pmt_pid = pmt_pid;
-    svc.tsid = tsid;
-    svc.video_pid = svc.audio_pid = svc.ecm_pid = -1;
+  if ((opts.want_sid && sid != opts.want_sid) || !(b[2] & 1)) return;
+  service_t next = {0};
+  next.sid = sid;
+  next.pmt_pid = svc.pmt_pid;
+  next.tsid = svc.tsid;
+  next.video_pid = next.audio_pid = next.ecm_pid = -1;
+  next.pmt_version = (b[2] >> 1) & 31;
+  next.pcr_pid = ((b[5] & 0x1f) << 8) | b[6];
+  int pil = ((b[7] & 15) << 8) | b[8];
+  if (9 + pil > len) return;
+  next.program_descriptors_len = copy_descriptors(next.program_descriptors, b + 9, pil, &next);
+  if (next.program_descriptors_len < 0) return;
+  for (int off = 9 + pil; off < len; ) {
+    if (off + 5 > len || next.nes >= MAX_ES) return;
+    int dl = ((b[off+3] & 15) << 8) | b[off+4];
+    if (off + 5 + dl > len) return;
+    int e = next.nes++;
+    next.es[e].type = b[off];
+    next.es[e].pid = ((b[off+1] & 31) << 8) | b[off+2];
+    next.es[e].descramble = 1;
+    next.es[e].descriptors_len = copy_descriptors(next.es[e].descriptors, b + off + 5, dl, &next);
+    if (next.es[e].descriptors_len < 0) return;
+    if (is_video(b[off]) && next.video_pid < 0) next.video_pid = next.es[e].pid;
+    if (is_audio(b[off]) && next.audio_pid < 0) next.audio_pid = next.es[e].pid;
+    off += 5 + dl;
   }
-  svc.pmt_version = (b[2] >> 1) & 0x1F;
-  svc.pcr_pid = ((uint16_t)(b[5] & 0x1F) << 8) | b[6];
-  int pil = ((b[7] & 0x0F) << 8) | b[8];
-  int off = 9 + pil;
-
-  svc.nes = 0;
-  while (off + 5 <= len) {
-    uint8_t stype = b[off];
-    uint16_t es_pid = ((uint16_t)(b[off+1] & 0x1F) << 8) | b[off+2];
-    int esil = ((b[off+3] & 0x0F) << 8) | b[off+4];
-    const uint8_t *d = b + off + 5;
-    int dlen = esil;
-    if (off + 5 + esil > len) break;
-
-    /* ¿descriptor CA (0x09) en este ES? */
-    uint16_t caid = 0, ecm_pid = 0;
-    for (int j = 0; j + 2 <= dlen; ) {
-      uint8_t tag = d[j], dl = d[j+1];
-      if (j + 2 + dl > dlen) break;
-      if (tag == DESC_CA && dl >= 4) {
-        caid = ((uint16_t)d[j+2] << 8) | d[j+3];
-        ecm_pid = ((uint16_t)(d[j+4] & 0x1F) << 8) | d[j+5];
-      }
-      j += 2 + dl;
+  next.ready = 1;
+  if (memcmp(&svc, &next, sizeof(next))) {
+    int ca_changed = svc.sid != next.sid || svc.ca_count != next.ca_count ||
+                     memcmp(svc.ca, next.ca, sizeof(svc.ca));
+    int selected = preferred_ca_index(&next);
+    /* Retain a working choice across descriptor reordering when still present. */
+    if (!opts.preferred_caid && ca_selected >= 0 && ca_selected < svc.ca_count) {
+      for (int i = 0; i < next.ca_count; i++)
+        if (next.ca[i].caid == svc.ca[ca_selected].caid &&
+            next.ca[i].pid == svc.ca[ca_selected].pid) selected = i;
     }
-
-    if (svc.nes < MAX_ES) {
-      svc.es[svc.nes].type = stype;
-      svc.es[svc.nes].pid = es_pid;
-      svc.es[svc.nes].descramble = 1;
-      svc.nes++;
-    }
-    if (is_video(stype) && svc.video_pid < 0) svc.video_pid = es_pid;
-    if (is_audio(stype) && svc.audio_pid < 0) svc.audio_pid = es_pid;
-    if (caid && ecm_pid && !svc.ecm_pid) { svc.ecm_pid = (int)ecm_pid; svc.caid = caid; svc.provid = 0; }
-
-    off += 5 + esil;
+    int same_ca = svc.sid == next.sid && ca_selected >= 0 && ca_selected < svc.ca_count &&
+                  selected >= 0 && selected < next.ca_count &&
+                  svc.ca[ca_selected].caid == next.ca[selected].caid &&
+                  svc.ca[ca_selected].pid == next.ca[selected].pid;
+    svc = next;
+    if (ca_changed && !same_ca) select_ca(selected);
+    else if (same_ca) ca_selected = selected;
+    refresh_playlist(svc.sid);
+    psi_due_ms = 0;
+    LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld ca_count=%d\n",
+         svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid,
+         svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].pid : -1,
+         svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].caid : 0, svc.nes, (long)getpid(), svc.ca_count);
   }
-  svc.ready = 1;
-  LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d\n",
-       svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid, svc.ecm_pid, svc.caid, svc.nes);
 }
 
 static void parse_pat(const uint8_t *b, int len)
@@ -564,6 +1132,7 @@ static void parse_pat(const uint8_t *b, int len)
     if (opts.want_sid && prog != opts.want_sid) continue;
     svc.pmt_pid = pid;
     svc.sid = prog;
+    break;
   }
 }
 
@@ -577,10 +1146,10 @@ static void handle_section(uint16_t pid, const uint8_t *s, int slen)
     parse_pat(body, blen);
   } else if (pid == svc.pmt_pid && tid == TID_PMT) {
     parse_pmt(body, blen);
-  } else if (svc.ecm_pid > 0 && pid == (uint16_t)svc.ecm_pid &&
+  } else if (svc.ca_count && ca_selected >= 0 && pid == svc.ca[ca_selected].pid &&
              (tid == 0x80 || tid == 0x81)) {
-    /* ECM = sección sin los 4 bytes de CRC */
-    enqueue_ecm(svc.sid, svc.caid, svc.provid, s, slen - 1);
+    /* ECM uses private short sections: preserve the entire section. */
+    enqueue_ecm(svc.sid, svc.ca[ca_selected].caid, svc.provid, s, slen + 3);
   }
 }
 
@@ -594,11 +1163,9 @@ static void http_send(int fd, const char *status, const char *ctype, const char 
     "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
     "Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
     status, ctype, bodylen);
-  send(fd, hdr, n, MSG_NOSIGNAL);
-  if (body && bodylen) send(fd, body, bodylen, MSG_NOSIGNAL);
+  if (http_write_all(fd, hdr, (size_t)n) == 0 && body && bodylen)
+    http_write_all(fd, body, (size_t)bodylen);
 }
-
-static char m3u8_body[512];
 
 static void *http_client(void *arg)
 {
@@ -612,18 +1179,25 @@ static void *http_client(void *arg)
   if (sscanf(req, "%15s %255s", method, path) != 2) { close(fd); return NULL; }
 
   if (strcmp(path, "/playlist.m3u8") == 0) {
-    http_send(fd, "200 OK", "application/vnd.apple.mpegurl", m3u8_body, (int)strlen(m3u8_body));
+    char playlist[sizeof(m3u8_body)];
+    pthread_mutex_lock(&playlist_mutex);
+    memcpy(playlist, m3u8_body, sizeof(playlist));
+    pthread_mutex_unlock(&playlist_mutex);
+    http_send(fd, "200 OK", "application/vnd.apple.mpegurl", playlist, (int)strlen(playlist));
   } else if (strcmp(path, "/stream.ts") == 0) {
     char hdr[256];
     int n = snprintf(hdr, sizeof(hdr),
       "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n"
       "Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
-    send(fd, hdr, n, MSG_NOSIGNAL);
-    uint64_t seq = 0;
-    uint8_t pkt[TS_PKT];
+    if (http_write_all(fd, hdr, (size_t)n) < 0) { close(fd); return NULL; }
+    /* Join live: replaying the old ring creates a burst of stale PCR/PTS. */
+    pthread_mutex_lock(&ring_mutex);
+    uint64_t seq = ring_seq;
+    pthread_mutex_unlock(&ring_mutex);
+    uint8_t pkt[7 * TS_PKT];
     while (1) {
-      if (ring_read(&seq, pkt) < 0) break;
-      if (send(fd, pkt, TS_PKT, MSG_NOSIGNAL) < 0) break;
+      int count = ring_read(&seq, pkt);
+      if (http_write_all(fd, pkt, (size_t)count * TS_PKT) < 0) break;
     }
   } else {
     const char *idx =
@@ -645,12 +1219,16 @@ static void *http_server(void *arg)
                            .sin_port = htons((uint16_t)port) };
   if (bind(ls, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(ls, 8) < 0) {
     fprintf(stderr, "HTTP: %s\n", strerror(errno));
-    return NULL;
+    close(ls);
+    exit(EXIT_FAILURE);
   }
   fprintf(stderr, "HTTP TS en http://0.0.0.0:%d/stream.ts\n", port);
   while (1) {
     int c = accept(ls, NULL, NULL);
     if (c < 0) continue;
+    struct timeval tv = { .tv_sec = 5 };
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     pthread_t t;
     pthread_create(&t, NULL, http_client, (void *)(intptr_t)c);
     pthread_detach(t);
@@ -661,55 +1239,103 @@ static void *http_server(void *arg)
 /* -------------------------------------------------------------------------
  * Bucle principal
  * ------------------------------------------------------------------------- */
+static int valid_ts_header(const uint8_t *packet)
+{
+  return packet[0] == 0x47 && (packet[3] & 0x30) != 0;
+}
+
+static int valid_ts_packet(const uint8_t *packet)
+{
+  if (!valid_ts_header(packet)) return 0;
+  int afc = (packet[3] >> 4) & 3;
+  if (afc == 2) return packet[4] == 183;
+  if (afc == 3) return packet[4] <= 182;
+  return 1;
+}
+
 static void process_packet(uint8_t *pkt)
 {
-  if (pkt[0] != 0x47) return;
+  if (!valid_ts_packet(pkt)) { invalid_ts++; reset_sections(); return; }
+  pthread_mutex_lock(&csa_mutex);
+  int rotate = !opts.preferred_caid && (ca_rotate || (svc.ca_count > 1 &&
+               monotonic_ms() - ca_last_progress >= (ca_worked ? 20000 : 12000)));
+  ca_rotate = 0;
+  pthread_mutex_unlock(&csa_mutex);
+  if (rotate && svc.ca_count > 1) select_ca((ca_selected + 1) % svc.ca_count);
+  emit_psi();
   int pusi = (pkt[1] & 0x40) != 0;
   uint16_t pid = ((uint16_t)(pkt[1] & 0x1F) << 8) | pkt[2];
+  observe_transport(pkt, pid);
+  if (pkt[1] & 0x80) {
+    for (int i = 0; i < nsecbufs; i++) if (secbufs[i].pid == pid) {
+      secbufs[i].len = secbufs[i].cc_seen = 0;
+      secbufs[i].wait_pusi = 1;
+    }
+    return; /* corrupt input must not enter PSI/CSA */
+  }
   int afc = (pkt[3] >> 4) & 0x03;
 
   /* Demux de secciones PSI (PAT/PMT/ECM) */
   if (pid == PID_PAT || (svc.pmt_pid && pid == svc.pmt_pid) ||
-      (svc.ecm_pid > 0 && pid == (uint16_t)svc.ecm_pid)) {
+      (svc.ca_count && ca_selected >= 0 && pid == svc.ca[ca_selected].pid)) {
+    secbuf_t *sb = secbuf_get(pid);
+    if (!sb) return;
+    if ((afc & 2) && pkt[4] && (pkt[5] & 0x80)) {
+      sb->len = sb->cc_seen = 0;
+      sb->wait_pusi = 1;
+    }
+    if (!(afc & 1)) return;
+    int cc = pkt[3] & 15;
+    if (sb->cc_seen) {
+      if (cc == sb->last_cc) return; /* duplicate payload must not enter an ECM twice */
+      if (cc != ((sb->last_cc + 1) & 15)) {
+        psi_discontinuities++;
+        sb->len = 0; sb->wait_pusi = 1;
+      }
+    }
+    sb->cc_seen = 1; sb->last_cc = cc;
     int off = 4;
-    if (afc == 0x02) return;
-    if (afc == 0x03) off += 1 + pkt[4];
-    if (off <= 184)
+    if (afc == 3) off += 1 + pkt[4];
+    if (off < TS_PKT && (pusi || !sb->wait_pusi))
       feed_section(pid, pkt + off, TS_PKT - off, pusi);
     return;
   }
 
-  /* Reenvío de ES: descifrar + reenviar */
-  if (svc.ready && pid_forward(pid)) {
-    if (pkt[3] & 0x80) {                       /* scrambled */
-      int odd = (pkt[3] & 0x40) != 0;          /* 0=clave par, 1=clave impar */
-      int ok = 0;
-      pthread_mutex_lock(&csa_mutex);
-      if (odd ? have_cw_odd : have_cw_even) {
-        csa_descramble(csae, pkt, 1);
-        ok = 1;
-      }
-      pthread_mutex_unlock(&csa_mutex);
-      if (ok) {
-        flush_scrambled();   /* primero lo que estaba en espera (en orden) */
-        output_packet(pkt);
-      } else {
-        buffer_scrambled(pkt, odd);   /* aún sin CW: guardar en cola */
-      }
-      return;
-    }
-    output_packet(pkt);                        /* paquete claro */
-  }
+  if (svc.ready && pid_forward(pid)) buffer_service_packet(pkt);
 }
 
-static void process_buffer(uint8_t *buf, int len)
+/* DVR reads need not end at a TS boundary. Keep fragments across reads. */
+static uint8_t ts_pending[3 * TS_PKT];
+static int ts_pending_len = 0, ts_synced = 0;
+
+static void process_buffer(const uint8_t *buf, int len)
 {
-  int off = -1;
-  for (int i = 0; i + 2 * TS_PKT < len && i < TS_PKT; i++)
-    if (buf[i] == 0x47 && buf[i+TS_PKT] == 0x47 && buf[i+2*TS_PKT] == 0x47) { off = i; break; }
-  if (off < 0) return;
-  for (int p = off; p + TS_PKT <= len; p += TS_PKT)
-    process_packet(buf + p);
+  for (int i = 0; i < len; i++) {
+    ts_pending[ts_pending_len++] = buf[i];
+    if (ts_synced && ts_pending_len >= TS_PKT && !valid_ts_header(ts_pending)) {
+      ts_synced = 0;
+      sync_losses++;
+      reset_sections();
+    }
+    if (!ts_synced && ts_pending_len >= 2 * TS_PKT + 4) {
+      if (valid_ts_header(ts_pending) && valid_ts_header(ts_pending + TS_PKT) &&
+          valid_ts_header(ts_pending + 2 * TS_PKT)) {
+        ts_synced = 1;
+      } else {
+        memmove(ts_pending, ts_pending + 1, --ts_pending_len);
+        sync_bytes++;
+      }
+    }
+    while (ts_synced && ts_pending_len >= TS_PKT) {
+      if (!valid_ts_header(ts_pending)) {
+        ts_synced = 0; sync_losses++; reset_sections(); break;
+      }
+      process_packet(ts_pending);
+      ts_pending_len -= TS_PKT;
+      memmove(ts_pending, ts_pending + TS_PKT, ts_pending_len);
+    }
+  }
+  flush_scrambled();
 }
 
 static int parse_fec(const char *s)
@@ -727,9 +1353,11 @@ static int parse_fec(const char *s)
 
 int main(int argc, char **argv)
 {
+  signal(SIGPIPE, SIG_IGN);
   memset(&opts, 0, sizeof(opts));
   opts.adapter = 0; opts.frontend = 0; opts.delsys = SYS_DVBT;
-  opts.nc_port = 15050; opts.http_port = 9981;
+  opts.nc_port = 15050; opts.nc_protocol = 525; opts.http_port = 9981;
+  opts.descramble_delay_ms = 500;
   opts.pol = 'H';
   opts.lnb_lo_hz = 9750000000LL;   /* universal Ku, banda baja (9750 MHz) */
   strcpy(opts.nc_host, "127.0.0.1");
@@ -741,7 +1369,7 @@ int main(int argc, char **argv)
 
   enum { OPT_FREQ=1000, OPT_FREQ_MHZ, OPT_BW, OPT_SR, OPT_FEC, OPT_FEC_HP, OPT_FEC_LP,
          OPT_POL, OPT_NEWCAMD, OPT_DESKEY, OPT_USER, OPT_PASS, OPT_UDP, OPT_HTTP,
-         OPT_BASE, OPT_LNBLO };
+         OPT_BASE, OPT_LNBUNIVERSAL, OPT_LNBLO, OPT_STDOUT, OPT_STDIN, OPT_MUX_ONLY, OPT_CAM_SOCKET, OPT_CA_BROKER, OPT_CAID, OPT_ECM_PID, OPT_SHIFT, OPT_NCPROTO };
 
   static const struct option longopts[] = {
     {"adapter", required_argument, 0, 'a'},
@@ -756,13 +1384,23 @@ int main(int argc, char **argv)
     {"fec-lp", required_argument, 0, OPT_FEC_LP},
     {"pol", required_argument, 0, OPT_POL},
     {"sid", required_argument, 0, 's'},
+    {"descramble-delay-ms", required_argument, 0, OPT_SHIFT},
+    {"caid", required_argument, 0, OPT_CAID},
+    {"ecm-pid", required_argument, 0, OPT_ECM_PID},
+    {"newcamd-proto", required_argument, 0, OPT_NCPROTO},
     {"newcamd", required_argument, 0, OPT_NEWCAMD},
     {"deskey", required_argument, 0, OPT_DESKEY},
     {"user", required_argument, 0, OPT_USER},
     {"pass", required_argument, 0, OPT_PASS},
     {"udp", required_argument, 0, OPT_UDP},
     {"http-port", required_argument, 0, OPT_HTTP},
+    {"stdout", no_argument, 0, OPT_STDOUT},
+    {"stdin", no_argument, 0, OPT_STDIN},
+    {"mux-only", no_argument, 0, OPT_MUX_ONLY},
+    {"cam-socket", required_argument, 0, OPT_CAM_SOCKET},
+    {"ca-broker", required_argument, 0, OPT_CA_BROKER},
     {"m3u8-base", required_argument, 0, OPT_BASE},
+    {"lnb-universal", no_argument, 0, OPT_LNBUNIVERSAL},
     {"lnb-lo", required_argument, 0, OPT_LNBLO},
     {"timeout", required_argument, 0, 'T'},
     {"verbose", no_argument, 0, 'v'},
@@ -777,6 +1415,33 @@ int main(int argc, char **argv)
       case 'F': opts.frontend = atoi(optarg); break;
       case 't': type = optarg; break;
       case 's': opts.want_sid = (uint16_t)atoi(optarg); break;
+      case OPT_NCPROTO:
+        if (strcmp(optarg, "524") && strcmp(optarg, "525")) {
+          fprintf(stderr, "--newcamd-proto must be 524 or 525\n"); return 1;
+        }
+        opts.nc_protocol = atoi(optarg); break;
+      case OPT_SHIFT: {
+        char *end; errno = 0;
+        unsigned long value = strtoul(optarg, &end, 10);
+        if (errno || !optarg[0] || *end || value > 2000 || optarg[0] == '-') {
+          fprintf(stderr, "--descramble-delay-ms must be 0..2000\n"); return 1;
+        }
+        opts.descramble_delay_ms = (unsigned)value;
+        break;
+      }
+      case OPT_CAID:
+      case OPT_ECM_PID: {
+        char *end = NULL;
+        errno = 0;
+        unsigned long value = strtoul(optarg, &end, c == OPT_CAID ? 16 : 10);
+        if (errno || !optarg[0] || *end || value == 0 ||
+            value > (c == OPT_CAID ? 0xffffUL : 8190UL)) {
+          fprintf(stderr, "invalid --caid (hex) / --ecm-pid (decimal)\n"); return 1;
+        }
+        if (c == OPT_CAID) opts.preferred_caid = (unsigned)value;
+        else opts.preferred_ecm_pid = (unsigned)value;
+        break;
+      }
       case OPT_FREQ: opts.freq_hz = (int64_t)strtoll(optarg, NULL, 10); break;
       case OPT_FREQ_MHZ: freq_mhz = atof(optarg); break;
       case OPT_BW: opts.bandwidth_hz = (uint32_t)strtoul(optarg, NULL, 10); break;
@@ -817,17 +1482,44 @@ int main(int argc, char **argv)
         }
         break;
       }
+      case OPT_STDOUT: opts.stdout_ts = 1; break;
+      case OPT_STDIN: opts.stdin_ts = 1; break;
+      case OPT_MUX_ONLY: opts.mux_only = 1; break;
+      case OPT_CAM_SOCKET:
+      case OPT_CA_BROKER:
+        if (strlen(optarg) >= sizeof(opts.cam_socket)) {
+          fprintf(stderr, "local socket path too long\n"); return 1;
+        }
+        strcpy(c == OPT_CAM_SOCKET ? opts.cam_socket : opts.ca_broker, optarg);
+        break;
       case OPT_HTTP: opts.http_port = atoi(optarg); break;
       case OPT_BASE: strncpy(opts.m3u8_base, optarg, sizeof(opts.m3u8_base)-1); break;
+      case OPT_LNBUNIVERSAL: opts.lnb_universal = 1; break;
       case OPT_LNBLO: opts.lnb_lo_hz = (int64_t)(atof(optarg) * 1000000.0); break;
       case 'T': timeout = atoi(optarg); break;
       case 'v': verbose = 1; break;
       case 'h':
+        fprintf(stderr, "LNB: --lnb-universal (9750/10600, 22 kHz auto) or --lnb-lo MHz (fixed LO, tone OFF)\n");
+        fprintf(stderr, "Panel roles: --mux-only --stdout (DVB capture), "
+                "--stdin --sid N --stdout --cam-socket PATH (service), "
+                "--caid HEX --ecm-pid DEC (lock CA), "
+                "--ca-broker PATH --newcamd HOST:PORT --newcamd-proto 525|524 (default 525)\n"
+                "--descramble-delay-ms 0..2000 (default 500; paced output always enabled)\n");
         fprintf(stderr, "Uso: %s -t dvbs --freq-mhz 11836 --symbol-rate 27500000 "
                 "--newcamd 192.168.1.2:15050 --deskey <hex14bytes> --udp 239.1.1.1:1234\n", argv[0]);
         return 0;
       default: return 1;
     }
+  }
+
+  if (!!opts.preferred_caid != !!opts.preferred_ecm_pid) {
+    fprintf(stderr, "--caid and --ecm-pid must be supplied together\n"); return 1;
+  }
+  if (opts.ca_broker[0])
+    return newcamd_broker_proto(opts.ca_broker, opts.nc_host, opts.nc_port,
+                         opts.nc_deskey, opts.nc_user, opts.nc_pass, opts.nc_protocol);
+  if (opts.stdin_ts && opts.mux_only) {
+    fprintf(stderr, "--stdin and --mux-only are mutually exclusive\n"); return 1;
   }
 
   if (freq_mhz > 0) opts.freq_hz = (int64_t)(freq_mhz * 1000000.0);
@@ -840,8 +1532,8 @@ int main(int argc, char **argv)
   else if (!strcmp(type, "dvbs2")) opts.delsys = SYS_DVBS2;
   else { fprintf(stderr, "tipo desconocido\n"); return 1; }
 
-  if (!opts.freq_hz) { fprintf(stderr, "falta --freq/--freq-mhz\n"); return 1; }
-  if ((opts.delsys == SYS_DVBC_ANNEX_A || opts.delsys == SYS_DVBS || opts.delsys == SYS_DVBS2) && !opts.symbol_rate) {
+  if (!opts.stdin_ts && !opts.freq_hz) { fprintf(stderr, "falta --freq/--freq-mhz\n"); return 1; }
+  if (!opts.stdin_ts && (opts.delsys == SYS_DVBC_ANNEX_A || opts.delsys == SYS_DVBS || opts.delsys == SYS_DVBS2) && !opts.symbol_rate) {
     fprintf(stderr, "falta --symbol-rate\n"); return 1;
   }
   if (pols) { opts.pol = *pols; }
@@ -862,92 +1554,122 @@ int main(int argc, char **argv)
     fprintf(stderr, "UDP -> %s:%d\n", opts.udp[i].host, opts.udp[i].port);
   }
 
-  /* abrir frontend/dvr */
-  char fe_path[128], dvr_path[128];
-  snprintf(fe_path, sizeof(fe_path), "/dev/dvb/adapter%d/frontend%d", opts.adapter, opts.frontend);
-  snprintf(dvr_path, sizeof(dvr_path), "/dev/dvb/adapter%d/dvr%d", opts.adapter, opts.frontend);
-  int fe = open(fe_path, O_RDWR);
-  if (fe < 0) { fprintf(stderr, "open %s: %s\n", fe_path, strerror(errno)); return 1; }
-  int dvr = open(dvr_path, O_RDONLY | O_NONBLOCK);
-  if (dvr < 0) { fprintf(stderr, "open %s: %s\n", dvr_path, strerror(errno)); return 1; }
+  int dvr = STDIN_FILENO;
+  if (!opts.stdin_ts) {
+    /* abrir frontend/dvr */
+    char fe_path[128], dvr_path[128];
+    snprintf(fe_path, sizeof(fe_path), "/dev/dvb/adapter%d/frontend%d", opts.adapter, opts.frontend);
+    snprintf(dvr_path, sizeof(dvr_path), "/dev/dvb/adapter%d/dvr%d", opts.adapter, opts.frontend);
+    int fe = open(fe_path, O_RDWR);
+    if (fe < 0) { fprintf(stderr, "open %s: %s\n", fe_path, strerror(errno)); return 1; }
+    dvr = open(dvr_path, O_RDONLY | O_NONBLOCK);
+    if (dvr < 0) { fprintf(stderr, "open %s: %s\n", dvr_path, strerror(errno)); return 1; }
 
-  if (frontend_tune(fe, &opts) < 0) return 1;
-  if (wait_lock(fe, timeout) < 0) { fprintf(stderr, "sin lock\n"); return 1; }
-  LOGV("lock OK\n");
+    if (frontend_tune(fe, &opts) < 0) return 1;
+    if (wait_lock(fe, timeout) < 0) { fprintf(stderr, "sin lock\n"); return 1; }
+    LOGV("lock OK\n");
 
-  /* El driver TBSECP3 solo entrega TS al dvr si el demux tiene un filtro
-     "full TS" (todos los PIDs -> DMX_OUT_TS_TAP). */
-  char dmx_path[128];
-  snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", opts.adapter, opts.frontend);
-  int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
-  if (dmx >= 0) {
-    struct dmx_pes_filter_params pes;
-    memset(&pes, 0, sizeof(pes));
-    pes.pid = 0x2000;
-    pes.input = DMX_IN_FRONTEND;
-    pes.output = DMX_OUT_TS_TAP;
-    pes.pes_type = DMX_PES_OTHER;
-    pes.flags = 0;
-    ioctl(dmx, DMX_SET_PES_FILTER, &pes);
-    ioctl(dmx, DMX_START);
+    /* El driver TBSECP3 solo entrega TS al dvr si el demux tiene un filtro
+       "full TS" (todos los PIDs -> DMX_OUT_TS_TAP). */
+    char dmx_path[128];
+    snprintf(dmx_path, sizeof(dmx_path), "/dev/dvb/adapter%d/demux%d", opts.adapter, opts.frontend);
+    int dmx = open(dmx_path, O_RDWR | O_NONBLOCK);
+    if (dmx < 0) { fprintf(stderr, "open demux: %s\n", strerror(errno)); return 1; }
+    {
+      /* Larger kernel buffering absorbs short userspace scheduling stalls.
+       * Some vendor drivers do not implement this ioctl: keep running/log it. */
+      if (ioctl(dmx, DMX_SET_BUFFER_SIZE, 4 * 1024 * 1024) < 0)
+        LOGV("DMX_SET_BUFFER_SIZE unsupported/failed: %s\n", strerror(errno));
+      struct dmx_pes_filter_params pes;
+      memset(&pes, 0, sizeof(pes));
+      pes.pid = 0x2000;
+      pes.input = DMX_IN_FRONTEND;
+      pes.output = DMX_OUT_TS_TAP;
+      pes.pes_type = DMX_PES_OTHER;
+      pes.flags = 0;
+      if (ioctl(dmx, DMX_SET_PES_FILTER, &pes) < 0 || ioctl(dmx, DMX_START) < 0) {
+        fprintf(stderr, "full mux filter: %s\n", strerror(errno)); return 1;
+      }
+    }
+
   }
 
-  /* newcamd + CSA */
-  csae = csa_create();
-  char err[256];
-  nc = newcamd_connect(opts.nc_host, opts.nc_port, opts.nc_deskey,
-                       opts.nc_user, opts.nc_pass, err, sizeof(err));
-  if (!nc) fprintf(stderr, "newcamd: %s\n", err);
+  pthread_t output_tid;
+  /* Capture has no descrambler or CA connection. */
+  if (!opts.mux_only) {
+    output_async = output_running = 1;
+    if (opts.stdout_ts) {
+      int flags = fcntl(STDOUT_FILENO, F_GETFL);
+      if (flags < 0 || fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) return 1;
+    }
+    if (pthread_create(&output_tid, NULL, output_worker, NULL)) return 1;
+    LOGV("TS delivery: descramble_delay_ms=%u output=pcr/arrival bounded\n", opts.descramble_delay_ms);
+    /* newcamd + CSA */
+    csae = csa_create();
+    if (!csae) { fprintf(stderr, "CSA allocation failed\n"); return 1; }
+    char err[256] = {0};
+    nc = connect_cam(err, sizeof(err));
+    if (!nc) fprintf(stderr, "newcamd: %s\n", err);
 
-  /* hilo CA asíncrono: envía ECMs y actualiza las CW sin bloquear el principal */
-  pthread_t ca_tid;
-  if (nc)
+    /* hilo CA asíncrono: envía ECMs y actualiza las CW sin bloquear el principal */
+    pthread_t ca_tid;
     pthread_create(&ca_tid, NULL, ca_thread, nc);
 
-  /* M3U8 */
-  snprintf(m3u8_body, sizeof(m3u8_body),
-    "#EXTM3U\n#EXTINF:-1 tvg-id=\"%d\",Canal %d\n%s/stream.ts\n",
-    opts.want_sid ? opts.want_sid : 0, opts.want_sid ? opts.want_sid : 0,
-    opts.m3u8_base[0] ? opts.m3u8_base : "http://127.0.0.1:9981");
+    refresh_playlist(opts.want_sid);
 
-  /* servidor HTTP */
-  pthread_t ht;
-  if (opts.http_port > 0)
-    pthread_create(&ht, NULL, http_server, &opts.http_port);
+    /* servidor HTTP */
+    pthread_t ht;
+    if (opts.http_port > 0)
+      pthread_create(&ht, NULL, http_server, &opts.http_port);
 
-  /* PAT/PMT periódicos */
-  uint8_t pat_cc = 0, pmt_cc = 0;
-  uint64_t packets = 0;
-  uint8_t pat_sec[64], pmt_sec[256];
-  int pat_len = 0, pmt_len = 0;
+  }
 
   /* bucle */
-  uint8_t buf[TS_PKT * 32];
+  uint8_t buf[TS_PKT * 256];
   struct pollfd pfd = { .fd = dvr, .events = POLLIN };
   while (1) {
-    int r = poll(&pfd, 1, 1000);
-    if (r <= 0) continue;
-    ssize_t n = read(dvr, buf, sizeof(buf));
-    if (n <= 0) continue;
-    process_buffer(buf, (int)n);
-
-    /* inyectar PAT/PMT cada ~100 ms */
-    packets += (uint64_t)n / TS_PKT;
-    if (svc.ready && packets >= 2000) {
-      packets = 0;
-      /* reconstruir M3U8 con el SID real */
-      snprintf(m3u8_body, sizeof(m3u8_body),
-        "#EXTM3U\n#EXTINF:-1 tvg-id=\"%d\",Canal %d\n%s/stream.ts\n",
-        svc.sid, svc.sid,
-        opts.m3u8_base[0] ? opts.m3u8_base : "http://127.0.0.1:9981");
-      uint8_t out[TS_PKT];
-      pat_len = build_pat(pat_sec);
-      pmt_len = build_pmt(pmt_sec);
-      make_psi_packet(PID_PAT, &pat_cc, pat_sec, pat_len, out);
-      output_packet(out);
-      make_psi_packet(svc.pmt_pid, &pmt_cc, pmt_sec, pmt_len, out);
-      output_packet(out);
+    int r = poll(&pfd, 1, opts.mux_only ? 100 : 10);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return 1;
+    if (r == 0) {
+      if (opts.mux_only) continue;
+      flush_scrambled();
+      log_transport_stats();
+      continue;
     }
+    ssize_t n = read(dvr, buf, sizeof(buf));
+    if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+    if (n <= 0) {
+      if (n < 0 || opts.mux_only) return n == 0 ? 0 : 1;
+      uint64_t end = monotonic_us() + (opts.descramble_delay_ms + 2500ULL) * 1000;
+      while (monotonic_us() < end) {
+        flush_scrambled();
+        pthread_mutex_lock(&output_mutex);
+        unsigned pending = output_count;
+        pthread_mutex_unlock(&output_mutex);
+        if (!scram_count && !pending) break;
+        usleep(10000);
+      }
+      pthread_mutex_lock(&output_mutex);
+      output_running = 0;
+      pthread_cond_signal(&output_cond);
+      pthread_mutex_unlock(&output_mutex);
+      pthread_join(output_tid, NULL);
+      return 0;
+    }
+    if (opts.mux_only) {
+      size_t sent = 0;
+      while (sent < (size_t)n) {
+        ssize_t out = write(STDOUT_FILENO, buf + sent, (size_t)n - sent);
+        if (out < 0 && errno == EINTR) continue;
+        if (out <= 0) return 1;
+        sent += (size_t)out;
+      }
+      continue;
+    }
+    process_buffer(buf, (int)n);
+    log_transport_stats();
+
   }
 
   return 0;

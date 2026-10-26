@@ -1,0 +1,90 @@
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "panel"))
+from health import ECMHealth, BrokerHealth
+
+
+class HealthTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "log")
+        Path(self.path).write_text("")
+        self.health = ECMHealth(self.path, created=90)
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def event(self, at, result=0, mask=3):
+        self.health.ingest(f"ECM: sid=672 caid=1802 time_ms=180 result={result} cw_mask={mask} at_ms={at*1000}")
+
+    def test_locked_missing_ecm_is_not_reported_as_clear(self):
+        health = ECMHealth(None, created=0)
+        health.ingest("PMT: sid=29 ecm=-1 caid=0000 pid=1 ca_count=6")
+        self.assertTrue(health.encrypted)
+        self.assertNotEqual(health.snapshot(now=20)["state"], "clear")
+
+    def test_green_requires_two_fresh_successes_and_expires(self):
+        self.event(100)
+        self.assertEqual(self.health.snapshot(now=101)["state"], "waiting")
+        self.event(102)
+        self.assertEqual(self.health.snapshot(now=103)["state"], "ok")
+        self.assertEqual(self.health.snapshot(now=120)["state"], "error")
+
+    def test_failure_is_red_and_resets_continuity(self):
+        self.event(100); self.event(101); self.event(102, -3, 0)
+        self.assertEqual(self.health.snapshot(now=103)["state"], "error")
+        self.event(104)
+        self.assertEqual(self.health.snapshot(now=104)["state"], "waiting")
+
+    def test_zero_cw_and_old_log_are_never_green(self):
+        self.event(100, mask=0)
+        self.assertEqual(self.health.snapshot(now=100)["state"], "error")
+        Path(self.path).write_text("ECM: sid=672 caid=1802 time_ms=180 result=0 cw_mask=3 at_ms=1000\n" * 2)
+        self.assertEqual(self.health.snapshot(now=100)["state"], "error")
+
+    def test_unsupported_cw_is_explicitly_red(self):
+        self.event(100, -4, 0)
+        self.assertEqual(self.health.snapshot(now=100)["state"], "error")
+        self.assertIn("no soportado", self.health.snapshot(now=100)["label"])
+
+    def test_clear_and_inactive_are_not_failure(self):
+        self.health.ingest("PMT: sid=672 pcr=1 video=1 audio=2 ecm=-1 caid=0000 nes=2")
+        self.assertEqual(self.health.snapshot(now=100)["state"], "clear")
+        self.assertEqual(self.health.snapshot(running=False, now=100)["state"], "idle")
+
+    def test_no_ecm_after_startup_is_red(self):
+        self.health.ingest("PMT: sid=672 pcr=1 video=1 audio=2 ecm=1774 caid=1802 nes=2")
+        self.assertEqual(self.health.snapshot(now=100)["state"], "waiting")
+        self.assertEqual(self.health.snapshot(now=110)["state"], "error")
+
+    def test_pid_isolation_and_partial_log_lines(self):
+        self.health.pid = 123
+        with open(self.path, "a") as log:
+            log.write("ECM: sid=672 caid=1802 time_ms=180 result=0 cw_mask=3 at_ms=100000 pid=999\n" * 2)
+            log.write("ECM: sid=672 caid=1802 time_ms=180 result=0 cw_mask=3 at_ms=101000 pid=")
+        self.assertNotEqual(self.health.snapshot(now=102)["state"], "ok")
+        with open(self.path, "a") as log:
+            log.write("123\nECM: sid=672 caid=1802 time_ms=180 result=0 cw_mask=3 at_ms=102000 pid=123\n")
+        self.assertEqual(self.health.snapshot(now=103)["state"], "ok")
+
+
+class BrokerHealthTests(unittest.TestCase):
+    def test_only_latest_card_metadata_no_raw_text_or_secrets(self):
+        health = BrokerHealth()
+        health.ingest("CA card: caid=0B00 providers=2 protocol=525")
+        self.assertIsNone(health.snapshot()["card_caid"])
+        health.ingest("CA broker: connected (login + card data)")
+        health.ingest("CA card: caid=0B00 providers=2 protocol=525")
+        health.ingest("password=SECRET_SENTINEL cw=SECRET_SENTINEL")
+        state = health.snapshot()
+        self.assertTrue(state["connected"])
+        self.assertEqual((state["card_caid"], state["providers"], state["protocol"]), ("0B00", 2, 525))
+        self.assertNotIn("SECRET_SENTINEL", str(state))
+        health.ingest("CA broker: upstream transport/protocol error; reconnecting")
+        self.assertFalse(health.snapshot()["connected"])
+        self.assertIsNone(health.snapshot()["card_caid"])
+        health.ingest("CA broker: connected (login + card data)")
+        self.assertEqual(health.snapshot()["connect_count"], 2)
+        self.assertFalse(health.snapshot(running=False)["connected"])

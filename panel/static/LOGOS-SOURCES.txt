@@ -1,0 +1,19 @@
+Channel logos from tv-logo/tv-logos, Tapio Sinnertwin and contributors.
+Original trademarks/copyright remain with their respective holders.
+No affiliation or endorsement. For lawful identification of channels only.
+Upstream terms: https://github.com/tv-logo/tv-logos#readme
+Upstream references CC BY-SA / CC BY-NC-SA; no relicensing is claimed.
+Files are redistributed unmodified. Source revision: d32e347bb7c4c640dceec23957802ad9182f58a6
+
+- logo-discovery-kids.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/world-latin-america/discovery-kids-lam.png
+- logo-golden-premier.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/world-latin-america/golden-premier-lam.png
+- logo-cnn-international.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/international/cnn-international-int.png
+- logo-golf-channel.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/argentina/golf-channel-ar.png
+- logo-atreseries.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/argentina/atreseries-ar.png
+- logo-hola-tv.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/argentina/hola-tv-ar.png
+- logo-discovery-science.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/argentina/discovery-science-ar.png
+- logo-hgtv.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/argentina/hgtv-ar.png
+- logo-antena-3.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/spain/antena-3-es.png
+- logo-amc-series.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/world-latin-america/amc-series-lam.png
+- logo-zoomoo.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/brazil/zoomoo-br.png
+- logo-baby-tv.png: https://github.com/tv-logo/tv-logos/blob/d32e347bb7c4c640dceec23957802ad9182f58a6/countries/argentina/baby-tv-ar.png

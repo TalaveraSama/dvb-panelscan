@@ -11,9 +11,16 @@ Mini panel DVB-Scan - panel con dashboard, EPG, newcamd y M3U8.
 Sin dependencias externas (solo stdlib de Python).
 """
 
+import base64
 import argparse
+import copy
 import glob
+import getpass
+import hmac
+import hashlib
+import secrets
 import json
+import math
 import os
 import platform
 import shutil
@@ -28,28 +35,52 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VERSION_PATH = os.path.join(BASE_DIR, "VERSION")
+if not os.path.isfile(VERSION_PATH):
+    VERSION_PATH = os.path.join(BASE_DIR, "..", "VERSION")
+with open(VERSION_PATH, encoding="ascii") as _version_file:
+    VERSION = _version_file.read().strip()
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DATA_DIR = BASE_DIR
+with open(os.path.join(STATIC_DIR, "logos.json"), encoding="utf-8") as _logos_file:
+    LOGOS = json.load(_logos_file)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+import astra_import
+from auth import AuthStore
+from iptv import IPTVStore
+from streaming import StreamManager, StreamError
+from epg import EPGStore, EITCollector, clean_text
+
+DATA_DIR = os.environ.get("DVB_PANEL_DATA_DIR", BASE_DIR)
+os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
 
 _lock = threading.Lock()
+_import_key = secrets.token_bytes(32)
 
 STATE = {
     "transponders": [],   # cada uno puede tener "scan" (canales escaneados)
     "newcamd": {
-        "host": "127.0.0.1", "port": 5000, "user": "astra",
-        "pass": "astra", "deskey": "0102030405060708091011121314",
+        "host": "127.0.0.1", "port": 5000, "user": "",
+        "pass": "", "deskey": "",
     },
+    "profiles": {},
+    "channels": {},
     "stream": {"running": False, "pid": None, "udp": "", "http_port": 0},
 }
 
 _cfg = {"dvb2m3u8": None, "tbsstream": None}
+_auth = AuthStore(os.path.join(DATA_DIR, "auth.json"), secure=os.environ.get("DVB_PANEL_SECURE_COOKIE") == "1")
+_iptv = IPTVStore(os.path.join(DATA_DIR, "iptv.json"))
+_streams = StreamManager(reconnect_grace=10)
+_epg = EPGStore(os.path.join(DATA_DIR, "epg.json"))
 
 
 # ---------------------------------------------------------------------------
 # Persistencia
 # ---------------------------------------------------------------------------
 def _load():
-    for name in ("transponders", "newcamd"):
+    astra_import.recover(DATA_DIR)
+    for name in ("transponders", "newcamd", "profiles", "channels"):
         path = os.path.join(DATA_DIR, name + ".json")
         if os.path.isfile(path):
             try:
@@ -61,11 +92,12 @@ def _load():
 
 def _save(name):
     path = os.path.join(DATA_DIR, name + ".json")
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(STATE[name], f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    temporary = path + ".tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(STATE[name], f, ensure_ascii=False, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
 
 
 def _save_transponder(tp):
@@ -123,6 +155,7 @@ def _norm_tp(tp):
     return {
         "type": tp.get("type") if tp.get("type") in VALID_TYPES else "dvbs2",
         "freq_mhz": float(tp.get("freq_mhz") or 0),
+        "lnb_mode": tp.get("lnb_mode", "manual"),
         "lnb_lo": float(tp.get("lnb_lo") if tp.get("lnb_lo") is not None else 9750),
         "symbol_rate": int(tp.get("symbol_rate") or 0),
         "pol": str(tp.get("pol") or "V").upper()[:1],
@@ -131,18 +164,50 @@ def _norm_tp(tp):
     }
 
 
+def validate_transponder(body):
+    for key in ("adapter", "timeout", "symbol_rate"):
+        if key in body and (isinstance(body[key], bool) or body[key] is None or float(body[key]) != int(body[key])):
+            raise ValueError("Valor entero inválido: " + key)
+    if "timeout" in body and not 1 <= int(body["timeout"]) <= 600:
+        raise ValueError("Tiempo inválido (1–600 segundos)")
+    tp = _norm_tp(body)
+    if tp["lnb_mode"] not in ("manual", "universal"):
+        raise ValueError("Modo LNB inválido")
+    if (body.get("type", "dvbs2") not in VALID_TYPES or not math.isfinite(tp["freq_mhz"])
+            or not 0 < tp["freq_mhz"] <= 100000 or not math.isfinite(tp["lnb_lo"])
+            or not 0 <= tp["lnb_lo"] <= 100000 or not 0 <= tp["adapter"] <= 255
+            or not 1 <= tp["timeout"] <= 600 or not 0 <= tp["symbol_rate"] <= 100000000
+            or tp["pol"] not in ("V", "H", "L", "R")):
+        raise ValueError("Parámetros de transpondedor inválidos")
+    name = body.get("name") or "%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"])
+    if not isinstance(name, str) or len(name) > 120:
+        raise ValueError("Nombre inválido (máximo 120 caracteres)")
+    tp["name"] = name.strip()
+    if not tp["name"]:
+        raise ValueError("Nombre requerido")
+    tp["newcamd_profile"] = body.get("newcamd_profile", "default")
+    profile_config(tp["newcamd_profile"])
+    return tp
+
+
+def channel_profile(tp, sid):
+    return STATE["channels"].get(channel_id(tp, sid), {}).get("newcamd_profile", tp.get("newcamd_profile", "default"))
+
+
 def _scan_cmd(binary, tp):
     cmd = [binary, "-t", tp["type"], "--json",
            "--freq-mhz", str(tp["freq_mhz"]),
            "--lnb-lo", str(tp["lnb_lo"]),
            "--pol", tp["pol"], "-a", str(tp["adapter"]),
            "-T", str(tp["timeout"]), "-v"]
+    if tp["lnb_mode"] == "universal" and tp["type"] in ("dvbs", "dvbs2"):
+        cmd.append("--lnb-universal")
     if tp["symbol_rate"]:
         cmd += ["--symbol-rate", str(tp["symbol_rate"])]
     return cmd
 
 
-def run_scan(tp):
+def _run_scan(tp):
     """Escanea un transponder y guarda el resultado dentro del propio transponder."""
     tp = _norm_tp(tp)
     binary = find_dvb2m3u8(_cfg["dvb2m3u8"])
@@ -179,21 +244,167 @@ def run_scan(tp):
     return data
 
 
+def run_scan(tp):
+    try:
+        adapter = _norm_tp(tp)["adapter"]
+        _streams.reserve_scan(adapter)
+    except (StreamError, ValueError, TypeError) as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        return _run_scan(tp)
+    finally:
+        _streams.release_scan(adapter)
+
+
 def _find_tp(tp_id):
     return next((t for t in STATE["transponders"] if t.get("id") == tp_id), None)
 
 
-def _find_tp_by_sid(sid):
+def channel_id(tp, sid):
+    return "%s:%d" % (tp["id"], int(sid))
+
+
+def channel_view(tp, service):
+    result = dict(service)
+    identity = channel_id(tp, service["sid"])
+    result.update(STATE["channels"].get(identity, {}))
+    result.update(channel_id=identity, sid=service["sid"])
+    result.setdefault("logo", LOGOS.get(" ".join(str(result.get("name", "")).casefold().split()), ""))
+    result.setdefault("enabled", True)
+    result.setdefault("descramble_delay_ms", 500)
+    result["profile_inherited"] = "newcamd_profile" not in STATE["channels"].get(identity, {})
+    result["newcamd_profile"] = channel_profile(tp, service["sid"])
+    profile = (STATE["newcamd"] if result["newcamd_profile"] == "default" else
+               STATE["profiles"].get(result["newcamd_profile"], {}))
+    events = _epg.events_for(identity)
+    result["epg_events"] = len(events)
+    current = next((e for e in events if e["start"] <= time.time() < e["stop"]), None)
+    following = next((e for e in events if e["start"] > time.time()), None)
+    if current:
+        result["now"] = current["title"]
+    if following:
+        result["next"] = following["title"]
+    result["profile_name"] = profile.get("name") or ("Predeterminado" if result["newcamd_profile"] == "default" else result["newcamd_profile"])
+    return result
+
+
+def transponder_views():
+    result = copy.deepcopy(STATE["transponders"])
+    for tp in result:
+        if tp.get("scan"):
+            tp["scan"]["services"] = [channel_view(tp, s) for s in tp["scan"].get("services", [])]
+    return result
+
+
+def profile_config(identity="default"):
+    if not isinstance(identity, str):
+        raise StreamError("Identificador de perfil inválido", 400)
+    if identity == "default":
+        return STATE["newcamd"]
+    if identity not in STATE["profiles"]:
+        raise StreamError("Perfil Newcamd no encontrado", 400)
+    return STATE["profiles"][identity]
+
+
+_diag_lock = threading.Lock()
+
+
+def find_ncdiag():
+    binary = find_tbsstream(_cfg["tbsstream"])
+    candidates = ([os.path.join(os.path.dirname(binary), "dvb-ncdiag")] if binary else [])
+    candidates.append(os.path.join(BASE_DIR, "..", "tbsstream", "tools", "ncdiag"))
+    return next((os.path.realpath(p) for p in candidates if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+
+
+def ca_diagnostics():
+    # Inspect existing managed processes; NEVER dial Ncam or expose argv/keys.
+    with _streams.lock:
+        brokers = [b.status() for b in _streams.brokers.values()]
+        fields = ("channel_id", "adapter", "pid", "running", "clients", "pinned",
+                  "reconnect_waiting", "ca_pid", "mux_pid", "bytes_received", "ecm")
+        sessions = [{k: v for k, v in row.items() if k in fields} for row in _streams.status()]
+    return {"version": VERSION, "network_probe": False, "protocols": [525, 524],
+            "cipher": "DVB-CSA (libdvbcsa)", "aes_supported": False,
+            "selftest_available": find_ncdiag() is not None, "brokers": brokers, "sessions": sessions}
+
+
+def csa_selftest():
+    if not _diag_lock.acquire(blocking=False):
+        return 429, {"ok": False, "error": "Ya hay una prueba local en curso"}
+    try:
+        binary = find_ncdiag()
+        if not binary:
+            return 503, {"ok": False, "error": "Instala dvb-ncdiag del paquete actual"}
+        try:
+            result = subprocess.run([binary, "--selftest", "--json"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            value = json.loads(result.stdout)
+            if result.returncode != 0 or value != {"ok": True, "csa": True, "network_probe": False}:
+                return 502, {"ok": False, "error": "Falló la autoprueba CSA local"}
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return 502, {"ok": False, "error": "No se pudo completar la autoprueba CSA local"}
+        return 200, {"ok": True, "csa": True, "network_probe": False}
+    finally:
+        _diag_lock.release()
+
+
+def newcamd_identity(nc):
+    # Config identity, not profile name or binary path. DNS case and DES-key
+    # spelling must not create a second broker for the same configuration.
+    return (str(nc.get("host", "")).strip().lower(), int(nc.get("port", 5000)),
+            nc.get("user", ""), nc.get("pass", ""),
+            str(nc.get("deskey", "")).replace(":", "").replace(" ", "").lower(),
+            int(nc.get("proto", 525)))
+
+
+def validate_profile(body, previous=None):
+    result = dict(previous or {})
+    for key in ("host", "user", "pass", "deskey", "name"):
+        if key in body:
+            if not isinstance(body[key], str) or len(body[key]) > (128 if key == "host" else 80):
+                raise ValueError("Campo Newcamd inválido: " + key)
+            result[key] = body[key].strip() if key in ("host", "name", "deskey") else body[key]
+    result["port"] = int(body.get("port", result.get("port", 5000)))
+    proto = str(body.get("proto", result.get("proto", 525)))
+    if proto not in ("524", "525"):
+        raise ValueError("Protocolo Newcamd: usa 524 o 525")
+    result["proto"] = int(proto)
+    key = result.get("deskey", "").replace(":", "").replace(" ", "")
+    if not result.get("host") or not 1 <= result["port"] <= 65535:
+        raise ValueError("Servidor o puerto inválidos")
+    if len(key) != 28 or len(bytes.fromhex(key)) != 14:
+        raise ValueError("DES key debe contener 14 bytes (28 caracteres hex)")
+    if len(result.get("user", "")) > 63 or len(result.get("pass", "")) > 63:
+        raise ValueError("Usuario/contraseña: máximo 63 caracteres")
+    result["deskey"] = key
+    return result
+
+
+def stop_profile_channels(profile):
+    for session in _streams.status():
+        if next((channel_profile(t, int(session["channel_id"].split(":")[-1])) for t in STATE["transponders"] if session["channel_id"].startswith(t["id"] + ":")), "default") == profile:
+            _streams.stop_channel(session["channel_id"])
+
+
+def resolve_channel(identity):
+    """Canonical TP:SID; retain SID-only URLs only when unambiguous."""
+    tid, sep, sid = str(identity).rpartition(":")
     try:
         sid = int(sid)
-    except ValueError:
-        return None
+        if not 1 <= sid <= 65535:
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise StreamError("Identidad de canal inválida", 400)
     with _lock:
-        for t in STATE["transponders"]:
-            scan = t.get("scan")
-            if scan and any(s.get("sid") == sid for s in scan.get("services", [])):
-                return t
-    return None
+        candidates = [(t, sid) for t in STATE["transponders"]
+                      if (not sep or t.get("id") == tid) and
+                      any(int(c.get("sid", 0)) == sid
+                          for c in (t.get("scan") or {}).get("services", []))]
+    if not candidates:
+        raise StreamError("Canal no encontrado; escanea el transponder", 404)
+    if len(candidates) != 1:
+        raise StreamError("SID ambiguo; descarga la nueva lista con identidad TP:SID", 409)
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +420,13 @@ def epg_aggregate():
                 continue
             out.append({
                 "transponder_id": t.get("id"),
+                "adapter": t.get("adapter", 0), "pol": t.get("pol"), "symbol_rate": t.get("symbol_rate"),
                 "transponder": t.get("name"),
                 "type": t.get("type"),
                 "freq_mhz": t.get("freq_mhz"),
                 "network": scan.get("network"),
                 "time": scan.get("time"),
-                "services": scan.get("services", []),
+                "services": [channel_view(t, s) for s in scan.get("services", [])],
             })
     return out
 
@@ -222,13 +434,17 @@ def epg_aggregate():
 # ---------------------------------------------------------------------------
 # M3U8 (todos los transponders)
 # ---------------------------------------------------------------------------
-def build_m3u8(base_url=None, tid=None, profile="pass"):
+def _m3u_text(value):
+    return str(value).replace("\r", " ").replace("\n", " ").replace('"', "'")
+
+
+def build_m3u8(base_url=None, tid=None, profile="pass", logo_base=None):
     """Genera M3U8 estilo TVHeadend: cada canal -> URL de stream TS.
     base_url acepta el placeholder {sid} (p. ej. http://host:9981/stream/channelid/{sid}).
     Si no se da base_url, se usa el host del request (self.headers Host)."""
     lines = ["#EXTM3U"]
     with _lock:
-        tps = STATE["transponders"]
+        tps = copy.deepcopy(STATE["transponders"])
     for t in tps:
         if tid and t.get("id") != tid:
             continue
@@ -236,57 +452,69 @@ def build_m3u8(base_url=None, tid=None, profile="pass"):
         if not scan:
             continue
         adapter = t.get("adapter", 0)
-        for s in scan.get("services", []):
-            name = s.get("name") or "Service %s" % s.get("sid")
-            group = s.get("provider") or scan.get("network") or t.get("name") or "DVB"
+        for raw in scan.get("services", []):
+            s = channel_view(t, raw)
+            if not s["enabled"]:
+                continue
+            name = _m3u_text(s.get("name") or "Service %s" % s.get("sid"))
+            group = _m3u_text(s.get("group") or s.get("provider") or scan.get("network") or t.get("name") or "DVB")
+            identity = channel_id(t, s["sid"])
             radio = ' radio="true"' if s.get("type") in (2, 0x0A) else ""
-            lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s" group-title="%s"%s,%s'
-                         % (s.get("sid"), name, group, radio, name))
+            extras = (' tvg-logo="%s"' % _m3u_text(urllib.parse.urljoin(logo_base or base_url or "", s["logo"])) if s.get("logo") else "")
+            extras += (' tvg-chno="%s"' % s["number"] if s.get("number") else "")
+            lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s" group-title="%s"%s%s,%s'
+                         % (identity, name, group, radio, extras, name))
             if base_url:
-                url = base_url.replace("{sid}", str(s.get("sid")))
-                sep = "&" if "?" in url else "?"
-                lines.append("%s%sprofile=%s" % (url, sep, profile))
+                url = (base_url.replace("{sid}", str(s.get("sid")))
+                       .replace("{channel_id}", urllib.parse.quote(identity, safe=":"))
+                       .replace("{transponder}", str(t["id"])))
+                parsed = urllib.parse.urlsplit(url)
+                query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                query = [(k, v) for k, v in query if k != "profile"] + [("profile", "pass")]
+                lines.append(urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query))))
             else:
                 lines.append("dvb://adapter%s/%s/%s" % (adapter, t.get("freq_mhz", 0), s.get("sid")))
     return "\n".join(lines) + "\n"
 
 
 def _xml_esc(s):
-    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+    return (clean_text(s or "").replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def build_xmltv(tid=None):
+def build_xmltv(tid=None, base_url=""):
     """XMLTV (EPG) para XUI.one / Xtream Codes (xcode)."""
     import datetime
-    now = datetime.datetime.now().astimezone()
+
+    zone = datetime.timezone(datetime.timedelta(minutes=_epg.utc_offset_minutes))
 
     def fmt(dt):
-        return dt.strftime("%Y%m%d%H%M%S %z")
+        return dt.astimezone(zone).strftime("%Y%m%d%H%M%S %z")
 
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<tv generator-info-name="Mini DVB-Scan">']
     with _lock:
-        tps = STATE["transponders"]
+        tps = copy.deepcopy(STATE["transponders"])
     for t in tps:
         if tid and t.get("id") != tid:
             continue
         scan = t.get("scan")
         if not scan:
             continue
-        for s in scan.get("services", []):
-            sid = s.get("sid")
+        for raw in scan.get("services", []):
+            s = channel_view(t, raw)
+            if not s["enabled"]:
+                continue
+            sid = channel_id(t, s["sid"])
             name = _xml_esc(s.get("name") or "Service %s" % sid)
-            lines.append('<channel id="%s"><display-name lang="es">%s</display-name></channel>' % (sid, name))
-            if s.get("now"):
-                start, stop = now, now + datetime.timedelta(hours=1)
-                lines.append('<programme start="%s" stop="%s" channel="%s"><title lang="es">%s</title></programme>'
-                             % (fmt(start), fmt(stop), sid, _xml_esc(s.get("now"))))
-            if s.get("next"):
-                start = now + datetime.timedelta(hours=1)
-                stop = now + datetime.timedelta(hours=2)
-                lines.append('<programme start="%s" stop="%s" channel="%s"><title lang="es">%s</title></programme>'
-                             % (fmt(start), fmt(stop), sid, _xml_esc(s.get("next"))))
+            icon = ('<icon src="%s"/>' % _xml_esc(urllib.parse.urljoin(base_url, s["logo"]))
+                    if s.get("logo") else "")
+            lines.append('<channel id="%s"><display-name lang="es">%s</display-name>%s</channel>' % (_xml_esc(sid), name, icon))
+            for event in _epg.events_for(sid):
+                start = datetime.datetime.fromtimestamp(event["start"], datetime.timezone.utc)
+                stop = datetime.datetime.fromtimestamp(event["stop"], datetime.timezone.utc)
+                lines.append('<programme start="%s" stop="%s" channel="%s"><title>%s</title><desc>%s</desc></programme>'
+                             % (fmt(start), fmt(stop), _xml_esc(sid), _xml_esc(event["title"]), _xml_esc(event["description"])))
     lines.append('</tv>')
     return "\n".join(lines) + "\n"
 
@@ -294,66 +522,109 @@ def build_xmltv(tid=None):
 # ---------------------------------------------------------------------------
 # Streaming (tbsstream)
 # ---------------------------------------------------------------------------
-def stream_start(tp, newcamd, udp, http_port):
+def epg_collector(tp):
+    tuning = _norm_tp(tp)
+    def receive(events):
+        with _lock:
+            targets = [(candidate["id"], {int(s["sid"]) for s in (candidate.get("scan") or {}).get("services", [])})
+                       for candidate in STATE["transponders"]
+                       if all(_norm_tp(candidate)[key] == tuning[key] for key in
+                              ("adapter", "type", "freq_mhz", "symbol_rate", "pol", "lnb_lo", "lnb_mode"))]
+        for tid, services in targets:
+            for event in events:
+                if event["sid"] in services:
+                    _epg.put("%s:%d" % (tid, event["sid"]), event)
+    return EITCollector(receive)
+
+
+def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     binary = find_tbsstream(_cfg["tbsstream"])
     if not (is_linux() and binary):
-        return {"ok": False, "error": "tbsstream no disponible"}
-    if STATE["stream"]["running"]:
-        return {"ok": False, "error": "ya hay un stream corriendo"}
-
-    tp = _norm_tp(tp)
-    nc = newcamd or STATE["newcamd"]
-    cmd = [binary, "-t", tp["type"], "--freq-mhz", str(tp["freq_mhz"]),
-           "--lnb-lo", str(tp["lnb_lo"]), "--pol", tp["pol"],
-           "-a", str(tp["adapter"]), "-T", str(tp["timeout"]),
-           "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
-           "--deskey", nc.get("deskey", ""),
-           "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
-           "--http-port", str(int(http_port or 9981))]
-    if tp["symbol_rate"]:
-        cmd += ["--symbol-rate", str(tp["symbol_rate"])]
-    for u in (udp or []):
-        cmd += ["--udp", u]
-
+        raise StreamError("tbsstream no disponible")
+    normalized = _norm_tp(tp)
+    if normalized["freq_mhz"] <= 0:
+        raise StreamError("Frecuencia inválida", 400)
+    if sid is None:
+        channels = (tp.get("scan") or {}).get("services", [])
+        if not channels:
+            raise StreamError("Selecciona un SID o escanea primero", 400)
+        sid = channels[0]["sid"]
     try:
-        log = open(os.path.join(DATA_DIR, "stream.log"), "w")
-        p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    except OSError as e:
-        return {"ok": False, "error": str(e)}
+        sid, http_port = int(sid), int(http_port)
+        if not 1 <= sid <= 65535 or not 0 <= http_port <= 65535:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise StreamError("SID o puerto HTTP inválido", 400)
+    key = channel_id(tp, sid)
+    settings = STATE["channels"].get(key, {})
+    if not settings.get("enabled", True):
+        raise StreamError("Canal deshabilitado", 403)
+    if nc is None:
+        nc = profile_config(channel_profile(tp, sid))
+    tuning = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
+              "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
+              "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"])]
+    if normalized["lnb_mode"] == "universal" and normalized["type"] in ("dvbs", "dvbs2"):
+        tuning.append("--lnb-universal")
+    if normalized["symbol_rate"]:
+        tuning += ["--symbol-rate", str(normalized["symbol_rate"])]
+    capture = tuning + ["--mux-only", "--stdout", "--http-port", "0", "--verbose"]
+    # Workers never open/tune DVB devices. Newcamd credentials stay in the
+    # single broker, not in every service process.
+    cmd = [binary, "--stdin", "--sid", str(sid), "--stdout", "--verbose",
+           "--http-port", str(http_port),
+           "--descramble-delay-ms", str(settings.get("descramble_delay_ms", 500))]
+    if settings.get("caid") and settings.get("ecm_pid"):
+        cmd += ["--caid", settings["caid"], "--ecm-pid", str(settings["ecm_pid"])]
+    if not isinstance(udp, (list, tuple)) or any(not isinstance(u, str) for u in udp):
+        raise StreamError("Destinos UDP inválidos", 400)
+    for destination in udp:
+        cmd += ["--udp", destination]
+    ca = [binary, "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
+          "--deskey", nc.get("deskey", ""), "--user", nc.get("user", ""),
+          "--pass", nc.get("pass", ""), "--newcamd-proto", str(nc.get("proto", 525))]
+    log = os.path.join(DATA_DIR, "stream-%d-%d.log" % (normalized["adapter"], sid))
+    mux_log = os.path.join(DATA_DIR, "mux-%d.log" % normalized["adapter"])
+    # Exclude the acquisition timeout: it does not change the RF tuning.
+    mux_id = tuple(normalized[k] for k in
+                   ("type", "freq_mhz", "lnb_lo", "lnb_mode", "pol", "symbol_rate", "adapter"))
+    return _streams.acquire(key, normalized["adapter"], cmd, log,
+                            timeout=normalized["timeout"] + 20, pinned=pinned,
+                            http_port=http_port, udp=udp, mux_id=mux_id,
+                            mux_command=capture, mux_log=mux_log,
+                            broker_command=ca, broker_id=newcamd_identity(nc),
+                            broker_log=os.path.join(DATA_DIR, "ca.log"), mux_callback=epg_collector(tp).feed)
 
-    STATE["stream"] = {"running": True, "pid": p.pid, "udp": ", ".join(udp or []),
-                       "http_port": int(http_port or 9981), "cmd": " ".join(cmd)}
-    return {"ok": True, "pid": p.pid, "cmd": " ".join(cmd)}
+
+def stream_start(tp, newcamd, udp, http_port, sid=None):
+    try:
+        session = _session_start(tp, newcamd, udp,
+                                 9981 if http_port is None else http_port, sid, True)
+        result = {"ok": True, **session.status(),
+                  "url": "/stream/channel/" + session.key + "?profile=pass"}
+        _streams.release(session)
+        return result
+    except (StreamError, ValueError, TypeError, KeyError) as e:
+        return {"ok": False, "error": str(e)}
 
 
 def stream_stop():
-    st = STATE["stream"]
-    if st.get("running") and st.get("pid"):
-        try:
-            os.kill(int(st["pid"]), 15)
-            time.sleep(0.5)
-            try:
-                os.kill(int(st["pid"]), 9)
-            except OSError:
-                pass
-        except OSError:
-            pass
-    STATE["stream"] = {"running": False}
+    _streams.stop_all()
     return {"ok": True}
 
 
 def stream_status():
-    st = STATE["stream"]
-    alive = False
-    if st.get("running") and st.get("pid"):
-        try:
-            os.kill(int(st["pid"]), 0)
-            alive = True
-        except OSError:
-            alive = False
-    if st.get("running") and not alive:
-        STATE["stream"] = {"running": False}
-    return STATE["stream"]
+    sessions = _streams.status()
+    for session in sessions:
+        settings = STATE["channels"].get(session["channel_id"], {})
+        tp = next((t for t in STATE["transponders"] if session["channel_id"].startswith(t["id"] + ":")), {})
+        profile_id = settings.get("newcamd_profile", tp.get("newcamd_profile", "default"))
+        profile = STATE["newcamd"] if profile_id == "default" else STATE["profiles"].get(profile_id, {})
+        session.update(newcamd_profile=profile_id, profile_name=profile.get("name") or profile_id)
+    active = [s for s in sessions if s["running"]]
+    first = active[0] if active else {}
+    return {**first, "running": bool(active), "sessions": sessions,
+            "clients": sum(s["clients"] for s in active)}
 
 
 # ---------------------------------------------------------------------------
@@ -363,12 +634,41 @@ MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
     ".m3u8": "application/vnd.apple.mpegurl",
 }
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "MiniDVBPanel/3.0"
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if _auth is not None and _auth.secure:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        if getattr(self, "auth_cookie", None):
+            self.send_header("Set-Cookie", self.auth_cookie)
+        super().end_headers()
+
+    def _origin(self):
+        scheme = "https" if _auth is not None and _auth.secure else "http"
+        return scheme + "://" + self.headers.get("Host", "127.0.0.1:8081")
+
+    def _authorized(self, media=False):
+        if media and getattr(self, "iptv_token", ""):
+            return _iptv.allowed(self.iptv_token, getattr(self, "iptv_channel", None))
+        if _auth is None:
+            return True
+        if _auth.session(self.headers.get("Cookie")):
+            return True
+        return media and _auth.media_allowed(getattr(self, "media_token", ""))
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, (dict, list)):
@@ -387,7 +687,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         ext = os.path.splitext(path)[1].lower()
         with open(path, "rb") as f:
-            self._send(200, f.read(), MIME.get(ext, "application/octet-stream"))
+            content = f.read()
+            if path == os.path.join(STATIC_DIR, "index.html"):
+                content = content.replace(b"@VERSION@", VERSION.encode("ascii"))
+            self._send(200, content, MIME.get(ext, "application/octet-stream"))
 
     def _read_body(self):
         try:
@@ -406,28 +709,91 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         path, qs = u.path, urllib.parse.parse_qs(u.query)
 
+        self.auth_cookie = None
+        self.iptv_token = ""
+        self.iptv_channel = None
+        if path.startswith("/iptv/flussonic/"):
+            return self._flussonic(path, qs)
+        if path == "/iptv/playlist.m3u8" or path.startswith("/iptv/stream/"):
+            return self._iptv_media(path, qs)
+        self.media_token = qs.get("token", [""])[0]
+        if _auth is not None:
+            if path == "/api/auth/session":
+                session = _auth.session(self.headers.get("Cookie"))
+                return self._send(200 if session else 401, session or {"error": "Inicia sesión"})
+            if path == "/login":
+                return self._send_file(os.path.join(STATIC_DIR, "login.html"))
+            public = path in ("/static/style.css", "/static/login.js", "/static/LOGOS-SOURCES.txt") or (path.startswith("/static/logo-") and path.endswith(".png"))
+            media = path in ("/api/playlist.m3u8", "/api/epg.xml") or path.startswith(("/stream/channel/", "/stream/channelid/"))
+            if not public and not self._authorized(media):
+                if path in ("/", "/index.html"):
+                    self.send_response(303)
+                    self.send_header("Location", "/login")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                return self._send(401, {"error": "Inicia sesión o utiliza un token de reproducción válido"})
+
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(STATIC_DIR, "index.html"))
         if path.startswith("/static/"):
-            return self._send_file(os.path.join(STATIC_DIR, path[len("/static/"):]))
+            target = os.path.realpath(os.path.join(STATIC_DIR, urllib.parse.unquote(path[len("/static/"):])) )
+            if os.path.commonpath((os.path.realpath(STATIC_DIR), target)) != os.path.realpath(STATIC_DIR):
+                return self._send(403, {"error": "Ruta no permitida"})
+            return self._send_file(target)
 
+        if path == "/api/iptv/users":
+            return self._send(200, {"users": _iptv.listing(),
+                "backend_url": self._origin() + "/iptv/flussonic/" + _iptv.data["backend_key"]})
+        if path == "/api/diag":
+            return self._send(200, ca_diagnostics())
         if path == "/api/status":
             return self._send(200, {
-                "platform": platform.system(), "linux": is_linux(),
+                "version": VERSION, "platform": platform.system(), "linux": is_linux(),
                 "dvb2m3u8": find_dvb2m3u8(_cfg["dvb2m3u8"]),
                 "tbsstream": find_tbsstream(_cfg["tbsstream"]),
                 "adapters": list_adapters() if is_linux() else [],
                 "stream": stream_status(),
             })
         if path == "/api/transponders":
-            return self._send(200, STATE["transponders"])
+            return self._send(200, transponder_views())
+        if path == "/api/epg/status":
+            with _streams.lock:
+                receivers = [(adapter, getattr(source.ts_callback, "__self__", None))
+                             for adapter, (_, source) in _streams.muxes.items()]
+            return self._send(200, {"server_time": int(time.time()), "days": _epg.days, "stored_events": _epg.count,
+                                   "receivers": [dict(collector.status(), adapter=adapter)
+                                                 for adapter, collector in receivers if isinstance(collector, EITCollector)]})
+        if path == "/api/epg/settings":
+            return self._send(200, {"days": _epg.days, "max_days": 14, "utc_offset_minutes": _epg.utc_offset_minutes})
+        if path == "/api/epg/channel":
+            try:
+                tp, sid = resolve_channel(qs.get("channel", [""])[0])
+                return self._send(200, {"days": _epg.days, "utc_offset_minutes": _epg.utc_offset_minutes, "events": _epg.events_for(channel_id(tp, sid))})
+            except StreamError as error:
+                return self._send(error.status, {"error": str(error)})
         if path == "/api/epg":
             return self._send(200, epg_aggregate())
         if path == "/api/epg.xml":
             tid = qs.get("transponder", [None])[0]
-            return self._send(200, build_xmltv(tid), "application/xml; charset=utf-8")
+            return self._send(200, build_xmltv(tid, self._origin()), "application/xml; charset=utf-8")
+        if path == "/api/newcamd/profiles":
+            profiles = [{"id": "default", "name": "Predeterminado", **STATE["newcamd"]}] + [
+                {**config, "id": identity} for identity, config in STATE["profiles"].items()]
+            return self._send(200, [{k: v for k, v in profile.items() if k not in ("pass", "deskey")}
+                                    for profile in profiles])
+        if path.startswith("/api/newcamd/profiles/"):
+            identity = path.rsplit("/", 1)[-1]
+            try:
+                return self._send(200, {**profile_config(identity), "id": identity})
+            except StreamError as error:
+                return self._send(404, {"error": str(error)})
         if path == "/api/newcamd":
             return self._send(200, STATE["newcamd"])
+        if path == "/api/events":
+            return self._live_events()
+        if path == "/api/stream/log":
+            return self._send(410, {"error": "No se guardan registros; utiliza Eventos en vivo"})
         if path == "/api/stream/status":
             return self._send(200, stream_status())
         if path == "/api/playlist.m3u8":
@@ -435,126 +801,450 @@ class Handler(BaseHTTPRequestHandler):
             tid = qs.get("transponder", [None])[0]
             profile = qs.get("profile", ["pass"])[0]
             if not base:
-                host = self.headers.get("Host", "127.0.0.1:8081")
-                base = "http://%s/stream/channelid/{sid}" % host
-            return self._send(200, build_m3u8(base, tid, profile), "application/vnd.apple.mpegurl")
-        if path.startswith("/stream/channelid/"):
-            return self._stream_channel(path[len("/stream/channelid/"):])
+                base = self._origin() + "/stream/channel/{channel_id}"
+            if profile != "pass":
+                return self._send(400, {"error": "Solo se admite el perfil pass (TS sin transcodificar)"})
+            playlist = build_m3u8(base, tid, profile, logo_base=self._origin())
+            if _auth is not None:
+                if not _auth.media_allowed(self.media_token):
+                    return self._send(400, {"error": "Genera un token en Seguridad y usa el enlace de lista privada"})
+                # Only append secrets to panel URLs, never to a custom third-party base.
+                if qs.get("base_url", [""])[0]:
+                    return self._send(400, {"error": "Con autenticación utiliza la URL de streaming del panel"})
+                playlist = "\n".join(line + ("&" if "?" in line else "?") + "token=" + urllib.parse.quote(self.media_token)
+                                     if line.startswith("http") else line for line in playlist.splitlines()) + "\n"
+            return self._send(200, playlist, "application/vnd.apple.mpegurl")
+        for prefix in ("/stream/channel/", "/stream/channelid/"):
+            if path.startswith(prefix):
+                if qs.get("profile", ["pass"])[0] != "pass":
+                    return self._send(400, {"error": "Solo se admite profile=pass"})
+                return self._stream_channel(urllib.parse.unquote(path[len(prefix):]))
         return self._send(404, {"error": "not found"})
 
-    def _stream_channel(self, sid):
-        """Sirve el TS de un canal: arranca tbsstream (-s SID) -> UDP local -> HTTP."""
-        tp = _find_tp_by_sid(sid)
-        if not tp:
-            return self._send(404, {"error": "SID %s no encontrado" % sid})
-        tbs = find_tbsstream(_cfg["tbsstream"])
-        if not tbs:
-            return self._send(500, {"error": "tbsstream no disponible"})
-        nc = STATE["newcamd"]
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        cmd = [tbs, "-t", tp.get("type", "dvbs2"),
-               "--freq-mhz", str(tp.get("freq_mhz")),
-               "--lnb-lo", str(tp.get("lnb_lo", 9750)),
-               "--pol", tp.get("pol", "V"),
-               "-a", str(tp.get("adapter", 0)),
-               "-s", sid,
-               "--symbol-rate", str(tp.get("symbol_rate", 0)),
-               "--newcamd", "%s:%s" % (nc.get("host"), nc.get("port")),
-               "--deskey", nc.get("deskey", ""),
-               "--user", nc.get("user", ""), "--pass", nc.get("pass", ""),
-               "--udp", "127.0.0.1:%d" % port]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+    def _iptv_credentials(self, qs):
+        token = qs.get("token", [""])[0]
+        if token:
+            return token
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                username, password = base64.b64decode(header[6:], validate=True).decode().split(":", 1)
+            except (ValueError, UnicodeError):
+                return ""
+        else:
+            username, password = qs.get("username", [""])[0], qs.get("password", [""])[0]
+        return _iptv.credentials(username, password, self.client_address[0]) or ""
+
+    def _iptv_media(self, path, qs):
+        self.iptv_token = self._iptv_credentials(qs)
+        if not _iptv.allowed(self.iptv_token):
+            return self._send(401, {"error": "Credenciales IPTV inválidas"})
+        if path.startswith("/iptv/stream/"):
+            identity = urllib.parse.unquote(path[len("/iptv/stream/"):])
+            self.iptv_channel = identity
+            if not _iptv.allowed(self.iptv_token, identity):
+                return self._send(403, {"error": "Canal no autorizado"})
+            return self._stream_channel(identity)
+        playlist = build_m3u8(self._origin() + "/iptv/stream/{channel_id}", logo_base=self._origin())
+        lines = ["#EXTM3U"]
+        pending = ""
+        for line in playlist.splitlines()[1:]:
+            if line.startswith("#EXTINF:"):
+                pending = line
+            elif line.startswith("http"):
+                identity = urllib.parse.unquote(urllib.parse.urlparse(line).path.rsplit("/", 1)[-1])
+                if _iptv.allowed(self.iptv_token, identity):
+                    lines.extend((pending, line + "&token=" + urllib.parse.quote(self.iptv_token)))
+        playlist = ("\n".join(lines) + "\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="canales.m3u8"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(playlist)))
+        self.end_headers()
+        self.wfile.write(playlist)
+
+    def _flussonic(self, path, qs):
+        secret = path[len("/iptv/flussonic/"):]
+        if not hmac.compare_digest(secret.encode(), _iptv.data["backend_key"].encode()):
+            return self._send(403, {"error": "Backend no autorizado"})
+        token = qs.get("token", [""])[0]
+        identity = qs.get("name", [""])[0]
+        if ":" in token:
+            username, password = token.split(":", 1)
+            token = _iptv.credentials(username, password, self.client_address[0]) or ""
+        # Safe Flussonic names may encode the exact TP:SID as UTF-8 hex.
+        if identity.startswith("dvb_"):
+            try:
+                identity = bytes.fromhex(identity[4:]).decode("utf-8") if len(identity) <= 260 else ""
+            except (ValueError, UnicodeError):
+                identity = ""
+        if not identity or not _iptv.allowed(token, identity):
+            return self._send(403, {"error": "Acceso denegado"})
+        self.send_response(200)
+        self.send_header("X-AuthDuration", "30")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _live_events(self):
+        try:
+            subscription = _streams.events.subscribe()
+        except ValueError as error:
+            return self._send(503, {"error": str(error)})
+        try:
+            self.connection.settimeout(5)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"event: ready\ndata: {}\n\n")
+            self.wfile.flush()
+            while not subscription.closed and self._authorized():
+                batch = subscription.read(timeout=1)
+                if not batch:
+                    self.wfile.write(b": keepalive\n\n")
+                for event in batch:
+                    payload = json.dumps(event, ensure_ascii=False).encode("utf-8")
+                    self.wfile.write(b"data: " + payload + b"\n\n")
+                self.wfile.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            subscription.close()
+            self.close_connection = True
+
+    def _stream_channel(self, identity):
+        session = None
+        try:
+            tp, sid = resolve_channel(identity)
+            # A player may open the next channel just before the old TCP
+            # handler observes its disconnect. Allow cleanup, never evict it.
+            for attempt in range(6):
+                try:
+                    session = _session_start(tp, sid=sid)
+                    break
+                except StreamError as e:
+                    if e.status != 409 or attempt == 5:
+                        raise
+                    time.sleep(0.1)
+            cursor = session.cursor()
+        except StreamError as e:
+            return self._send(e.status, {"error": str(e)})
+        except (ValueError, TypeError, KeyError):
+            return self._send(400, {"error": "Configuración del canal inválida"})
+        try:
+            self._relay_session(session, cursor)
+        finally:
+            _streams.release(session)
+
+    def _relay_session(self, session, cursor):
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        sock.settimeout(1)
-        deadline = time.time() + 3600
+        self.close_connection = True
+        self.connection.settimeout(5)
         try:
-            while time.time() < deadline:
-                try:
-                    data, _ = sock.recvfrom(1316)
-                    self.wfile.write(data)
-                except socket.timeout:
-                    continue
-                except (BrokenPipeError, ConnectionResetError):
-                    break
-        finally:
-            sock.close()
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                pass
+            while self._authorized(media=True):
+                cursor, data = session.read(cursor)
+                self.wfile.write(data)
+        except (OSError, StreamError):
+            pass
 
     def do_POST(self):
+        if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) > 1:
+            return self._send(400, {"error": "Encuadre HTTP no permitido"})
+        origin = self.headers.get("Origin")
+        if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
+            return self._send(403, {"ok": False, "error": "Origen no permitido"})
+        try:
+            if not 0 <= int(self.headers.get("Content-Length", "0")) <= (2097152 if urllib.parse.urlparse(self.path).path in ("/api/import/astra/preview", "/api/import/astra/apply") else 65536):
+                return self._send(413, {"ok": False, "error": "Solicitud demasiado grande"})
+        except ValueError:
+            return self._send(400, {"ok": False, "error": "Longitud inválida"})
         u = urllib.parse.urlparse(self.path)
         path = u.path
         body = self._read_body()
+        if not isinstance(body, dict):
+            return self._send(400, {"ok": False, "error": "Se requiere un objeto JSON"})
+
+        self.auth_cookie = None
+        if _auth is not None:
+            if path == "/api/auth/login":
+                if not isinstance(body.get("username"), str) or not isinstance(body.get("password"), str) or len(body["username"]) > 64 or len(body["password"]) > 256:
+                    return self._send(400, {"error": "Credenciales inválidas"})
+                token, status = _auth.login(body["username"], body["password"], self.client_address[0])
+                if token:
+                    self.auth_cookie = _auth.cookie(token)
+                    return self._send(200, {"ok": True})
+                return self._send(status, {"error": "Demasiados intentos; espera 10 minutos" if status == 429 else "Usuario o contraseña incorrectos. Si falta configurar el administrador, utiliza --set-admin en el servidor."})
+            session = _auth.session(self.headers.get("Cookie"))
+            if not session:
+                return self._send(401, {"error": "Inicia sesión"})
+            csrf = self.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(csrf.encode(), session["csrf"].encode()):
+                return self._send(403, {"error": "Token CSRF inválido; recarga el panel"})
+            if path == "/api/auth/logout":
+                _auth.logout(self.headers.get("Cookie"))
+                self.auth_cookie = _auth.cookie()
+                return self._send(200, {"ok": True})
+            if path == "/api/auth/media-token":
+                return self._send(200, {"ok": True, "token": _auth.rotate_media_token()})
+
+        if path == "/api/diag/selftest":
+            if body:
+                return self._send(400, {"error": "La autoprueba local no acepta parámetros ni credenciales"})
+            status, result = csa_selftest()
+            return self._send(status, result)
+
+        if path == "/api/iptv/users":
+            try:
+                _iptv.save_user(body)
+                token = _iptv.token(body["username"]) if body.get("enabled", True) and (not body.get("expires") or body["expires"] > time.time()) else ""
+                return self._send(200, {"ok": True, "token": token})
+            except ValueError as error:
+                return self._send(400, {"error": str(error)})
+            except OSError:
+                return self._send(500, {"error": "No se pudo guardar el usuario IPTV"})
+        if path in ("/api/import/astra/preview", "/api/import/astra/apply"):
+            try:
+                with _streams.lock:
+                    sessions = _streams.status()
+                    if sessions or _streams.scanning:
+                        return self._send(409, {"ok": False, "error": "Detén las sesiones y espera al fin de los escaneos antes de importar"})
+                    with _lock:
+                        options = {key: value for key, value in body.items() if key != "preview_token"}
+                        signed = json.dumps({"options": options, "state": {key: STATE[key] for key in astra_import.KEYS}}, sort_keys=True, ensure_ascii=False).encode()
+                        token = hmac.new(_import_key, signed, hashlib.sha256).hexdigest()
+                        planned, summary = astra_import.build(STATE, options, validate_transponder, validate_profile)
+                        if path.endswith("/preview"):
+                            return self._send(200, {"ok": True, "preview_token": token, **summary})
+                        supplied = body.get("preview_token", "")
+                        if not isinstance(supplied, str) or not hmac.compare_digest(supplied.encode(), token.encode()):
+                            return self._send(409, {"ok": False, "error": "La configuración cambió o falta vista previa; vuelve a previsualizar"})
+                        backup = astra_import.apply(DATA_DIR, STATE, planned)
+                return self._send(200, {"ok": True, "backup": backup, **summary})
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except ValueError as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            except (TypeError, KeyError, OverflowError):
+                return self._send(400, {"ok": False, "error": "Configuración/mapeo inválido; no se aplicaron cambios."})
+            except OSError:
+                return self._send(500, {"ok": False, "error": "No se pudo guardar/restaurar la importación. Conserva el respaldo privado y reinicia el servicio antes de continuar."})
+
+        if path == "/api/epg/settings":
+            try:
+                if "utc_offset_minutes" in body and body["utc_offset_minutes"] is None:
+                    raise ValueError("Desfase UTC requerido")
+                _epg.set_days(body.get("days"), body.get("utc_offset_minutes"))
+                return self._send(200, {"ok": True, "days": _epg.days, "utc_offset_minutes": _epg.utc_offset_minutes})
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            except OSError:
+                return self._send(500, {"ok": False, "error": "No se pudo guardar el EPG"})
 
         if path == "/api/transponders":
-            tp = _norm_tp(body)
-            tp["id"] = uuid.uuid4().hex[:8]
-            tp["name"] = body.get("name") or ("%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"]))
-            tp["scan"] = None
+            try:
+                tp = validate_transponder(body)
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except (ValueError, TypeError, OverflowError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            tp.update(id=uuid.uuid4().hex[:8], scan=None)
             with _lock:
-                # cada adapter = un transponder: reemplaza el del mismo adapter
-                STATE["transponders"] = [t for t in STATE["transponders"]
-                                         if t.get("adapter") != tp["adapter"]]
                 STATE["transponders"].append(tp)
                 _save("transponders")
             return self._send(200, {"ok": True, "transponder": tp})
+
+        if path.startswith("/api/transponders/") and path.endswith("/edit"):
+            tid = path[len("/api/transponders/"):-len("/edit")]
+            try:
+                with _streams.lock:
+                    sessions = _streams.status()
+                    with _lock:
+                        current = _find_tp(tid)
+                        if current is None:
+                            return self._send(404, {"ok": False, "error": "Transpondedor no encontrado"})
+                        if set(body) - set(_norm_tp(current)) - {"name", "newcamd_profile"}:
+                            raise ValueError("Campos de transpondedor desconocidos")
+                        updated = validate_transponder({**current, **body})
+                        tuning_changed = any(updated[key] != _norm_tp(current)[key] for key in _norm_tp(current))
+                        changed = tuning_changed or updated["newcamd_profile"] != current.get("newcamd_profile", "default")
+                        if current.get("adapter", 0) in _streams.scanning or updated["adapter"] in _streams.scanning or (changed and any(s["adapter"] in (current.get("adapter", 0), updated["adapter"]) for s in sessions)):
+                            return self._send(409, {"ok": False, "error": "Detén los canales de los adaptadores implicados y espera a que termine el escaneo antes de editar"})
+                        # Keep identity, scan, channel overrides and EPG. Never delete/recreate.
+                        current.update(updated)
+                        _save("transponders")
+                        result = copy.deepcopy(current)
+                return self._send(200, {"ok": True, "transponder": result, "rescan_recommended": tuning_changed})
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except (ValueError, TypeError, OverflowError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
 
         if path.startswith("/api/transponders/") and path.endswith("/delete"):
             tid = path[len("/api/transponders/"):-len("/delete")]
             with _lock:
                 STATE["transponders"] = [t for t in STATE["transponders"] if t.get("id") != tid]
-                _save("transponders")
+                STATE["channels"] = {key: value for key, value in STATE["channels"].items() if not key.startswith(tid + ":")}
+                _save("transponders"); _save("channels")
+            for session in _streams.status():
+                if session["channel_id"].startswith(tid + ":"):
+                    _streams.stop_channel(session["channel_id"])
+            return self._send(200, {"ok": True})
+
+        if path.startswith("/api/channels/") and path.endswith("/edit"):
+            identity = urllib.parse.unquote(path[len("/api/channels/"):-len("/edit")])
+            try:
+                tp, sid = resolve_channel(identity)
+                identity = channel_id(tp, sid)
+                allowed = {"name", "group", "number", "logo", "enabled", "newcamd_profile", "caid", "ecm_pid", "descramble_delay_ms"}
+                if set(body) - allowed:
+                    raise ValueError("Campo de canal no admitido; el SID no se modifica")
+                settings = dict(STATE["channels"].get(identity, {}))
+                for field in ("name", "group", "logo", "newcamd_profile"):
+                    if field in body:
+                        if not isinstance(body[field], str) or len(body[field]) > (2048 if field == "logo" else 120):
+                            raise ValueError("Campo inválido: " + field)
+                        settings[field] = body[field].strip()
+                if "name" in settings and not settings["name"]:
+                    raise ValueError("Nombre requerido")
+                if "enabled" in body:
+                    if not isinstance(body["enabled"], bool):
+                        raise ValueError("Habilitado debe ser booleano")
+                    settings["enabled"] = body["enabled"]
+                if "number" in body:
+                    number = body["number"]
+                    if number not in (None, "") and (isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 99999):
+                        raise ValueError("Número de canal inválido (1–99999)")
+                    settings["number"] = number or None
+                if "descramble_delay_ms" in body:
+                    delay = body["descramble_delay_ms"]
+                    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 2000:
+                        raise ValueError("Retardo de descifrado inválido (0–2000 ms)")
+                    settings["descramble_delay_ms"] = delay
+                if "caid" in body or "ecm_pid" in body:
+                    caid = body.get("caid", settings.get("caid", ""))
+                    pid = body.get("ecm_pid", settings.get("ecm_pid"))
+                    if caid in (None, "") and pid in (None, ""):
+                        settings.pop("caid", None); settings.pop("ecm_pid", None)
+                    else:
+                        if (not isinstance(caid, str) or len(caid) != 4 or
+                            any(c not in "0123456789abcdefABCDEF" for c in caid) or int(caid, 16) == 0 or
+                            isinstance(pid, bool) or not isinstance(pid, int) or not 1 <= pid <= 8190):
+                            raise ValueError("CAID: 4 dígitos hex; ECM PID: 1–8190. Ambos requeridos, o ambos vacíos para automático")
+                        settings["caid"] = caid.upper(); settings["ecm_pid"] = pid
+                if settings.get("logo"):
+                    url = urllib.parse.urlsplit(settings["logo"])
+                    if settings["logo"] not in LOGOS.values() and (url.scheme not in ("http", "https") or not url.netloc):
+                        raise ValueError("Logo debe ser URL http/https")
+                if settings.get("newcamd_profile") == "":
+                    settings.pop("newcamd_profile", None)
+                profile_config(settings.get("newcamd_profile", tp.get("newcamd_profile", "default")))
+                with _lock:
+                    STATE["channels"][identity] = settings
+                    _save("channels")
+                _streams.stop_channel(identity)
+                return self._send(200, {"ok": True, "reopen_required": True})
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+
+        if path == "/api/newcamd/profiles":
+            identity = body.get("id") or uuid.uuid4().hex[:12]
+            try:
+                if not isinstance(identity, str) or not identity.isalnum() or len(identity) > 32:
+                    raise ValueError("Identificador de perfil inválido")
+                previous = profile_config(identity) if identity == "default" or identity in STATE["profiles"] else None
+                config = validate_profile(body, previous)
+                if not config.get("name"):
+                    config["name"] = "Predeterminado" if identity == "default" else "Newcamd"
+                with _lock:
+                    if identity == "default":
+                        STATE["newcamd"] = config; _save("newcamd")
+                    else:
+                        STATE["profiles"][identity] = config; _save("profiles")
+                stop_profile_channels(identity)
+                return self._send(200, {"ok": True, "id": identity, "reopen_required": True})
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+
+        if path.startswith("/api/newcamd/profiles/") and path.endswith("/delete"):
+            identity = path[len("/api/newcamd/profiles/"):-len("/delete")]
+            if identity == "default" or any(t.get("newcamd_profile", "default") == identity for t in STATE["transponders"]) or any(s.get("newcamd_profile", "default") == identity for s in STATE["channels"].values()):
+                return self._send(409, {"ok": False, "error": "Perfil predeterminado o asignado; reasigna sus canales primero"})
+            with _lock:
+                if identity not in STATE["profiles"]:
+                    return self._send(404, {"ok": False, "error": "Perfil no encontrado"})
+                del STATE["profiles"][identity]; _save("profiles")
             return self._send(200, {"ok": True})
 
         if path.startswith("/api/channels/") and path.endswith("/delete"):
-            sid = path[len("/api/channels/"):-len("/delete")]
+            identity = urllib.parse.unquote(path[len("/api/channels/"):-len("/delete")])
+            try:
+                tp, sid = resolve_channel(identity)
+                identity = channel_id(tp, sid)
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
             with _lock:
-                for t in STATE["transponders"]:
-                    scan = t.get("scan")
-                    if scan:
-                        before = len(scan.get("services", []))
-                        scan["services"] = [s for s in scan.get("services", [])
-                                            if str(s.get("sid")) != sid]
-                        if len(scan["services"]) != before:
-                            _save_transponder(t)
+                tp["scan"]["services"] = [s for s in tp["scan"].get("services", []) if int(s["sid"]) != sid]
+                STATE["channels"].pop(identity, None)
+                _save_transponder(tp); _save("channels")
+            _streams.stop_channel(identity)
             return self._send(200, {"ok": True})
 
         if path == "/api/scan":
             tid = body.get("id")
+            if tid and not _find_tp(tid):
+                return self._send(404, {"ok": False, "error": "Transponder no encontrado"})
             tp = _find_tp(tid) or _norm_tp(body)
             result = run_scan(tp)
             if result.get("ok") and tid:
                 with _lock:
                     t = _find_tp(tid)
                     if t:
+                        for service in result.get("services", []):
+                            for event in service.pop("events", []):
+                                _epg.put(channel_id(t, service["sid"]), event)
                         t["scan"] = result
                         _save_transponder(t)
+                _epg.flush()
             return self._send(200, result)
 
+        if path == "/api/newcamd/test":
+            try:
+                nc = profile_config(body.get("id", "default"))
+            except StreamError as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            try:
+                # Serialize with broker startup: a TCP probe must not overlap
+                # an active broker and consume a second server connection slot.
+                with _streams.lock:
+                    broker = _streams.brokers.get(newcamd_identity(nc))
+                    if broker and broker.process.poll() is None:
+                        return self._send(200, {"ok": True, "message":
+                            "Broker activo: no se abre otra conexión TCP de prueba. Esto no valida login ni descifrado."})
+                    with socket.create_connection((nc["host"], int(nc["port"])), timeout=3):
+                        pass
+                return self._send(200, {"ok": True, "message": "TCP accesible. No valida login, tarjeta ni descifrado."})
+            except (OSError, ValueError) as e:
+                return self._send(200, {"ok": False, "error": "Conexión TCP: " + str(e)})
+
         if path == "/api/newcamd":
-            nc = dict(STATE["newcamd"])
-            for k in ("host", "user", "pass", "deskey"):
-                if k in body:
-                    nc[k] = str(body[k])
-            if "port" in body:
-                nc["port"] = int(body["port"] or 0)
-            STATE["newcamd"] = nc
-            _save("newcamd")
+            try:
+                nc = validate_profile(body, STATE["newcamd"])
+            except (ValueError, TypeError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            with _lock:
+                STATE["newcamd"] = nc
+                _save("newcamd")
+            stop_profile_channels("default")
             return self._send(200, {"ok": True, "newcamd": nc})
 
         if path == "/api/stream/start":
@@ -562,35 +1252,64 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(udp, str):
                 udp = [udp]
             tp = _find_tp(body.get("id")) or body.get("transponder") or body
-            return self._send(200, stream_start(tp, body.get("newcamd"), udp, body.get("http_port")))
+            if body.get("id") and not _find_tp(body["id"]):
+                return self._send(404, {"ok": False, "error": "Transponder no encontrado"})
+            return self._send(200, stream_start(tp, body.get("newcamd"), udp, body.get("http_port"), body.get("sid")))
         if path == "/api/stream/stop":
+            if body.get("channel_id"):
+                if not _streams.stop_channel(str(body["channel_id"])):
+                    return self._send(404, {"ok": False, "error": "Sesión no encontrada"})
+                return self._send(200, {"ok": True})
             return self._send(200, stream_stop())
 
         return self._send(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[panel] %s\n" % (fmt % args))
+        # No persistent channel/access event log (including systemd stderr).
+        pass
 
 
 def main():
+    global _auth
     ap = argparse.ArgumentParser(description="Mini panel DVB-Scan")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--dvb2m3u8", default=None)
     ap.add_argument("--tbsstream", default=None)
+    ap.add_argument("--set-admin", metavar="USUARIO", help="Crear/restablecer administrador y salir")
     args = ap.parse_args()
+    _auth = AuthStore(os.path.join(DATA_DIR, "auth.json"), secure=os.environ.get("DVB_PANEL_SECURE_COOKIE") == "1")
+    if args.set_admin:
+        password = getpass.getpass("Contraseña (mínimo 12 caracteres): ")
+        if password != getpass.getpass("Repetir contraseña: "):
+            ap.error("Las contraseñas no coinciden")
+        try:
+            _auth.set_admin(args.set_admin, password)
+        except ValueError as error:
+            ap.error(str(error))
+        print("Administrador actualizado. Reinicia dvb-panel para invalidar sesiones anteriores.")
+        return
 
     _cfg["dvb2m3u8"] = args.dvb2m3u8
     _cfg["tbsstream"] = args.tbsstream
     _load()
+    _epg.start()
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("Mini panel DVB-Scan en http://%s:%d" % (args.host, args.port))
+    def handle_stop(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, handle_stop)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stream_stop()
+        try:
+            _epg.stop()
+        except OSError:
+            pass
         srv.server_close()
 
 

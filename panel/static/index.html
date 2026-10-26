@@ -1,133 +1,775 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mini DVB-Scan · Panel</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo">📡</span>
-      <h1>Mini DVB-Scan</h1>
-    </div>
-    <nav class="menu" id="menu">
-      <a href="#" data-tab="dashboard" class="active">Dashboard</a>
-      <a href="#" data-tab="epg">EPG</a>
-      <a href="#" data-tab="newcamd">Newcamd</a>
-      <a href="#" data-tab="m3u8">M3U8 / Stream</a>
-    </nav>
-    <div class="status-badge" id="statusBadge">cargando…</div>
-  </header>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DVB Panel · Centro de control</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◈</span>
+        <h1>DVB<span>Panel / Scan</span></h1>
+      </div>
+      <nav class="menu" id="menu">
+        <a href="#" data-tab="dashboard" class="active">◫ &nbsp; Dashboard</a>
+        <a href="#" data-tab="epg">▤ &nbsp; Canales y EPG</a>
+        <a href="#" data-tab="diag">⌕ &nbsp; Diagnóstico CA</a>
+        <a href="#" data-tab="newcamd">◇ &nbsp; Acceso condicional</a>
+        <a href="#" data-tab="m3u8">▷ &nbsp; Streaming</a>
+        <a href="#" data-tab="users">♙ &nbsp; Usuarios</a>
+        <a href="#" data-tab="flussonic">⇄ &nbsp; Flussonic</a>
+        <a href="#" data-tab="events">≋ &nbsp; Eventos en vivo</a>
+      </nav>
+      <div class="sidebar-session">
+        <span class="eyebrow">ESPACIO DE ADMINISTRACIÓN</span
+        ><strong id="adminName">Administrador</strong>
+        <div class="status-badge" id="statusBadge">cargando…</div>
+        <button class="btn" id="astraImportOpen" type="button">
+          Importar Astra / Cesbo
+        </button>
+        <button class="btn" id="securityOpen" type="button">
+          Seguridad y reproductores</button
+        ><button class="btn" id="logoutButton" type="button">
+          Cerrar sesión ↗
+        </button>
+      </div>
+    </header>
 
-  <main>
-    <!-- ===================== DASHBOARD ===================== -->
-    <section id="tab-dashboard">
-      <section class="card">
-        <div class="card-head"><h2>Adaptadores</h2></div>
-        <div id="adapters" class="adapters">—</div>
-        <div class="muted small" id="bins"></div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h2>Agregar transponder</h2>
-          <button class="btn small" id="toggleTpForm">ocultar</button>
+    <main>
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">HEADEND / CENTRO DE CONTROL</div>
+          <h2 id="pageTitle">Vista general</h2>
+          <p>
+            Tu operación en tiempo real. Una señal, múltiples posibilidades.
+          </p>
         </div>
-        <form id="tpForm" class="grid-form">
-          <label>Nombre <input id="tp_name" placeholder="70W AMX"></label>
-          <label>Tipo
-            <select id="tp_type">
-              <option value="dvbs2" selected>DVB-S2</option>
-              <option value="dvbs">DVB-S</option>
-              <option value="dvbt">DVB-T</option>
-              <option value="dvbt2">DVB-T2</option>
-              <option value="dvbc">DVB-C</option>
-            </select>
-          </label>
-          <label>Frecuencia satélite (MHz) <input id="tp_freq" type="number" step="any" value="10970"></label>
-          <label>LNB LO (MHz) <input id="tp_lnb" type="number" step="any" value="9750"></label>
-          <label>Symbol rate <input id="tp_sr" type="number" value="27900000"></label>
-          <label>Polarización
-            <select id="tp_pol"><option>V</option><option>H</option><option>L</option><option>R</option></select>
-          </label>
-          <label>Adaptador <input id="tp_adapter" type="number" value="0" min="0"></label>
-          <label>Tiempo (s) <input id="tp_timeout" type="number" value="15" min="1"></label>
-          <button type="submit" class="btn primary">Agregar</button>
-        </form>
-      </section>
-
-      <div id="tpList"></div>
-    </section>
-
-    <!-- ===================== EPG ===================== -->
-    <section id="tab-epg" class="hidden">
-      <section class="card">
-        <div class="card-head">
-          <h2>EPG <span id="epgCount" class="muted"></span></h2>
-          <div class="actions">
-            <input id="epgFilter" type="search" placeholder="Filtrar…">
-            <a class="btn" href="/api/epg.xml" target="_blank">XMLTV (xui.one/xcode)</a>
-            <a class="btn" href="/api/playlist.m3u8" target="_blank">M3U8</a>
+        <span class="version">v@VERSION@ <span>● Sistema local</span></span>
+      </div>
+      <div
+        id="notice"
+        class="notice hidden"
+        role="status"
+        aria-live="polite"
+      ></div>
+      <div class="metrics">
+        <div class="metric">
+          <span>Adaptadores DVB</span><strong id="metricAdapters">—</strong
+          ><small>Hardware detectado</small>
+        </div>
+        <div class="metric">
+          <span>Transponders</span><strong id="metricTp">—</strong
+          ><small>Configurados en el sistema</small>
+        </div>
+        <div class="metric">
+          <span>Canales encontrados</span><strong id="metricChannels">—</strong
+          ><small>Últimos escaneos guardados</small>
+        </div>
+        <div class="metric">
+          <span>Salida de streaming</span><strong id="metricStream">—</strong
+          ><small>Estado del proceso, no del descifrado</small>
+        </div>
+      </div>
+      <section id="tab-events" class="hidden">
+        <section class="card">
+          <div class="card-head">
+            <h2>Eventos de canales en vivo</h2>
+            <span id="eventsState" role="status">Desconectado</span>
           </div>
+          <p class="callout">
+            Sin archivos ni historial. Solo se reciben eventos desde que abres
+            esta vista. Al salir o esconder la pestaña se desconecta y se vacía.
+            Máximo 500 eventos en pantalla. Los colores de canales siguen
+            funcionando sin guardar registros.
+          </p>
+          <div class="connection-tools">
+            <label
+              >Canal / adaptador / mensaje
+              <input
+                id="eventsFilter"
+                type="search"
+                placeholder="672, adapter 0, ECM…"
+            /></label>
+            <label
+              >Nivel
+              <select id="eventsLevel">
+                <option value="">Todos</option>
+                <option value="error">Errores</option>
+                <option value="warning">Avisos</option>
+                <option value="info">Información</option>
+              </select></label
+            >
+            <button class="btn" id="eventsClear" type="button">
+              Limpiar pantalla
+            </button>
+          </div>
+          <div class="table-wrap live-events">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hora</th>
+                  <th>Nivel</th>
+                  <th>Canal / origen</th>
+                  <th>Evento</th>
+                  <th>Detalle</th>
+                </tr>
+              </thead>
+              <tbody id="eventsBody">
+                <tr>
+                  <td colspan="5">Abre esta vista para conectar.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+      <!-- ===================== DASHBOARD ===================== -->
+      <section id="tab-dashboard">
+        <section class="card">
+          <div class="card-head"><h2>Adaptadores</h2></div>
+          <div id="adapters" class="adapters">—</div>
+          <div class="muted small" id="bins"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>Agregar transponder</h2>
+            <button class="btn small" id="toggleTpForm">ocultar</button>
+          </div>
+          <form id="tpForm" class="grid-form">
+            <label>Nombre <input id="tp_name" placeholder="70W AMX" /></label>
+            <label
+              >Tipo
+              <select id="tp_type">
+                <option value="dvbs2" selected>DVB-S2</option>
+                <option value="dvbs">DVB-S</option>
+                <option value="dvbt">DVB-T</option>
+                <option value="dvbt2">DVB-T2</option>
+                <option value="dvbc">DVB-C</option>
+              </select>
+            </label>
+            <label
+              >Frecuencia satélite (MHz)
+              <input id="tp_freq" type="number" step="any" value="10970"
+            /></label>
+            <label
+              >Modo LNB<select id="tp_lnb_mode">
+                <option value="universal" selected>
+                  Universal automático 9750/10600
+                </option>
+                <option value="manual">LO manual / fijo (22 kHz OFF)</option>
+              </select></label
+            >
+            <label
+              >LNB LO manual (MHz)
+              <input id="tp_lnb" type="number" step="any" value="9750" disabled
+            /></label>
+            <label
+              >Symbol rate <input id="tp_sr" type="number" value="27900000"
+            /></label>
+            <label
+              >Polarización
+              <select id="tp_pol">
+                <option>V</option>
+                <option>H</option>
+                <option>L</option>
+                <option>R</option>
+              </select>
+            </label>
+            <label
+              >Adaptador <input id="tp_adapter" type="number" value="0" min="0"
+            /></label>
+            <label
+              >Tiempo (s)
+              <input id="tp_timeout" type="number" value="15" min="1"
+            /></label>
+            <label
+              >Softcam / perfil Newcamd predeterminado<select id="tp_profile">
+                <option value="default">Predeterminado global</option>
+              </select></label
+            >
+            <button type="submit" class="btn primary" id="tpSave">
+              Agregar</button
+            ><button type="button" class="btn hidden" id="tpCancel">
+              Cancelar edición
+            </button>
+            <p id="tpEditInfo" class="muted">
+              Los canales sin excepción propia heredan el perfil del
+              transpondedor.
+            </p>
+          </form>
+        </section>
+
+        <div id="tpList"></div>
+      </section>
+
+      <!-- ===================== EPG ===================== -->
+      <section id="tab-epg" class="hidden">
+        <section class="card">
+          <div class="card-head">
+            <h2>Canales y EPG <span id="epgCount" class="muted"></span></h2>
+            <div class="actions">
+              <div
+                class="view-switch"
+                role="group"
+                aria-label="Vista de canales"
+              >
+                <button
+                  type="button"
+                  class="btn selected"
+                  id="mosaicView"
+                  aria-pressed="true"
+                >
+                  ▦ Mosaico</button
+                ><button
+                  type="button"
+                  class="btn"
+                  id="tableView"
+                  aria-pressed="false"
+                >
+                  ☷ Tabla
+                </button>
+              </div>
+              <input
+                id="epgFilter"
+                type="search"
+                placeholder="Buscar canal o proveedor…"
+              />
+              <a class="btn" href="/api/epg.xml" target="_blank"
+                >XMLTV (xui.one/xcode)</a
+              >
+              <a class="btn" href="/api/playlist.m3u8" target="_blank">M3U8</a>
+            </div>
+          </div>
+          <form id="epgSettingsForm" class="connection-tools">
+            <label
+              >Conservar programación (días)
+              <input
+                id="epgDays"
+                type="number"
+                min="1"
+                max="14"
+                step="1"
+                value="1"
+                required
+              /> </label
+            ><label
+              >Desfase horario UTC (horas)
+              <input
+                id="epgUtcOffset"
+                type="number"
+                min="-12"
+                max="14"
+                step="0.25"
+                value="0"
+                required
+              /> </label
+            ><button class="btn" type="submit">Guardar ajustes EPG</button>
+            <button class="btn" type="button" id="epgRefresh">
+              Actualizar vista
+            </button>
+            <span id="epgSettingsInfo" class="muted" role="status"></span>
+          </form>
+          <p class="callout">
+            Horario: Nicaragua UTC −6; UTC 0 conserva la hora universal. Este
+            ajuste cambia la presentación y el huso de XMLTV, no el reloj del
+            servidor ni las horas reales de emisión. De 1 a 14 días de
+            programación recibida por EIT. Se guarda en disco y sobrevive al
+            reinicio. Depende de lo que emita el satélite: no se inventan
+            programas ni horarios. Se actualiza al escanear o mientras el
+            transpondedor esté recibiéndose; no resintoniza otros canales.
+          </p>
+          <div class="mosaic-legend">
+            <span class="legend-good">● CW recientes</span
+            ><span class="legend-active">● TS activo</span
+            ><span class="legend-warning">● Atención</span
+            ><span class="legend-error">● Error</span><span>○ Inactivo</span
+            ><span
+              >Bitrate de TS recibido · no certifica vídeo decodificado</span
+            >
+          </div>
+          <div id="channelMosaic"></div>
+          <div class="table-wrap hidden" id="epgTableWrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>TP</th>
+                  <th>SID</th>
+                  <th>Canal</th>
+                  <th>Prov.</th>
+                  <th>Tipo</th>
+                  <th>Ahora</th>
+                  <th>Después</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="epgBody">
+                <tr>
+                  <td colspan="8" class="muted">
+                    Sin EPG (escanea transponders)
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <!-- ===================== NEWCAMD ===================== -->
+      <section id="tab-diag" class="hidden">
+        <div class="card">
+          <h2>Diagnóstico de acceso condicional</h2>
+          <p>Consulta los brokers y canales existentes sin abrir otra conexión a Ncam.
+             No muestra contraseñas, DES keys, ECM, CW ni números de tarjeta; no guarda logs.</p>
+          <p>La autoprueba verifica CSA local con datos sintéticos; no confirma la validez de una suscripción ni que un canal real esté descifrado. AES/CSA3 no están soportados.</p>
+          <button id="diagRefresh" class="btn" type="button">Actualizar estado</button>
+          <button id="diagSelftest" class="btn primary" type="button">Autoprueba CSA · sin red</button>
+          <p id="diagResult" role="status" aria-live="polite"></p>
+          <pre id="diagState"></pre>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>TP</th><th>SID</th><th>Canal</th><th>Prov.</th><th>Tipo</th><th>Ahora</th><th>Después</th><th></th></tr></thead>
-            <tbody id="epgBody"><tr><td colspan="8" class="muted">Sin EPG (escanea transponders)</td></tr></tbody>
-          </table>
+      </section>
+
+      <section id="tab-newcamd" class="hidden">
+        <section class="card">
+          <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
+          <div class="connection-tools">
+            <label
+              >Perfil
+              <select id="nc_profile">
+                <option value="default">Predeterminado</option>
+              </select></label
+            >
+            <button class="btn" type="button" id="ncNew">Nuevo perfil</button>
+            <button class="btn danger" type="button" id="ncDelete">
+              Eliminar perfil
+            </button>
+          </div>
+          <form id="ncForm" class="grid-form">
+            <label
+              >Nombre del perfil
+              <input
+                id="nc_name"
+                maxlength="80"
+                required
+                value="Predeterminado"
+            /></label>
+            <label>Servidor <input id="nc_host" value="127.0.0.1" /></label>
+            <label
+              >Puerto
+              <input
+                id="nc_port"
+                min="1"
+                max="65535"
+                required
+                type="number"
+                value="5000"
+            /></label>
+            <label>Protocolo <select id="nc_proto"><option value="525">525 (predeterminado)</option><option value="524">524 (servidores antiguos)</option></select></label>
+            <label>Usuario <input id="nc_user" value="" /></label>
+            <label
+              >Contraseña
+              <input
+                id="nc_pass"
+                autocomplete="current-password"
+                type="password"
+                value=""
+            /></label>
+            <label
+              >DES key (14 bytes hex)
+              <input id="nc_deskey" value="" autocomplete="off" size="30"
+            /></label>
+            <button type="submit" class="btn primary">Guardar newcamd</button>
+          </form>
+          <div class="connection-tools">
+            <button class="btn" type="button" id="ncTest">
+              ↗ Comprobar conexión TCP</button
+            ><span class="muted small" id="ncInfo" role="status"></span>
+          </div>
+          <div class="callout">
+            Verde brillante: al menos dos CW no nulas recientes en 15 s. Rojo:
+            error o falta de ECM/CW reciente en un canal cifrado activo.
+            Amarillo: esperando continuidad; azul: libre; gris: inactivo o sin
+            telemetría. Solo se monitorizan los canales abiertos. Esto no
+            certifica vídeo decodificado. Una conexión TCP correcta no confirma
+            el login ni la recepción de CW. Verifica CAID, permisos de la
+            tarjeta y los registros de OSCam.
+          </div>
+        </section>
+      </section>
+
+      <!-- ===================== M3U8 / STREAM ===================== -->
+      <section id="tab-m3u8" class="hidden">
+        <section class="card">
+          <div class="card-head"><h2>Lista M3U8</h2></div>
+          <form id="m3uForm" class="grid-form">
+            <label
+              >Transponder
+              <select id="m3u_tp">
+                <option value="">— todos —</option>
+              </select>
+            </label>
+            <label
+              >Base URL ({channel_id}, {sid}, {transponder})
+              <input
+                id="m3u_base"
+                placeholder="http://IP:8081/stream/channel/{channel_id}"
+                title="Vacío = URL automática de canal con identidad TP:SID"
+              />
+            </label>
+            <button type="submit" class="btn primary">Descargar M3U8</button>
+          </form>
+          <div class="muted small">
+            Perfil <b>pass</b>: MPEG-TS sin transcodificar. No es HLS. El TS lo
+            sirve <b>tbsstream</b> en <code>/stream.ts</code> (HTTP) y por UDP.
+            La URL de cada canal apunta a un stream TS con
+            <code>?profile=pass</code> (estilo TVHeadend).
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>Sesiones compartidas · perfil pass</h2>
+          </div>
+          <form id="stForm" class="grid-form">
+            <label
+              >Transponder
+              <select id="st_tp"></select
+            ></label>
+            <label
+              >Service ID (SID)
+              <input
+                id="st_sid"
+                type="number"
+                min="1"
+                max="65535"
+                placeholder="Automático: primer servicio"
+            /></label>
+            <label
+              >UDP destino (ip:puerto)
+              <input id="st_udp" placeholder="239.1.1.1:1234"
+            /></label>
+            <label
+              >HTTP puerto (0 = solo panel)
+              <input id="st_http" type="number" value="0"
+            /></label>
+            <button type="submit" class="btn primary" id="stStart">
+              Iniciar
+            </button>
+            <button type="button" class="btn danger" id="stStop">
+              Detener todas
+            </button>
+          </form>
+          <div class="callout">
+            Multicanal: varios servicios del mismo transpondedor comparten una
+            sola captura por adaptador. Transpondedores distintos requieren
+            adaptadores distintos. El inicio manual fija solo ese canal;
+            detenerlo no interrumpe los demás. Usa puerto 0 para las URLs del
+            panel, o un puerto directo distinto por canal. Los clientes directos
+            no se cuentan aquí. No es HLS y los bytes TS no certifican
+            descifrado.
+          </div>
+          <div class="adapters" id="stInfo" aria-live="polite"></div>
+        </section>
+      </section>
+      <section id="tab-users" class="hidden">
+        <section class="card">
+          <div class="card-head">
+            <h2>Usuarios</h2>
+            <button id="iptvNew" class="btn primary" type="button">
+              Nuevo usuario
+            </button>
+            <button id="iptvRefresh" class="btn" type="button">
+              Actualizar usuarios
+            </button>
+          </div>
+          <p>
+            Cuentas de reproducción independientes del administrador y de
+            Newcamd.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Usuario</th>
+                  <th>Estado</th>
+                  <th>Vencimiento</th>
+                  <th>Canales autorizados</th>
+                  <th>Acción</th>
+                </tr>
+              </thead>
+              <tbody id="iptvUserRows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="card hidden" id="iptvWorkspace">
+          <div class="card-head">
+            <h3 id="iptvEditorTitle">Nuevo usuario</h3>
+            <button id="iptvEditorClose" class="btn" type="button">
+              Volver a usuarios
+            </button>
+          </div>
+          <p>
+            Estas cuentas no administran el panel. Selecciona los canales
+            permitidos. Guardar revoca los enlaces anteriores de ese usuario.
+            Usa HTTPS o VPN.
+          </p>
+          <label class="hidden"
+            >Usuario existente<select id="iptvUsers">
+              <option value="">Nuevo usuario</option>
+            </select></label
+          >
+          <label
+            >Usuario<input id="iptvUsername" maxlength="64" autocomplete="off"
+          /></label>
+          <label
+            >Contraseña (12 caracteres mínimo; vacío conserva la actual)<input
+              id="iptvPassword"
+              type="password"
+              autocomplete="new-password"
+          /></label>
+          <label class="iptv-enabled"
+            ><input id="iptvEnabled" type="checkbox" checked />
+            Habilitado</label
+          >
+          <label
+            >Vencimiento (vacío = sin vencimiento)<input
+              id="iptvExpires"
+              type="datetime-local"
+          /></label>
+          <h4>Canales autorizados</h4>
+          <p class="muted">
+            Marca cada canal o selecciona todos los habilitados. No necesitan
+            estar activos para aparecer en la lista.
+          </p>
+          <button id="iptvSelectAll" class="btn" type="button">
+            Seleccionar todos los habilitados
+          </button>
+          <button id="iptvSelectNone" class="btn" type="button">
+            Quitar selección
+          </button>
+          <p id="iptvSelectedCount" role="status"></p>
+          <div
+            id="iptvChannels"
+            class="iptv-channel-list"
+            aria-label="Canales autorizados"
+          ></div>
+          <button id="iptvSave" class="btn primary" type="button">
+            Guardar usuario y generar enlaces
+          </button>
+          <label
+            >Lista M3U del usuario<input id="iptvPlaylist" readonly
+          /></label>
+          <a id="iptvDownload" class="btn hidden" download="canales.m3u8"
+            >Descargar M3U del usuario</a
+          >
+          <label
+            >Token para clientes de Flussonic<input id="iptvToken" readonly
+          /></label>
+          <p id="iptvInfo" role="status"></p>
+        </section>
+      </section>
+      <section id="tab-flussonic" class="hidden">
+        <section class="card integration-card">
+          <div class="eyebrow">DISTRIBUCIÓN Y AUTORIZACIÓN</div>
+          <h2>Flussonic</h2>
+          <p>
+            Dos conexiones independientes: Flussonic recibe las señales del
+            panel y consulta al panel para autorizar espectadores.
+          </p>
+          <h3>1. Entrada de señales desde DVB Panel</h3>
+          <p>
+            Crea una cuenta técnica en Usuarios IPTV y descarga su M3U. Usa cada
+            URL MPEG-TS como entrada HTTP en Flussonic. No uses una cuenta de
+            cliente como fuente compartida.
+          </p>
+          <button id="flussonicUsers" class="btn" type="button">
+            Ir a Usuarios IPTV
+          </button>
+          <h3>2. Autorizar clientes desde el panel</h3>
+          <label
+            >Backend de autorización Flussonic (privado)<input
+              id="iptvBackend"
+              readonly
+          /></label>
+          <p class="callout">
+            Configura esta URL privada como on_play. No la entregues a clientes.
+            Usa HTTPS/VPN y restringe el acceso desde el servidor Flussonic.
+          </p>
+          <label
+            >Canal de referencia<select id="flussonicChannel"></select
+          ></label>
+          <label
+            >Nombre seguro del stream en Flussonic<input
+              id="flussonicStreamName"
+              readonly
+          /></label>
+          <p>
+            Usa este nombre exacto para que la autorización corresponda al canal
+            seleccionado. El token del espectador se genera en Usuarios IPTV.
+          </p>
+          <p>
+            Respuesta del backend: 200 permite, 403 deniega; solicita
+            revalidación cada 30 segundos. Sin límite de conexiones ni API
+            Xtream Codes.
+          </p>
+          <p id="flussonicInfo" role="status"></p>
+        </section>
+      </section>
+    </main>
+
+    <footer class="footer" id="footer">—</footer>
+    <dialog id="epgSchedule" aria-labelledby="epgScheduleTitle">
+      <h2 id="epgScheduleTitle">Programación recibida</h2>
+      <p>
+        Horarios en la zona local del navegador. Solo eventos reales recibidos;
+        la lista puede estar incompleta.
+      </p>
+      <div id="epgScheduleBody"></div>
+      <button class="btn" id="epgScheduleClose" type="button">Cerrar</button>
+    </dialog>
+    <dialog id="channelEditor" aria-labelledby="channelEditorTitle">
+      <form id="channelForm" class="grid-form">
+        <h2 id="channelEditorTitle">Editar canal</h2>
+        <p id="channelIdentity" class="muted"></p>
+        <label>Nombre <input id="ch_name" maxlength="120" required /></label>
+        <label>Grupo M3U <input id="ch_group" maxlength="120" /></label>
+        <label
+          >Número de canal
+          <input id="ch_number" type="number" min="1" max="99999"
+        /></label>
+        <label
+          >Logo (URL http/https)
+          <input id="ch_logo" type="url" maxlength="2048"
+        /></label>
+        <label
+          >Perfil Newcamd
+          <select id="ch_profile"></select
+        ></label>
+        <label
+          >CAID fijo (hexadecimal; vacío = automático)<input
+            id="ch_caid"
+            maxlength="4"
+            pattern="[0-9a-fA-F]{4}"
+            placeholder="0B00"
+        /></label>
+        <label
+          >ECM PID fijo (decimal)<input
+            id="ch_ecm_pid"
+            type="number"
+            min="1"
+            max="8190"
+            placeholder="5169"
+        /></label>
+        <p class="callout">
+          Completa ambos para fijar el acceso condicional, o deja ambos vacíos
+          para automático. Si la combinación no está anunciada en la PMT no se
+          probarán otras. Estos valores dependen del canal; no los copies a
+          todos.
+        </p>
+        <label
+          >Retardo de descifrado (ms)
+          <input id="ch_delay" type="number" min="0" max="2000" step="1" required value="500" />
+        </label>
+        <p class="callout">500 ms por defecto. Añade latencia al directo para esperar claves;
+          0 desactiva este retardo, no la entrega regulada. No repara paquetes perdidos ni claves incorrectas.</p>
+        <label
+          ><input id="ch_enabled" type="checkbox" /> Canal habilitado</label
+        >
+        <p class="callout">
+          Guardar detiene solo este canal si está activo. Reabre su URL para
+          aplicar. La identidad TP:SID y los PIDs detectados no se modifican.
+          Los ajustes sobreviven al reescaneo.
+        </p>
+        <div class="actions">
+          <button class="btn primary" type="submit">Guardar canal</button>
+          <button class="btn" type="button" id="chCancel">Cancelar</button>
         </div>
-      </section>
-    </section>
-
-    <!-- ===================== NEWCAMD ===================== -->
-    <section id="tab-newcamd" class="hidden">
-      <section class="card">
-        <div class="card-head"><h2>Newcamd (descifrado)</h2></div>
-        <form id="ncForm" class="grid-form">
-          <label>Servidor <input id="nc_host" value="127.0.0.1"></label>
-          <label>Puerto <input id="nc_port" type="number" value="5000"></label>
-          <label>Usuario <input id="nc_user" value="astra"></label>
-          <label>Contraseña <input id="nc_pass" type="password" value="astra"></label>
-          <label>DES key (14 bytes hex) <input id="nc_deskey" value="0102030405060708091011121314" size="30"></label>
-          <button type="submit" class="btn primary">Guardar newcamd</button>
-        </form>
-        <div class="muted small" id="ncInfo"></div>
-      </section>
-    </section>
-
-    <!-- ===================== M3U8 / STREAM ===================== -->
-    <section id="tab-m3u8" class="hidden">
-      <section class="card">
-        <div class="card-head"><h2>Lista M3U8</h2></div>
-        <form id="m3uForm" class="grid-form">
-          <label>Transponder
-            <select id="m3u_tp"><option value="">— todos —</option></select>
-          </label>
-          <label>Base URL (usa {sid})
-            <input id="m3u_base" placeholder="http://IP:9981/stream/channelid/{sid}" title="Vacio = auto http://<este host>/stream/channelid/{sid}">
-          </label>
-          <button type="submit" class="btn primary">Descargar M3U8</button>
-        </form>
-        <div class="muted small">El TS lo sirve <b>tbsstream</b> en <code>/stream.ts</code> (HTTP) y por UDP. La URL de cada canal apunta a un stream TS con <code>?profile=pass</code> (estilo TVHeadend).</div>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><h2>Streaming (descifrado + UDP)</h2></div>
-        <form id="stForm" class="grid-form">
-          <label>Transponder <select id="st_tp"></select></label>
-          <label>UDP destino (ip:puerto) <input id="st_udp" placeholder="239.1.1.1:1234"></label>
-          <label>HTTP puerto <input id="st_http" type="number" value="9981"></label>
-          <button type="submit" class="btn primary" id="stStart">Iniciar</button>
-          <button type="button" class="btn danger" id="stStop">Detener</button>
-        </form>
-        <div class="muted small" id="stInfo"></div>
-      </section>
-    </section>
-  </main>
-
-  <footer class="footer" id="footer">—</footer>
-  <script src="/static/app.js"></script>
-</body>
+      </form>
+    </dialog>
+    <dialog id="securityDialog">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">CONTROL DE ACCESO</div>
+          <h3>Reproducción privada</h3>
+        </div>
+        <button class="btn" id="securityClose" type="button">Cerrar</button>
+      </div>
+      <p>
+        VLC y otros clientes necesitan un token independiente del login. Quien
+        tenga estos enlaces puede ver canales y EPG, pero no administrar el
+        panel.
+      </p>
+      <p class="callout">
+        Generar otro token revoca los enlaces anteriores. No compartas estos
+        enlaces públicamente. Utiliza HTTPS o una VPN; el token no cifra el
+        tráfico.
+      </p>
+      <button class="btn primary" id="rotateMediaToken" type="button">
+        Revocar anteriores y generar enlaces
+      </button>
+      <div id="mediaLinks" class="hidden">
+        <label>Lista M3U privada<input id="privatePlaylist" readonly /></label
+        ><label>Guía XMLTV privada<input id="privateEpg" readonly /></label>
+        <p class="muted">
+          Copia y guarda estos enlaces ahora. El servidor conserva únicamente el
+          hash del token; no se puede volver a consultar.
+        </p>
+      </div>
+      <p id="securityInfo" role="status"></p>
+    </dialog>
+    <dialog id="astraImportDialog">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">MIGRACIÓN DE CONFIGURACIÓN</div>
+          <h3>Importar Astra / Cesbo</h3>
+        </div>
+        <button class="btn" id="astraImportClose" type="button">Cerrar</button>
+      </div>
+      <p>
+        Importa TP, nombres/SID y perfiles. No importa usuarios, contraseñas de
+        acceso al panel, permisos ni salidas HTTP/HLS/UDP. Detén los canales
+        antes de previsualizar.
+      </p>
+      <p class="callout">
+        LNB universal 9750/10600. Confirma cada MAC → adaptador con el registro
+        del kernel; no se deduce por el nombre. R no se convierte a V. Los TP
+        deshabilitados se omiten. Conserva tu archivo original de forma privada.
+      </p>
+      <label
+        >Archivo JSON de Astra<input
+          type="file"
+          id="astraFile"
+          accept=".json,application/json"
+      /></label>
+      <div id="astraMappings"></div>
+      <label class="password-toggle"
+        ><input type="checkbox" id="astraCreateProfiles" /> Importar cuentas
+        Newcamd que no tengan un perfil asignado</label
+      >
+      <label
+        >DES key para cuentas que no la incluyan<input
+          id="astraDeskey"
+          type="password"
+          autocomplete="off"
+          maxlength="64"
+          placeholder="14 bytes en hexadecimal; no se adivina"
+      /></label>
+      <p class="muted">
+        Puedes mapear las softcams a perfiles existentes y no importar
+        credenciales. Si importas cuentas, el archivo se envía al servidor
+        autenticado; utiliza HTTPS o una red de confianza.
+      </p>
+      <div class="actions">
+        <button class="btn" id="astraPreview" type="button">
+          Previsualizar sin guardar</button
+        ><button class="btn primary" id="astraApply" type="button" disabled>
+          Aplicar importación
+        </button>
+      </div>
+      <pre id="astraPreviewText" class="import-report" role="status"></pre>
+    </dialog>
+    <script src="/static/app.js"></script>
+  </body>
 </html>

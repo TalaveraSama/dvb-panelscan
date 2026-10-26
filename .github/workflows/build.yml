@@ -1,0 +1,84 @@
+name: Ubuntu packages
+on:
+  push:
+    branches: [arena/6e165552-dvb-panelscan]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish verified version from VERSION
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read package version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev libdvbcsa-dev
+      - run: make -C dvb2m3u8 && make -C tbsstream
+      - run: make -C tbsstream test
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - run: |
+          node --check panel/static/app.js
+          npm install --prefix /tmp/dvb-panel-ui jsdom@26.1.0 --no-audit --no-fund
+          NODE_PATH=/tmp/dvb-panel-ui/node_modules node tests/test_ui.cjs
+      - run: |
+          make -C dvb2m3u8
+          make -C tbsstream
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-demux tests/test_demux.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
+          /tmp/test-demux
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-eit-scan tests/test_eit_scan.c
+          /tmp/test-eit-scan
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-lnb tests/test_lnb.c
+          /tmp/test-lnb
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-pacing tests/test_pacing.c
+          /tmp/test-pacing
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-transport tests/test_transport.c tbsstream/csa.c tbsstream/newcamd.c -ldvbcsa -lcrypto -lpthread
+          /tmp/test-transport
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-newcamd tests/test_newcamd.c -lcrypto
+          /tmp/test-newcamd
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-broker tests/test_broker.c -lcrypto
+          /tmp/test-broker
+          gcc -O1 -g -fsanitize=address,undefined -o /tmp/test-csa tests/test_csa.c tbsstream/csa.c -ldvbcsa
+          /tmp/test-csa
+      - run: sh packaging/build-deb.sh
+      - run: python3 packaging/check-deb.py dist/*.deb
+      - env:
+          SMOKE_PASSWORD: ci-only-password-not-for-production
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          sudo -u dvb-panel env SMOKE_PASSWORD="$SMOKE_PASSWORD" python3 -c 'import sys,os; sys.path.insert(0,"/usr/lib/dvb-panelscan"); from auth import AuthStore; AuthStore("/var/lib/dvb-panelscan/auth.json").set_admin("ci-admin",os.environ["SMOKE_PASSWORD"])'
+          sudo systemctl start dvb-panel
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/login > /dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/status)" = 401
+          python3 packaging/smoke-auth.py configure
+          sudo systemctl stop dvb-panel
+          sudo mkdir -p /etc/systemd/system/dvb-panel.service.d
+          echo '# Preserve local service override' | sudo tee /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf
+          sudo sha256sum /var/lib/dvb-panelscan/auth.json /var/lib/dvb-panelscan/epg.json /etc/systemd/system/dvb-panel.service.d/upgrade-test.conf > /tmp/upgrade-state.sha256
+          sudo apt-get install -y --reinstall ./dist/*.deb
+          sudo sha256sum -c /tmp/upgrade-state.sha256
+          sudo systemctl start dvb-panel
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8081/login > /dev/null
+          python3 packaging/smoke-auth.py verify
+          sudo systemctl stop dvb-panel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-22.04-amd64
+          path: dist/*.deb
+      - name: Publish release
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            case "$HEAD_MESSAGE" in "Release v${VERSION}:"*) ;; *) echo "Release prefix/version mismatch"; exit 1 ;; esac
+          fi
+          cp "dist/dvb-panelscan_${VERSION}_amd64/usr/share/doc/dvb-panelscan/BUILD_INFO.txt" dist/BUILD_INFO.txt
+          cd dist
+          sha256sum *.deb BUILD_INFO.txt > SHA256SUMS
+          gh release create "v${VERSION}" *.deb SHA256SUMS BUILD_INFO.txt --latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v${VERSION} · DVB PanelScan · Ubuntu 22.04 amd64" --notes-file ../RELEASE_NOTES.md
