@@ -77,6 +77,14 @@ class EventTests(unittest.TestCase):
         self.assertEqual(event["level"], "warning")
         viewer.close()
 
+    def test_ecm_repeats_are_not_reported_as_transport_loss(self):
+        bus = EventBus(); viewer = bus.subscribe()
+        diagnostic_event(bus, "TS stats: tei=0 cc_errors=0 pending=0 ecm_repeats=15 ca_switch_drops=0 queue_full_drops=0", "channel")
+        record = viewer.read(timeout=0)[0]
+        self.assertEqual(record["level"], "info")
+        self.assertEqual(record["stats"]["ecm_repeats"], 15)
+        viewer.close()
+
     def test_session_drains_stderr_and_health_without_creating_log(self):
         with tempfile.TemporaryDirectory() as folder:
             manager = StreamManager(); viewer = manager.events.subscribe()

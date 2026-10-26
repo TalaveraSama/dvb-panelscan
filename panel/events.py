@@ -92,14 +92,16 @@ def diagnostic_event(bus, line, scope, channel=None, adapter=None):
         return
     if line.startswith("TS stats:"):
         stats = {key: int(value) for key, value in re.findall(
-            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities|ca_switch_drops|queue_full_drops)=(\d+)", line)}
+            r"\b(tei|cc_errors|service_drops|pending|ecm_drops|sync_losses|sync_bytes|invalid_ts|psi_discontinuities|ca_switch_drops|queue_full_drops|ecm_repeats)=(\d+)", line)}
         if stats:
-            level = "warning" if any(value for key, value in stats.items() if key != "pending") else "info"
+            level = "warning" if any(value for key, value in stats.items() if key not in ("pending", "ecm_repeats")) else "info"
             bus.publish("stats", "Estadísticas TS (acumuladas)", level, channel, adapter, stats=stats)
         return
     match = PMT.search(line)
     if match:
-        bus.publish("service", "Servicio cifrado detectado" if int(match[1]) > 0 else "Servicio libre detectado",
+        count = re.search(r"\bca_count=(\d+)", line)
+        encrypted = int(match[1]) > 0 or bool(count and int(count[1]))
+        bus.publish("service", "Servicio cifrado detectado" if encrypted else "Servicio libre detectado",
                     channel=channel, adapter=adapter)
         return
     # Labels are ours, never the raw line (which may include user data).

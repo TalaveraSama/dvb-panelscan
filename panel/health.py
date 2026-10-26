@@ -25,7 +25,8 @@ class ECMHealth:
             return
         pmt = PMT.search(line)
         if pmt:
-            self.encrypted = int(pmt[1]) > 0
+            count = re.search(r"\bca_count=(\d+)", line)
+            self.encrypted = int(pmt[1]) > 0 or bool(count and int(count[1]))
         match = ECM.search(line)
         if not match:
             return

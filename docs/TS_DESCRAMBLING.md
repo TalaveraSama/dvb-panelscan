@@ -101,3 +101,65 @@ corrupto, esta comprobación no valida la imagen ni todos los errores del códec
 
 La salida stdout del motor sigue siendo exclusivamente TS alineado; el panel
 rechaza una salida no alineada en vez de adivinar cómo reparar un binario incompatible.
+
+## Ajustes ECM / CA por canal (0.17.0)
+
+### Investigación web y decisiones
+
+Se revisó el código primario de Tvheadend, fijado al commit
+`8837853a69aa822b0203eb3909c5912dc831312e`:
+
+- [cclient.c, líneas 1135–1165](https://github.com/tvheadend/tvheadend/blob/8837853a69aa822b0203eb3909c5912dc831312e/src/descrambler/cclient.c#L1135-L1165):
+  selección con PID preferido/bloqueado, CAID forzado y compatibilidad de tarjeta.
+  Nuestra opción manual bloquea una pareja PMT; **no** implementa todavía el
+  descubrimiento completo de tarjetas/proveedores de Tvheadend.
+- [Configuración de descrambler](https://github.com/tvheadend/tvheadend/blob/8837853a69aa822b0203eb3909c5912dc831312e/data/conf/descrambler):
+  trata intervalo ECM, multipid, CW constante, comprobación de paridad y sistemas
+  de paridad ECM estándar/invertida como opciones por CA. No existe una regla
+  universal que permita deducir un período real solo de recibir CW no nulas.
+
+Los valores de recuperación 15/20 segundos y supresión de repetidos 1 segundo son
+**decisiones de este proyecto**, no tiempos copiados de Tvheadend ni garantía de
+la latencia de un servidor Newcamd. No se copió una política universal de claves.
+Las limitaciones del guard conservador de 0.16.0 siguen vigentes.
+
+### Uso en RCN Novelas del caso reportado
+
+Los eventos del usuario mostraron CW disponibles en CAID `0B00`, ECM PID `5169`,
+y respuestas negativas en otras alternativas. Eso justifica probar esa pareja
+**en ese canal**, no imponerla a todos los canales o a otro transpondedor.
+
+1. En **Canales y EPG**, abre **Editar** en RCN Novelas (TP:SID `3be839f6:29`).
+2. Mantén el perfil Newcamd autorizado correspondiente.
+3. Escribe **CAID fijo: 0B00**, **ECM PID fijo: 5169** y guarda.
+4. Se detiene solamente esa sesión: reabre la reproducción y observa eventos.
+5. Para volver a automático borra ambos campos y guarda.
+
+La pareja debe aparecer en la PMT actual; si falta, se informa del error y no se
+elige silenciosamente otro sistema. El escaneo y los perfiles no se sobrescriben.
+No se incluye el valor en la identidad del canal ni cambian permisos IPTV/EPG.
+En CLI: `--caid 0B00 --ecm-pid 5169`. Los dos argumentos son obligatorios juntos.
+
+### Comportamiento automático y medición
+
+- Antes del primer éxito conserva el sondeo de dos fallos o 12 s sin progreso.
+- Tras un éxito espera al menos 15 s sin éxito y 3 respuestas fallidas para
+  solicitar rotación; 20 s sin progreso también permite avanzar. Los fallos
+  invalidan la disponibilidad de claves; la espera no significa aceptar claves
+  antiguas indefinidamente. El bloqueo manual deshabilita toda rotación.
+- Reordenar la PMT manteniendo la misma pareja no borra claves, cola ni contexto.
+- ECM repetidos se comparan por sección completa/contexto y se suprimen durante
+  como máximo 1 s. Un cambio de bytes, tabla ECM o selección se procesa sin esa
+  espera. Las repeticiones no se cuentan como pérdidas ni como CW nuevas.
+- `ca_switch_drops`: payload descartado por cambio/reinicio de contexto CA.
+- `queue_full_drops`: payload descartado por alcanzar el límite de espera.
+- `service_drops`: suma total de los anteriores desde el inicio del proceso.
+- `ecm_repeats`: retransmisiones idénticas suprimidas, no pérdidas de vídeo.
+
+Comparar dos muestras separadas en el tiempo, no interpretar un contador acumulado
+como pérdida instantánea. La latencia del evento ECM se mide desde el worker;
+0–1 ms puede ser caché del broker, no una consulta fresca al servidor remoto.
+
+No se promete que fijar la pareja cure recepción RF, CW equivocadas, algoritmos no
+soportados o errores del reproductor. Probar SD/HD directamente y después mediante
+Flussonic. No compartir contraseñas, claves o enlaces con tokens en los informes.

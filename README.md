@@ -7,9 +7,10 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.16.1 · Sincronización TS y continuidad PSI
+## Actual: 0.17.0 · Selección ECM estable por canal
 
-Protección de claves por paridad, claves asociadas a paquetes en cola y
+CAID/PID ECM fijo opcional en Editar canal, recuperación del CA automático y
+supresión acotada de ECM repetidos. Protección de claves por paridad, claves asociadas a paquetes en cola y
 alternativas CAID/PID ECM anunciadas en PMT. [Guía de diagnóstico](docs/TS_DESCRAMBLING.md).
 
 Secciones dedicadas **Usuarios IPTV** y **Flussonic** en el menú lateral.

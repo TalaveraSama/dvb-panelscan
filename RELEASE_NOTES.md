@@ -1,3 +1,25 @@
+## DVB PanelScan 0.17.0 · Selección ECM estable y CAID/PID fijo
+
+- Editar canal permite fijar CAID (hex de 4 dígitos) + ECM PID (decimal), o dejar
+  ambos vacíos para automático. Solo usa la pareja si está anunciada en la PMT.
+- La selección fija no rota a otro sistema; emite error si la pareja no aparece.
+  Configuración por TP:SID preservada tras reescanear; guardar detiene ese canal.
+- En automático, conserva la pareja activa si la PMT solo reordena descriptores.
+  Si antes recibió CW, dos NOK transitorios ya no provocan una vuelta por todos
+  los sistemas: 3 fallos + 15 s sin éxito, o 20 s sin progreso, permiten cambiar.
+- Una respuesta negativa invalida disponibilidad de claves: la gracia no reutiliza
+  indefinidamente claves antiguas. Sistemas nunca válidos conservan sondeo inicial.
+- ECM idéntico (sección completa, SID/CAID/proveedor/contexto) se reintenta como
+  máximo una vez por segundo; contenido nuevo no se retrasa. No es caché eterna.
+- Estadísticas separadas: ca_switch_drops, queue_full_drops y ecm_repeats (no pérdida).
+  Selección fija ausente no se etiqueta como canal libre por no tener ECM seleccionado.
+- Investigación en fuente Tvheadend sobre PID preferido/bloqueado y CAID forzado;
+  referencias y diferencias documentadas en docs/TS_DESCRAMBLING.md.
+- Pruebas API/UI/C de validación, CLI, bloqueo ausente, gracia, PMT reordenada y
+  supresión de repetidos. Sin acceso al VPS ni validación real de señal.
+
+---
+
 ## DVB PanelScan 0.16.1 · Sincronización TS / continuidad PSI
 
 - Adquisición de sincronía por tres cabeceras TS plausibles a 188 bytes; no basta

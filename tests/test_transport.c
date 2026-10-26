@@ -282,6 +282,32 @@ static void test_working_ca_grace_and_lock(void)
   csa_free(csae); csae = NULL;
 }
 
+static void test_ecm_repeat_suppression(void)
+{
+  memset(&svc, 0, sizeof(svc)); select_ca(0);
+  uint8_t even[] = {0x80,0x70,5,1,2,3,4,5};
+  uint8_t odd[] = {0x81,0x70,5,6,7,8,9,10};
+  uint64_t before = ecm_repeats;
+  enqueue_ecm(29, 0xb00, 0, even, sizeof(even));
+  assert(ecm_q_count == 1);
+  ecm_q_count = 0; ecm_q_head = ecm_q_tail; /* simulate an already completed request */
+  enqueue_ecm(29, 0xb00, 0, even, sizeof(even));
+  assert(!ecm_q_count && ecm_repeats == before + 1);
+  enqueue_ecm(29, 0xb00, 0, odd, sizeof(odd));
+  assert(ecm_q_count == 1); /* other table ID is not suppressed */
+  even[7]++;
+  enqueue_ecm(29, 0xb00, 0, even, sizeof(even));
+  assert(ecm_q_count == 2); /* changed bytes go through immediately */
+  ecm_q_count = 0; ecm_q_head = ecm_q_tail;
+  recent_ecm_at[0] = monotonic_ms() - 1001;
+  enqueue_ecm(29, 0xb00, 0, even, sizeof(even));
+  assert(ecm_q_count == 1); /* bounded retry, not an eternal cache */
+  select_ca(0);
+  enqueue_ecm(29, 0xb00, 0, even, sizeof(even));
+  assert(ecm_q_count == 1); /* changing context cannot suppress a fresh request */
+  ecm_q_count = ecm_q_head = ecm_q_tail = 0;
+}
+
 static void psi_packet(uint8_t *packet, unsigned pid, int cc, int start,
                        const uint8_t *payload, unsigned length)
 {
@@ -397,6 +423,7 @@ int main(void)
   test_buffer_keeps_its_key();
   test_ca_failure_and_late_response();
   test_working_ca_grace_and_lock();
+  test_ecm_repeat_suppression();
   test_psi_continuity_and_pointer();
   test_false_sync_headers();
   test_input_error_counters();

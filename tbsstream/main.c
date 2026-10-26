@@ -535,6 +535,9 @@ static void install_cw(int parity, const uint8_t key[8])
 typedef struct { uint8_t sec[1024]; int len; uint16_t sid, caid; uint32_t provid; uint64_t generation; } ecm_req_t;
 static ecm_req_t ecm_q[ECMQ_MAX];
 static int ecm_q_head = 0, ecm_q_tail = 0, ecm_q_count = 0;
+/* Full-section retransmission suppression; fresh ECM content is never delayed. */
+static ecm_req_t recent_ecm[2];
+static uint64_t recent_ecm_at[2];
 static pthread_mutex_t ecm_q_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ecm_q_cond = PTHREAD_COND_INITIALIZER;
 
@@ -547,7 +550,7 @@ static int scram_head = 0, scram_count = 0;
 static uint8_t scram_cw[SCRAM_MAX][8];
 static uint64_t scram_revision[SCRAM_MAX];
 static uint64_t input_tei, input_cc_errors, service_drops, csa_batches, csa_packets;
-static uint64_t ecm_queue_drops, ca_switch_drops, queue_full_drops;
+static uint64_t ecm_queue_drops, ca_switch_drops, queue_full_drops, ecm_repeats;
 static uint64_t sync_losses, sync_bytes, invalid_ts, psi_discontinuities;
 
 static void reset_sections(void)
@@ -578,6 +581,16 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
   uint64_t generation = ca_generation;
   pthread_mutex_unlock(&csa_mutex);
   pthread_mutex_lock(&ecm_q_mutex);
+  int parity = sec[0] == 0x81;
+  uint64_t now = monotonic_ms();
+  ecm_req_t *recent = &recent_ecm[parity];
+  if (recent->generation == generation && recent->sid == sid && recent->caid == caid &&
+      recent->provid == provid && recent->len == len && now - recent_ecm_at[parity] < 1000 &&
+      !memcmp(recent->sec, sec, len)) {
+    ecm_repeats++;
+    pthread_mutex_unlock(&ecm_q_mutex);
+    return;
+  }
   /* Do not let identical queued retransmissions age later ECM requests. */
   for (int i = 0; i < ecm_q_count; i++) {
     ecm_req_t *pending = &ecm_q[(ecm_q_head + i) % ECMQ_MAX];
@@ -592,6 +605,8 @@ static void enqueue_ecm(uint16_t sid, uint16_t caid, uint32_t provid,
     memcpy(r->sec, sec, len);
     r->len = len; r->sid = sid; r->caid = caid; r->provid = provid;
     r->generation = generation;
+    *recent = *r;
+    recent_ecm_at[parity] = now;
     ecm_q_tail = (ecm_q_tail + 1) % ECMQ_MAX;
     ecm_q_count++;
     pthread_cond_signal(&ecm_q_cond);
@@ -722,14 +737,14 @@ static void log_transport_stats(void)
   LOGV("TS stats: tei=%llu cc_errors=%llu service_drops=%llu pending=%d "
        "ecm_pending=%d ecm_drops=%llu csa_batches=%llu csa_packets=%llu "
        "sync_losses=%llu sync_bytes=%llu invalid_ts=%llu psi_discontinuities=%llu "
-       "ca_switch_drops=%llu queue_full_drops=%llu\n",
+       "ca_switch_drops=%llu queue_full_drops=%llu ecm_repeats=%llu\n",
        (unsigned long long)input_tei, (unsigned long long)input_cc_errors,
        (unsigned long long)service_drops, scram_count, queued,
        (unsigned long long)dropped, (unsigned long long)csa_batches,
        (unsigned long long)csa_packets, (unsigned long long)sync_losses,
        (unsigned long long)sync_bytes, (unsigned long long)invalid_ts,
        (unsigned long long)psi_discontinuities, (unsigned long long)ca_switch_drops,
-       (unsigned long long)queue_full_drops);
+       (unsigned long long)queue_full_drops, (unsigned long long)ecm_repeats);
   due = now + 5000;
 }
 
@@ -961,10 +976,10 @@ static void parse_pmt(const uint8_t *b, int len)
     else if (same_ca) ca_selected = selected;
     refresh_playlist(svc.sid);
     psi_due_ms = 0;
-    LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld\n",
+    LOGV("PMT: sid=%d pcr=%d video=%d audio=%d ecm=%d caid=%04X nes=%d pid=%ld ca_count=%d\n",
          svc.sid, svc.pcr_pid, svc.video_pid, svc.audio_pid,
          svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].pid : -1,
-         svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].caid : 0, svc.nes, (long)getpid());
+         svc.ca_count && ca_selected >= 0 ? svc.ca[ca_selected].caid : 0, svc.nes, (long)getpid(), svc.ca_count);
   }
 }
 
@@ -1332,6 +1347,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "LNB: --lnb-universal (9750/10600, 22 kHz auto) or --lnb-lo MHz (fixed LO, tone OFF)\n");
         fprintf(stderr, "Panel roles: --mux-only --stdout (DVB capture), "
                 "--stdin --sid N --stdout --cam-socket PATH (service), "
+                "--caid HEX --ecm-pid DEC (lock CA), "
                 "--ca-broker PATH --newcamd HOST:PORT (shared CA)\n");
         fprintf(stderr, "Uso: %s -t dvbs --freq-mhz 11836 --symbol-rate 27500000 "
                 "--newcamd 192.168.1.2:15050 --deskey <hex14bytes> --udp 239.1.1.1:1234\n", argv[0]);

@@ -19,6 +19,12 @@ class HealthTests(unittest.TestCase):
     def event(self, at, result=0, mask=3):
         self.health.ingest(f"ECM: sid=672 caid=1802 time_ms=180 result={result} cw_mask={mask} at_ms={at*1000}")
 
+    def test_locked_missing_ecm_is_not_reported_as_clear(self):
+        health = ECMHealth(None, created=0)
+        health.ingest("PMT: sid=29 ecm=-1 caid=0000 pid=1 ca_count=6")
+        self.assertTrue(health.encrypted)
+        self.assertNotEqual(health.snapshot(now=20)["state"], "clear")
+
     def test_green_requires_two_fresh_successes_and_expires(self):
         self.event(100)
         self.assertEqual(self.health.snapshot(now=101)["state"], "waiting")
