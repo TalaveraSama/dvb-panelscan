@@ -144,6 +144,11 @@ class AuthHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/static/login.js")[0], 200)
         self.assertEqual(self.request("/static/logo-discovery-kids.png")[0], 200)
 
+    def test_import_requires_admin_and_csrf(self):
+        self.assertEqual(self.request('/api/import/astra/preview',{})[0],401)
+        cookie, csrf=self.login()
+        self.assertEqual(self.request('/api/import/astra/preview',{},cookie)[0],403)
+
     def test_login_csrf_origin_and_logout(self):
         cookie, csrf = self.login()
         self.assertEqual(self.request("/api/status", cookie=cookie)[0], 200)

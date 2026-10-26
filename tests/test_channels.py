@@ -266,3 +266,64 @@ class ChannelSettingsTests(unittest.TestCase):
         self.assertEqual(self.panel.STATE['transponders'][0]['lnb_mode'],'universal')
         self.assertEqual(self.panel._norm_tp(self.panel.STATE['transponders'][1])['lnb_mode'],'manual')
         self.assertEqual(self.call('/api/transponders/a/edit',{'lnb_mode':'invalid'})[0],400)
+
+    def test_astra_preview_apply_idempotency_and_no_users_import(self):
+        from test_astra_import import options
+        body=options()
+        before=json.dumps(self.panel.STATE,sort_keys=True)
+        code,preview=self.call('/api/import/astra/preview',body)
+        self.assertEqual(code,200)
+        self.assertEqual(preview['channels'],1)
+        self.assertEqual(json.dumps(self.panel.STATE,sort_keys=True),before)
+        self.assertNotIn('DO-NOT-IMPORT',json.dumps(preview))
+        code,result=self.call('/api/import/astra/apply',{**body,'preview_token':preview['preview_token']})
+        self.assertEqual(code,200)
+        self.assertTrue((Path(self.tmp.name)/'import-backups'/result['backup']).is_file())
+        tp=next(t for t in self.panel.STATE['transponders'] if t.get('astra_id')=='tp')
+        self.assertEqual(tp['symbol_rate'],30000000)
+        self.assertEqual(tp['adapter'],8)
+        self.assertEqual(tp['lnb_mode'],'universal')
+        self.assertEqual(self.panel.STATE['channels'][tp['id']+':672']['newcamd_profile'],'default')
+        self.assertTrue(self.panel.STATE['channels'][tp['id']+':672']['enabled'])
+        self.assertEqual(self.panel.STATE['transponders'][0]['id'],'a')
+        self.assertNotIn('users',self.panel.STATE)
+        again=self.call('/api/import/astra/preview',body)[1]
+        self.assertEqual(again['transponders'][0]['action'],'actualizar')
+        self.assertEqual(self.call('/api/import/astra/apply',{**body,'preview_token':again['preview_token']})[0],200)
+        self.assertEqual(len(self.panel.STATE['transponders']),3)
+
+    def test_astra_preview_missing_mapping_stale_confirmation_and_busy(self):
+        from test_astra_import import options
+        body=options()
+        self.assertEqual(self.call('/api/import/astra/preview',{**body,'adapters':{}})[0],400)
+        self.assertEqual(self.call('/api/import/astra/apply',body)[0],409)
+        preview=self.call('/api/import/astra/preview',body)[1]
+        self.panel.STATE['transponders'][0]['name']='Changed'
+        self.assertEqual(self.call('/api/import/astra/apply',{**body,'preview_token':preview['preview_token']})[0],409)
+        with patch.object(self.panel._streams,'status',return_value=[{'running':True}]):
+            self.assertEqual(self.call('/api/import/astra/preview',body)[0],409)
+        self.panel._streams.scanning.add(0)
+        self.assertEqual(self.call('/api/import/astra/preview',body)[0],409)
+        self.panel._streams.scanning.clear()
+
+    def test_astra_account_import_requires_explicit_valid_deskey(self):
+        from test_astra_import import options
+        body=options();body.update(profiles={},import_profiles=True)
+        self.assertEqual(self.call('/api/import/astra/preview',body)[0],400)
+        body['deskey']='0102030405060708091011121314'
+        code,preview=self.call('/api/import/astra/preview',body)
+        self.assertEqual(code,200)
+        self.assertNotIn('synthetic-only',json.dumps(preview))
+        self.assertEqual(preview['profiles_created'],1)
+        self.assertEqual(self.call('/api/import/astra/apply',{**body,'preview_token':preview['preview_token']})[0],200)
+        account=next(iter(self.panel.STATE['profiles'].values()))
+        self.assertEqual(account['pass'],'synthetic-only')
+        self.assertEqual(account['deskey'],body['deskey'])
+
+    def test_astra_r_polarization_not_silently_rewritten(self):
+        from test_astra_import import options
+        body=options();body['config']['dvb_tune'][0]['polarization']='R'
+        code,preview=self.call('/api/import/astra/preview',body)
+        self.assertEqual(code,200)
+        self.assertEqual(preview['transponders'][0]['pol'],'R')
+        self.assertTrue(any('NO se convierte' in message for message in preview['warnings']))

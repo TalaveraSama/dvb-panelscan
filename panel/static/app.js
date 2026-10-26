@@ -1030,3 +1030,165 @@ $("rotateMediaToken").addEventListener("click", async () => {
     showError(error);
   }
 });
+
+// Astra input stays in RAM only. Never echo credentials or raw JSON into the page.
+let astraSource = null;
+let astraPreviewToken = "";
+function invalidateAstraPreview() {
+  astraPreviewToken = "";
+  $("astraApply").disabled = true;
+}
+function astraOptions() {
+  if (!astraSource) throw new Error("Selecciona un archivo JSON de Astra");
+  const bindings = Object.create(null);
+  document.querySelectorAll("[data-astra-mac]").forEach((input) => {
+    if (input.value === "")
+      throw new Error("Falta adaptador para " + input.dataset.astraMac);
+    const number = Number(input.value);
+    if (
+      bindings[input.dataset.astraMac] !== undefined &&
+      bindings[input.dataset.astraMac] !== number
+    )
+      throw new Error("Mapeo MAC contradictorio");
+    bindings[input.dataset.astraMac] = number;
+  });
+  const profiles = Object.create(null);
+  document.querySelectorAll("[data-astra-cam]").forEach((select) => {
+    if (select.value) profiles[select.dataset.astraCam] = select.value;
+  });
+  return {
+    config: {
+      ...astraSource,
+      softcam: $("astraCreateProfiles").checked
+        ? astraSource.softcam
+        : astraSource.softcam.map((cam) => ({
+            id: cam.id,
+            name: cam.name,
+            type: cam.type,
+          })),
+    },
+    adapters: bindings,
+    profiles,
+    import_profiles: $("astraCreateProfiles").checked,
+    deskey: $("astraDeskey").value,
+  };
+}
+$("astraImportOpen").addEventListener("click", () =>
+  $("astraImportDialog").showModal(),
+);
+$("astraImportClose").addEventListener("click", () =>
+  $("astraImportDialog").close(),
+);
+$("astraImportDialog").addEventListener("close", () => {
+  astraSource = null;
+  $("astraFile").value = "";
+  $("astraDeskey").value = "";
+  $("astraMappings").textContent = "";
+  $("astraPreviewText").textContent = "";
+  invalidateAstraPreview();
+});
+$("astraImportDialog").addEventListener("input", invalidateAstraPreview);
+$("astraFile").addEventListener("change", async () => {
+  astraSource = null;
+  invalidateAstraPreview();
+  $("astraMappings").textContent = "";
+  try {
+    const file = $("astraFile").files[0];
+    if (!file || file.size > 1900000)
+      throw new Error("El archivo debe ser JSON de menos de 1,9 MB");
+    const source = JSON.parse(await file.text());
+    if (!Array.isArray(source.dvb_tune) || source.dvb_tune.length > 256)
+      throw new Error("Falta dvb_tune o excede 256 TP");
+    const profiles = await getJSON("/api/newcamd/profiles");
+    const active = source.dvb_tune.filter((tp) => tp.enable !== false);
+    const choices =
+      '<option value="">Importar cuenta / pendiente</option>' +
+      profiles
+        .map(
+          (p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`,
+        )
+        .join("");
+    $("astraMappings").innerHTML =
+      '<h4>MAC → adaptador Linux</h4><div class="table-wrap"><table><thead><tr><th>TP Astra</th><th>MAC</th><th>Adaptador</th></tr></thead><tbody>' +
+      active
+        .map((tp) => {
+          const mac = String(tp.mac || "").toLowerCase();
+          const previous = transponders.find((t) => t.source_mac === mac);
+          return `<tr><td>${esc(tp.name)} · ${esc(tp.frequency)} ${esc(tp.polarization)}</td><td>${esc(mac)}</td><td><input type="number" min="0" max="255" step="1" data-astra-mac="${esc(mac)}" value="${esc(previous?.adapter ?? "")}" aria-label="Adaptador para ${esc(mac)}" required></td></tr>`;
+        })
+        .join("") +
+      "</tbody></table></div><h4>Softcam Astra → perfil DVB Panel</h4>" +
+      (source.softcam || [])
+        .map(
+          (cam) =>
+            `<label>${esc(cam.name || cam.id)} (${esc(cam.id)})<select data-astra-cam="${esc(cam.id)}">${choices}</select></label>`,
+        )
+        .join("");
+    astraSource = {
+      dvb_tune: source.dvb_tune,
+      make_stream: source.make_stream || [],
+      softcam: source.softcam || [],
+    };
+    $("astraPreviewText").textContent =
+      "Archivo leído. Confirma MAC/adaptadores y perfiles, después previsualiza. No se han guardado cambios.";
+  } catch (error) {
+    $("astraPreviewText").textContent = error.message;
+  }
+});
+async function runAstraImport(apply) {
+  $("astraApply").disabled = true;
+  $("astraPreview").disabled = true;
+  try {
+    const options = astraOptions();
+    if (apply) {
+      if (
+        !astraPreviewToken ||
+        !confirm(
+          "¿Aplicar la importación previsualizada? Se guardará un respaldo privado y pueden actualizarse nombres/perfiles existentes.",
+        )
+      )
+        return;
+      options.preview_token = astraPreviewToken;
+    }
+    const result = await postJSON(
+      "/api/import/astra/" + (apply ? "apply" : "preview"),
+      options,
+    );
+    $("astraPreviewText").textContent =
+      result.transponders
+        .map(
+          (t) =>
+            `${t.action}: ${t.name} → adapter${t.adapter} · ${t.frequency} ${t.pol}`,
+        )
+        .join("\n") +
+      `\nCanales: ${result.channels} · Cuentas nuevas: ${result.profiles_created} · Cuentas actualizadas: ${result.profiles_updated}\n` +
+      result.profile_bindings
+        .map((p) => `Softcam ${p.astra_cam} → ${p.name}`)
+        .join("\n") +
+      "\n" +
+      result.warnings.join("\n") +
+      (apply
+        ? "\nAplicado. Respaldo privado: " + result.backup
+        : "\nVista previa: ningún cambio guardado.");
+    if (apply) {
+      invalidateAstraPreview();
+      astraSource = null;
+      $("astraFile").value = "";
+      $("astraDeskey").value = "";
+      await loadTransponders();
+      await loadEpg();
+      await loadNewcamd();
+    } else {
+      astraPreviewToken = result.preview_token;
+      $("astraApply").disabled = false;
+    }
+  } catch (error) {
+    invalidateAstraPreview();
+    $("astraPreviewText").textContent = error.message;
+  } finally {
+    $("astraPreview").disabled = false;
+    $("astraApply").disabled = !astraPreviewToken;
+  }
+}
+$("astraPreview").addEventListener("click", () => runAstraImport(false));
+$("astraApply").addEventListener("click", () => runAstraImport(true));

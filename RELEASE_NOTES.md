@@ -1,3 +1,28 @@
+## DVB PanelScan 0.13.0 · Importación Astra / Cesbo
+
+- Importador desde el panel autenticado: archivo JSON, tabla MAC→adaptador, perfiles
+  de destino, vista previa sin guardar y aplicación confirmada de la misma entrada.
+- TP DVB-S/S2, conversión de SR ksym/s a símbolos/s, modo LNB universal explícito,
+  servicios PNR→SID, nombres/estado y cam por canal. Conserva transpondedores locales.
+- TP deshabilitados omitidos; canales deshabilitados conservan su estado; duplicados
+  TP:SID prefieren el habilitado, conflictos activos se rechazan. R no pasa a V.
+- Perfiles Newcamd: mapear a existentes, o importar cuentas con opción explícita
+  y DES key válida del archivo/key o introducida. No se adivina una DES key.
+- No importa usuarios/hashes, permisos, outputs HTTP/UDP/HLS ni autenticación Astra.
+  El navegador no envía esas secciones al servidor; los informes no muestran secretos.
+- Preview firmado ligado a archivo, opciones y estado actual; cambios requieren otra
+  vista previa. Rechaza sesiones/escaneos activos y entradas ambiguas.
+- Respaldos privados 0700/0600 y diario de recuperación: escritura fallida restaura
+  el estado previo; al reiniciar revierte una importación interrumpida.
+- 81 pruebas Python/HTTP, DOM y paquete. Pruebas de preview, CSRF, credenciales,
+  asignaciones, idempotencia, persistencia, rollback y recuperación al arranque.
+
+Límite de archivo en interfaz 1,9 MB / petición 2 MiB. Los índices adapterN siguen
+siendo numéricos; MAC es referencia de migración, no binding automático al reiniciar.
+Rescan recomendado para obtener datos actuales de emisión. Ver docs/ASTRA_IMPORT.md.
+
+---
+
 ## DVB PanelScan 0.12.0 · LNB universal automático, V/H y banda alta
 
 - Selector Modo LNB: Universal automático 9750/10600 o LO manual/fijo.

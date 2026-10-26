@@ -16,6 +16,8 @@ import copy
 import glob
 import getpass
 import hmac
+import hashlib
+import secrets
 import json
 import math
 import os
@@ -42,6 +44,7 @@ with open(os.path.join(STATIC_DIR, "logos.json"), encoding="utf-8") as _logos_fi
     LOGOS = json.load(_logos_file)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+import astra_import
 from auth import AuthStore
 from streaming import StreamManager, StreamError
 from epg import EPGStore, EITCollector, clean_text
@@ -50,6 +53,7 @@ DATA_DIR = os.environ.get("DVB_PANEL_DATA_DIR", BASE_DIR)
 os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
 
 _lock = threading.Lock()
+_import_key = secrets.token_bytes(32)
 
 STATE = {
     "transponders": [],   # cada uno puede tener "scan" (canales escaneados)
@@ -72,6 +76,7 @@ _epg = EPGStore(os.path.join(DATA_DIR, "epg.json"))
 # Persistencia
 # ---------------------------------------------------------------------------
 def _load():
+    astra_import.recover(DATA_DIR)
     for name in ("transponders", "newcamd", "profiles", "channels"):
         path = os.path.join(DATA_DIR, name + ".json")
         if os.path.isfile(path):
@@ -816,7 +821,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
             return self._send(403, {"ok": False, "error": "Origen no permitido"})
         try:
-            if not 0 <= int(self.headers.get("Content-Length", "0")) <= 65536:
+            if not 0 <= int(self.headers.get("Content-Length", "0")) <= (2097152 if urllib.parse.urlparse(self.path).path in ("/api/import/astra/preview", "/api/import/astra/apply") else 65536):
                 return self._send(413, {"ok": False, "error": "Solicitud demasiado grande"})
         except ValueError:
             return self._send(400, {"ok": False, "error": "Longitud inválida"})
@@ -848,6 +853,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if path == "/api/auth/media-token":
                 return self._send(200, {"ok": True, "token": _auth.rotate_media_token()})
+
+        if path in ("/api/import/astra/preview", "/api/import/astra/apply"):
+            try:
+                with _streams.lock:
+                    sessions = _streams.status()
+                    if sessions or _streams.scanning:
+                        return self._send(409, {"ok": False, "error": "Detén las sesiones y espera al fin de los escaneos antes de importar"})
+                    with _lock:
+                        options = {key: value for key, value in body.items() if key != "preview_token"}
+                        signed = json.dumps({"options": options, "state": {key: STATE[key] for key in astra_import.KEYS}}, sort_keys=True, ensure_ascii=False).encode()
+                        token = hmac.new(_import_key, signed, hashlib.sha256).hexdigest()
+                        planned, summary = astra_import.build(STATE, options, validate_transponder, validate_profile)
+                        if path.endswith("/preview"):
+                            return self._send(200, {"ok": True, "preview_token": token, **summary})
+                        supplied = body.get("preview_token", "")
+                        if not isinstance(supplied, str) or not hmac.compare_digest(supplied.encode(), token.encode()):
+                            return self._send(409, {"ok": False, "error": "La configuración cambió o falta vista previa; vuelve a previsualizar"})
+                        backup = astra_import.apply(DATA_DIR, STATE, planned)
+                return self._send(200, {"ok": True, "backup": backup, **summary})
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except ValueError as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            except (TypeError, KeyError, OverflowError):
+                return self._send(400, {"ok": False, "error": "Configuración/mapeo inválido; no se aplicaron cambios."})
+            except OSError:
+                return self._send(500, {"ok": False, "error": "No se pudo guardar/restaurar la importación. Conserva el respaldo privado y reinicia el servicio antes de continuar."})
 
         if path == "/api/epg/settings":
             try:

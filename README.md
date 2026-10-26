@@ -7,7 +7,15 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.12.0 · LNB universal automático
+## Actual: 0.13.0 · Importar Astra / Cesbo
+
+En el menú lateral **Importar Astra / Cesbo**, seleccionar JSON local, asignar
+MAC→adaptador y softcam→perfil. Previsualizar y confirmar antes de guardar.
+Puede importar cuentas Newcamd con DES key válida o reutilizar perfiles existentes.
+No migra usuarios ni permisos. Respaldos privados y recuperación de transacciones.
+Leer [guía de migración](docs/ASTRA_IMPORT.md) antes de aplicar.
+
+### LNB universal automático (0.12.0)
 
 Para LNB universal directo, en Editar transpondedor elegir **Universal automático
 9750/10600**. El escáner y el streaming seleccionan LO, 13/18 V para V/H y tono

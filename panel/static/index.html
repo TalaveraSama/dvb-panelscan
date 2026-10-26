@@ -23,6 +23,9 @@
         <span class="eyebrow">ESPACIO DE ADMINISTRACIÓN</span
         ><strong id="adminName">Administrador</strong>
         <div class="status-badge" id="statusBadge">cargando…</div>
+        <button class="btn" id="astraImportOpen" type="button">
+          Importar Astra / Cesbo
+        </button>
         <button class="btn" id="securityOpen" type="button">
           Seguridad y reproductores</button
         ><button class="btn" id="logoutButton" type="button">
@@ -527,6 +530,57 @@
         </p>
       </div>
       <p id="securityInfo" role="status"></p>
+    </dialog>
+    <dialog id="astraImportDialog">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">MIGRACIÓN DE CONFIGURACIÓN</div>
+          <h3>Importar Astra / Cesbo</h3>
+        </div>
+        <button class="btn" id="astraImportClose" type="button">Cerrar</button>
+      </div>
+      <p>
+        Importa TP, nombres/SID y perfiles. No importa usuarios, contraseñas de
+        acceso al panel, permisos ni salidas HTTP/HLS/UDP. Detén los canales
+        antes de previsualizar.
+      </p>
+      <p class="callout">
+        LNB universal 9750/10600. Confirma cada MAC → adaptador con el registro
+        del kernel; no se deduce por el nombre. R no se convierte a V. Los TP
+        deshabilitados se omiten. Conserva tu archivo original de forma privada.
+      </p>
+      <label
+        >Archivo JSON de Astra<input
+          type="file"
+          id="astraFile"
+          accept=".json,application/json"
+      /></label>
+      <div id="astraMappings"></div>
+      <label class="password-toggle"
+        ><input type="checkbox" id="astraCreateProfiles" /> Importar cuentas
+        Newcamd que no tengan un perfil asignado</label
+      >
+      <label
+        >DES key para cuentas que no la incluyan<input
+          id="astraDeskey"
+          type="password"
+          autocomplete="off"
+          maxlength="64"
+          placeholder="14 bytes en hexadecimal; no se adivina"
+      /></label>
+      <p class="muted">
+        Puedes mapear las softcams a perfiles existentes y no importar
+        credenciales. Si importas cuentas, el archivo se envía al servidor
+        autenticado; utiliza HTTPS o una red de confianza.
+      </p>
+      <div class="actions">
+        <button class="btn" id="astraPreview" type="button">
+          Previsualizar sin guardar</button
+        ><button class="btn primary" id="astraApply" type="button" disabled>
+          Aplicar importación
+        </button>
+      </div>
+      <pre id="astraPreviewText" class="import-report" role="status"></pre>
     </dialog>
     <script src="/static/app.js"></script>
   </body>
