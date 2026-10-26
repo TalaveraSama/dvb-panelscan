@@ -1,3 +1,14 @@
+## DVB PanelScan 0.15.1 · Pantalla dedicada de usuarios
+
+- Usuarios muestra primero la tabla de cuentas, sin formulario abierto.
+- Nuevo usuario y Editar abren el editor; Volver a usuarios lo cierra y limpia
+  contraseña y enlaces mostrados sin modificar los permisos guardados.
+- Flussonic permanece en su sección independiente. No cambia autenticación,
+  configuración, cuentas ni tokens existentes por actualizar.
+- Pruebas DOM de entrada a la sección, nuevo usuario, cierre y edición.
+
+---
+
 ## DVB PanelScan 0.15.0 · Espacios Usuarios IPTV y Flussonic
 
 - Menú lateral con Usuarios IPTV: tabla de cuentas/estado/vencimiento/permisos,

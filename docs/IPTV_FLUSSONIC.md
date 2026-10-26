@@ -140,3 +140,10 @@ Mover la interfaz no requiere recrear cuentas ni regenerar tokens. Al salir de
 Usuarios IPTV se limpian los enlaces y la contraseña mostrados, no los permisos
 guardados ni la validez de los tokens. Al salir de Flussonic se oculta la clave
 privada del backend. Guardar una cuenta sí revoca sus enlaces como antes.
+
+### Vista dedicada de usuarios
+
+El menú **Usuarios** abre solamente la tabla de cuentas. Pulsa **Nuevo usuario**
+para crear una o **Editar** en la fila de una cuenta existente. **Volver a usuarios**
+cierra el editor y limpia contraseña y enlaces mostrados sin guardar cambios.
+Flussonic y la seguridad general permanecen en sus espacios separados.

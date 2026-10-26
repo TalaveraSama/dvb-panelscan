@@ -1145,3 +1145,7 @@ select:focus-visible {
 #tab-users .card + .card {
   margin-top: 20px;
 }
+
+#iptvWorkspace > label.hidden {
+  display: none;
+}

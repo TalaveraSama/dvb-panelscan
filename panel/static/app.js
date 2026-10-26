@@ -67,7 +67,7 @@ function switchTab(tab) {
     newcamd: "Acceso condicional",
     m3u8: "Distribución de señal",
     events: "Eventos en vivo · sin historial",
-    users: "Usuarios IPTV",
+    users: "Usuarios",
     flussonic: "Integración Flussonic",
   }[tab];
   document
@@ -1277,13 +1277,29 @@ $("iptvChannels").addEventListener("change", updateIptvSelection);
 async function openIptvUsers() {
   await loadIptvUsers();
   $("iptvUsers").dispatchEvent(new Event("change"));
+  $("iptvWorkspace").classList.add("hidden");
 }
+$("iptvNew").addEventListener("click", () => {
+  $("iptvUsers").value = "";
+  $("iptvUsers").dispatchEvent(new Event("change"));
+  $("iptvWorkspace").classList.remove("hidden");
+  $("iptvEditorTitle").textContent = "Nuevo usuario";
+  $("iptvInfo").textContent = "";
+  $("iptvUsername").focus();
+});
+$("iptvEditorClose").addEventListener("click", () => {
+  $("iptvPassword").value = "";
+  clearIptvLinks();
+  $("iptvWorkspace").classList.add("hidden");
+});
 $("iptvRefresh").addEventListener("click", () =>
   openIptvUsers().catch(showError),
 );
 $("iptvUserRows").addEventListener("click", (event) => {
   const button = event.target.closest("[data-edit-iptv]");
   if (!button) return;
+  $("iptvWorkspace").classList.remove("hidden");
+  $("iptvEditorTitle").textContent = "Editar usuario";
   $("iptvUsers").value = button.dataset.editIptv;
   $("iptvUsers").dispatchEvent(new Event("change"));
   $("iptvUsername").focus();
