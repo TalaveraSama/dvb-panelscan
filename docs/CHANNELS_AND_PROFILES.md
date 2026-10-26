@@ -88,3 +88,31 @@ transcodificación, HLS, analizador de vídeo, EMM, acceso de usuarios ni progra
 de canales. La selección avanzada CAID/proveedor y la gestión temporal completa
 CW siguen pendientes. Pruebas con TS/upstream simulados no sustituyen la
 validación DVB/CA autorizada en el servidor del usuario.
+
+## Transpondedor editable y herencia de softcam (0.11.0)
+
+En Dashboard, **Editar** junto a Escanear y Borrar carga el TP en el formulario.
+Corregir frecuencia, LO, SR, polarización, tipo, adaptador, tiempo, nombre o perfil,
+y pulsar Guardar cambios. Cancelar no modifica el servidor. Se conserva el ID del
+TP: no se borran servicios, overrides TP:SID ni el EPG guardado por editar.
+
+**Softcam / perfil Newcamd predeterminado** elige entre el global y los perfiles
+creados en Acceso condicional. Se usa cuando un canal no tiene excepción propia.
+En Editar canal, **Heredar del transpondedor** elimina la excepción; seleccionar
+**Predeterminado** explícitamente fuerza el global, no el del TP. Las asignaciones
+explícitas de versiones anteriores se conservan y no se sobreescriben en bloque.
+El perfil efectivo se usa para arrancar el broker, mostrar estado y detener
+servicios cuando se modifica una cuenta. No se elimina un perfil referido por un TP.
+
+Para cambiar sintonía o perfil, detener primero las sesiones de los adaptadores
+implicados y esperar al fin del escaneo. La API devuelve 409 sin guardar si están
+ocupados; cambiar solo el nombre es posible durante streaming (no durante scan).
+No se resintoniza ni se corta el flujo silenciosamente al guardar. Si cambió la
+señal, reescanear para verificar SIDs; los canales/EPG anteriores se conservan pero
+pueden no corresponder. Para otro satélite es preferible crear un TP independiente.
+
+API POST `/api/transponders/ID/edit`: actualización parcial de campos permitidos;
+rechaza reemplazar ID/scan, valores inválidos y perfiles inexistentes. Se mantiene
+el POST de creación. Borrar es una operación separada y destructiva con advertencia.
+La palabra softcam aquí designa perfiles Newcamd; no se añadió otro protocolo,
+conmutación DiSEqC ni selección de tono de 22 kHz.

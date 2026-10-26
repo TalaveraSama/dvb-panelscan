@@ -101,6 +101,7 @@ async function loadStatus() {
 
 /* ------------------------- Transponders (dashboard) ------------------------- */
 let transponders = [];
+let editingTransponder = null;
 let adapters = [];
 
 async function loadTransponders() {
@@ -117,7 +118,7 @@ async function loadTransponders() {
   const used = new Set(transponders.map((t) => t.adapter));
   const free = (adapters.find((a) => !used.has(a.adapter)) || { adapter: 0 })
     .adapter;
-  $("tp_adapter").value = free;
+  if (!editingTransponder) $("tp_adapter").value = free;
 }
 
 function channelsTable(services, showTpCol) {
@@ -158,6 +159,7 @@ function renderTransponders() {
     return;
   }
   list.innerHTML = ads
+    .sort((a, b) => Number(a.adapter) - Number(b.adapter))
     .map((a) => {
       const tp = a.tp;
       if (!tp) {
@@ -181,16 +183,24 @@ function renderTransponders() {
         <h2>📡 Adapter ${esc(a.adapter)} · ${esc(tp.name)}</h2>
         <div class="actions">
           <span class="muted small">${esc(tpInfo(tp))}</span>
+          <button class="btn small" data-edit-tp="${esc(tp.id)}">Editar</button>
           <button class="btn small primary" data-scan="${esc(tp.id)}">Escanear</button>
           <button class="btn small danger" data-del="${esc(tp.id)}">Borrar</button>
         </div>
       </div>
-      <div class="muted small">${info}</div>
+      <div class="muted small">${info} · Softcam: ${esc(newcamdProfiles.find((p) => p.id === (tp.newcamd_profile || "default"))?.name || tp.newcamd_profile || "Predeterminado global")}</div>
       ${scan ? channelsTable(scan.services, false) : '<div class="muted small">Pulsa "Escanear" para listar los canales de este transponder.</div>'}
     </div>`;
     })
     .join("");
 
+  list
+    .querySelectorAll("[data-edit-tp]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        editTransponder(button.dataset.editTp).catch(showError),
+      ),
+    );
   list
     .querySelectorAll("[data-scan]")
     .forEach((b) =>
@@ -203,6 +213,54 @@ function renderTransponders() {
     );
 }
 
+function renderTpProfiles(selected = $("tp_profile").value || "default") {
+  $("tp_profile").innerHTML =
+    newcamdProfiles
+      .map(
+        (p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`,
+      )
+      .join("") || '<option value="default">Predeterminado global</option>';
+  $("tp_profile").value = selected;
+}
+async function editTransponder(id) {
+  const tp = transponders.find((t) => t.id === id);
+  if (!tp) throw new Error("Transpondedor no encontrado");
+  newcamdProfiles = await getJSON("/api/newcamd/profiles");
+  editingTransponder = id;
+  for (const [field, key] of [
+    ["name", "name"],
+    ["type", "type"],
+    ["freq", "freq_mhz"],
+    ["lnb", "lnb_lo"],
+    ["sr", "symbol_rate"],
+    ["pol", "pol"],
+    ["adapter", "adapter"],
+    ["timeout", "timeout"],
+  ]) {
+    $("tp_" + field).value =
+      tp[key] ?? { lnb: 9750, timeout: 15, sr: 0 }[field] ?? "";
+  }
+  renderTpProfiles(tp.newcamd_profile || "default");
+  $("tpForm").style.display = "";
+  $("tpSave").textContent = "Guardar cambios";
+  $("tpCancel").classList.remove("hidden");
+  $("tpEditInfo").textContent =
+    "Editando " +
+    tp.name +
+    ". Se conservan ID, canales, perfiles por canal y EPG. Detén el adaptador antes de cambiar sintonía o softcam; después conviene reescanear si cambiaste la señal.";
+  $("tpForm").scrollIntoView?.({ behavior: "smooth", block: "center" });
+  $("tp_name").focus();
+}
+function cancelTransponderEdit() {
+  editingTransponder = null;
+  $("tpSave").textContent = "Agregar";
+  $("tpCancel").classList.add("hidden");
+  $("tpEditInfo").textContent =
+    "Los canales sin excepción propia heredan el perfil del transpondedor.";
+  $("tpForm").reset();
+}
+$("tpCancel").addEventListener("click", cancelTransponderEdit);
+
 async function addTransponder(e) {
   e.preventDefault();
   const tp = {
@@ -214,18 +272,30 @@ async function addTransponder(e) {
     pol: $("tp_pol").value,
     adapter: parseInt($("tp_adapter").value, 10) || 0,
     timeout: parseInt($("tp_timeout").value, 10) || 15,
+    newcamd_profile: $("tp_profile").value || "default",
   };
-  const r = await postJSON("/api/transponders", tp);
+  const r = await postJSON(
+    editingTransponder
+      ? "/api/transponders/" + encodeURIComponent(editingTransponder) + "/edit"
+      : "/api/transponders",
+    tp,
+  );
   if (!r.ok) {
     alert("Error: " + r.error);
     return;
   }
-  $("tp_name").value = "";
-  loadTransponders();
+  cancelTransponderEdit();
+  await loadTransponders();
+  await loadEpg();
 }
 
 async function deleteTransponder(id) {
-  if (!confirm("¿Borrar este transponder y sus canales?")) return;
+  if (
+    !confirm(
+      "¿Borrar definitivamente este transponder y sus canales? Para corregir parámetros o softcam utiliza Editar, no Borrar.",
+    )
+  )
+    return;
   await postJSON("/api/transponders/" + id + "/delete", {});
   loadTransponders();
 }
@@ -511,6 +581,8 @@ async function loadProfileForm(identity) {
 }
 async function loadNewcamd() {
   newcamdProfiles = await getJSON("/api/newcamd/profiles");
+  renderTpProfiles();
+  renderTransponders();
   $("nc_profile").innerHTML = newcamdProfiles
     .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
     .join("");
@@ -573,10 +645,14 @@ async function editChannel(identity) {
   $("ch_number").value = channel.number || "";
   $("ch_logo").value = channel.logo || "";
   $("ch_enabled").checked = channel.enabled !== false;
-  $("ch_profile").innerHTML = newcamdProfiles
-    .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
-    .join("");
-  $("ch_profile").value = channel.newcamd_profile || "default";
+  $("ch_profile").innerHTML =
+    '<option value="">Heredar del transpondedor</option>' +
+    newcamdProfiles
+      .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
+      .join("");
+  $("ch_profile").value = channel.profile_inherited
+    ? ""
+    : channel.newcamd_profile || "default";
   $("channelEditor").showModal();
 }
 $("channelForm").addEventListener("submit", async (e) => {

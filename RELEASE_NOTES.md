@@ -1,3 +1,26 @@
+## DVB PanelScan 0.11.0 · Editar transpondedores y perfil softcam por TP
+
+- Botón Editar junto a Escanear/Borrar. Reutiliza el formulario con Guardar cambios
+  y Cancelar; conserva ID, servicios escaneados, metadatos por canal y EPG.
+- Perfil Newcamd predeterminado por transpondedor al agregar o editar. Los canales
+  sin excepción heredan ese perfil; Editar canal permite Heredar del transpondedor,
+  Predeterminado global o cualquier perfil concreto.
+- La selección efectiva se usa en el broker real, estados y etiquetas. No se puede
+  eliminar un perfil asignado a un TP, incluso si todavía no tiene canales.
+- Se rechazan cambios de sintonía/perfil con sesiones activas en los adaptadores
+  afectados y cambios durante escaneos. No se interrumpen canales en silencio.
+- Validación de parámetros y campos permitidos. Adaptadores ordenados numéricamente.
+- Borrar sigue siendo destructivo y lo advierte; para corregir valores se usa Editar.
+- 73 pruebas Python/HTTP más DOM de edición no destructiva, herencia/excepciones,
+  perfil real del broker, preservación de EPG y rechazo por adaptadores ocupados.
+
+Cambiar de señal conserva los datos previos hasta reescanear: no garantiza que
+los SIDs/programas anteriores correspondan a la nueva señal. Si se cambia satélite
+por otro diferente, es preferible crear otro TP. No se añaden DiSEqC, 22 kHz ni
+protocolos de softcam distintos de Newcamd en esta versión.
+
+---
+
 ## DVB PanelScan 0.10.0 · Mosaico de canales por transpondedor
 
 - Vista compacta en Canales y EPG inspirada en monitores de headend, con diseño

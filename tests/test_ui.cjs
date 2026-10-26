@@ -32,6 +32,7 @@ w.fetch = async (url, options={}) => {
   if (options.method === 'POST') {
     assert.equal(options.headers['X-CSRF-Token'],'test-csrf');
     const body = JSON.parse(options.body); requests.push([url,body]);
+    if (url === '/api/transponders/tp/edit') Object.assign(tp,body);
     if (url === '/api/channels/tp%3A672/edit') Object.assign(service,body);
     value = {ok:true,id:body.id || 'new-profile',token:url === '/api/auth/media-token' ? 'test-media-token' : undefined};
   } else if (url === '/api/auth/session') value = {username:'admin',csrf:'test-csrf'};
@@ -121,6 +122,16 @@ const tick = () => new Promise(resolve=>setTimeout(resolve,10));
   w.document.querySelector('[data-tab="dashboard"]').click();
   assert(sources[1].closed);
   assert.equal(w.document.getElementById('eventsBody').textContent,'');
+  w.document.querySelector('[data-edit-tp="tp"]').click(); await tick();
+  assert.equal(w.document.getElementById('tpSave').textContent,'Guardar cambios');
+  assert.equal(w.document.getElementById('tp_freq').value,'10970');
+  w.document.getElementById('tp_profile').value='p1';
+  w.document.getElementById('tp_name').value='Mux editado';
+  w.document.getElementById('tpForm').dispatchEvent(new w.Event('submit',{cancelable:true})); await tick();
+  assert(requests.some(([url,body])=>url==='/api/transponders/tp/edit' && body.name==='Mux editado' && body.newcamd_profile==='p1'));
+  assert(!requests.some(([url])=>url==='/api/transponders/tp/delete'));
+  assert.equal(tp.scan.services[0].sid,672);
+  assert.equal(w.document.getElementById('tpSave').textContent,'Agregar');
   assert.equal(w.document.getElementById('adminName').textContent,'admin');
   w.document.getElementById('securityOpen').click();
   assert(w.document.getElementById('securityDialog').open);

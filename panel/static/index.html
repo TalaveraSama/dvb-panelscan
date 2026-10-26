@@ -171,7 +171,20 @@
               >Tiempo (s)
               <input id="tp_timeout" type="number" value="15" min="1"
             /></label>
-            <button type="submit" class="btn primary">Agregar</button>
+            <label
+              >Softcam / perfil Newcamd predeterminado<select id="tp_profile">
+                <option value="default">Predeterminado global</option>
+              </select></label
+            >
+            <button type="submit" class="btn primary" id="tpSave">
+              Agregar</button
+            ><button type="button" class="btn hidden" id="tpCancel">
+              Cancelar edición
+            </button>
+            <p id="tpEditInfo" class="muted">
+              Los canales sin excepción propia heredan el perfil del
+              transpondedor.
+            </p>
           </form>
         </section>
 

@@ -17,6 +17,7 @@ import glob
 import getpass
 import hmac
 import json
+import math
 import os
 import platform
 import shutil
@@ -154,6 +155,34 @@ def _norm_tp(tp):
     }
 
 
+def validate_transponder(body):
+    for key in ("adapter", "timeout", "symbol_rate"):
+        if key in body and (isinstance(body[key], bool) or body[key] is None or float(body[key]) != int(body[key])):
+            raise ValueError("Valor entero inválido: " + key)
+    if "timeout" in body and not 1 <= int(body["timeout"]) <= 600:
+        raise ValueError("Tiempo inválido (1–600 segundos)")
+    tp = _norm_tp(body)
+    if (body.get("type", "dvbs2") not in VALID_TYPES or not math.isfinite(tp["freq_mhz"])
+            or not 0 < tp["freq_mhz"] <= 100000 or not math.isfinite(tp["lnb_lo"])
+            or not 0 <= tp["lnb_lo"] <= 100000 or not 0 <= tp["adapter"] <= 255
+            or not 1 <= tp["timeout"] <= 600 or not 0 <= tp["symbol_rate"] <= 100000000
+            or tp["pol"] not in ("V", "H", "L", "R")):
+        raise ValueError("Parámetros de transpondedor inválidos")
+    name = body.get("name") or "%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"])
+    if not isinstance(name, str) or len(name) > 120:
+        raise ValueError("Nombre inválido (máximo 120 caracteres)")
+    tp["name"] = name.strip()
+    if not tp["name"]:
+        raise ValueError("Nombre requerido")
+    tp["newcamd_profile"] = body.get("newcamd_profile", "default")
+    profile_config(tp["newcamd_profile"])
+    return tp
+
+
+def channel_profile(tp, sid):
+    return STATE["channels"].get(channel_id(tp, sid), {}).get("newcamd_profile", tp.get("newcamd_profile", "default"))
+
+
 def _scan_cmd(binary, tp):
     cmd = [binary, "-t", tp["type"], "--json",
            "--freq-mhz", str(tp["freq_mhz"]),
@@ -229,7 +258,8 @@ def channel_view(tp, service):
     result.update(channel_id=identity, sid=service["sid"])
     result.setdefault("logo", LOGOS.get(" ".join(str(result.get("name", "")).casefold().split()), ""))
     result.setdefault("enabled", True)
-    result.setdefault("newcamd_profile", "default")
+    result["profile_inherited"] = "newcamd_profile" not in STATE["channels"].get(identity, {})
+    result["newcamd_profile"] = channel_profile(tp, service["sid"])
     profile = (STATE["newcamd"] if result["newcamd_profile"] == "default" else
                STATE["profiles"].get(result["newcamd_profile"], {}))
     events = _epg.events_for(identity)
@@ -283,7 +313,7 @@ def validate_profile(body, previous=None):
 
 def stop_profile_channels(profile):
     for session in _streams.status():
-        if STATE["channels"].get(session["channel_id"], {}).get("newcamd_profile", "default") == profile:
+        if next((channel_profile(t, int(session["channel_id"].split(":")[-1])) for t in STATE["transponders"] if session["channel_id"].startswith(t["id"] + ":")), "default") == profile:
             _streams.stop_channel(session["channel_id"])
 
 
@@ -461,7 +491,7 @@ def _session_start(tp, nc=None, udp=(), http_port=0, sid=None, pinned=False):
     if not settings.get("enabled", True):
         raise StreamError("Canal deshabilitado", 403)
     if nc is None:
-        nc = profile_config(settings.get("newcamd_profile", "default"))
+        nc = profile_config(channel_profile(tp, sid))
     tuning = [binary, "-t", normalized["type"], "--freq-mhz", str(normalized["freq_mhz"]),
               "--lnb-lo", str(normalized["lnb_lo"]), "--pol", normalized["pol"],
               "-a", str(normalized["adapter"]), "-T", str(normalized["timeout"])]
@@ -513,7 +543,8 @@ def stream_status():
     sessions = _streams.status()
     for session in sessions:
         settings = STATE["channels"].get(session["channel_id"], {})
-        profile_id = settings.get("newcamd_profile", "default")
+        tp = next((t for t in STATE["transponders"] if session["channel_id"].startswith(t["id"] + ":")), {})
+        profile_id = settings.get("newcamd_profile", tp.get("newcamd_profile", "default"))
         profile = STATE["newcamd"] if profile_id == "default" else STATE["profiles"].get(profile_id, {})
         session.update(newcamd_profile=profile_id, profile_name=profile.get("name") or profile_id)
     active = [s for s in sessions if s["running"]]
@@ -823,14 +854,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, {"ok": False, "error": "No se pudo guardar el EPG"})
 
         if path == "/api/transponders":
-            tp = _norm_tp(body)
-            tp["id"] = uuid.uuid4().hex[:8]
-            tp["name"] = body.get("name") or ("%s %s%s" % (tp["type"].upper(), tp["freq_mhz"], tp["pol"]))
-            tp["scan"] = None
+            try:
+                tp = validate_transponder(body)
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except (ValueError, TypeError, OverflowError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
+            tp.update(id=uuid.uuid4().hex[:8], scan=None)
             with _lock:
                 STATE["transponders"].append(tp)
                 _save("transponders")
             return self._send(200, {"ok": True, "transponder": tp})
+
+        if path.startswith("/api/transponders/") and path.endswith("/edit"):
+            tid = path[len("/api/transponders/"):-len("/edit")]
+            try:
+                with _streams.lock:
+                    sessions = _streams.status()
+                    with _lock:
+                        current = _find_tp(tid)
+                        if current is None:
+                            return self._send(404, {"ok": False, "error": "Transpondedor no encontrado"})
+                        if set(body) - set(_norm_tp(current)) - {"name", "newcamd_profile"}:
+                            raise ValueError("Campos de transpondedor desconocidos")
+                        updated = validate_transponder({**current, **body})
+                        tuning_changed = any(updated[key] != _norm_tp(current)[key] for key in _norm_tp(current))
+                        changed = tuning_changed or updated["newcamd_profile"] != current.get("newcamd_profile", "default")
+                        if current.get("adapter", 0) in _streams.scanning or updated["adapter"] in _streams.scanning or (changed and any(s["adapter"] in (current.get("adapter", 0), updated["adapter"]) for s in sessions)):
+                            return self._send(409, {"ok": False, "error": "Detén los canales de los adaptadores implicados y espera a que termine el escaneo antes de editar"})
+                        # Keep identity, scan, channel overrides and EPG. Never delete/recreate.
+                        current.update(updated)
+                        _save("transponders")
+                        result = copy.deepcopy(current)
+                return self._send(200, {"ok": True, "transponder": result, "rescan_recommended": tuning_changed})
+            except StreamError as error:
+                return self._send(error.status, {"ok": False, "error": str(error)})
+            except (ValueError, TypeError, OverflowError) as error:
+                return self._send(400, {"ok": False, "error": str(error)})
 
         if path.startswith("/api/transponders/") and path.endswith("/delete"):
             tid = path[len("/api/transponders/"):-len("/delete")]
@@ -872,7 +932,9 @@ class Handler(BaseHTTPRequestHandler):
                     url = urllib.parse.urlsplit(settings["logo"])
                     if settings["logo"] not in LOGOS.values() and (url.scheme not in ("http", "https") or not url.netloc):
                         raise ValueError("Logo debe ser URL http/https")
-                profile_config(settings.get("newcamd_profile", "default"))
+                if settings.get("newcamd_profile") == "":
+                    settings.pop("newcamd_profile", None)
+                profile_config(settings.get("newcamd_profile", tp.get("newcamd_profile", "default")))
                 with _lock:
                     STATE["channels"][identity] = settings
                     _save("channels")
@@ -904,7 +966,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/newcamd/profiles/") and path.endswith("/delete"):
             identity = path[len("/api/newcamd/profiles/"):-len("/delete")]
-            if identity == "default" or any(s.get("newcamd_profile", "default") == identity for s in STATE["channels"].values()):
+            if identity == "default" or any(t.get("newcamd_profile", "default") == identity for t in STATE["transponders"]) or any(s.get("newcamd_profile", "default") == identity for s in STATE["channels"].values()):
                 return self._send(409, {"ok": False, "error": "Perfil predeterminado o asignado; reasigna sus canales primero"})
             with _lock:
                 if identity not in STATE["profiles"]:

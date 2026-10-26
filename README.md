@@ -7,7 +7,16 @@ para headends IP→analógico**.
 Desarrollado reutilizando lógica de [TVHeadend](https://github.com/tvheadend/tvheadend)
 (protocolo newcamd `cwc.c`, descrambler CSA `tvhcsa.c`, demux/PSI `dvb_psi`).
 
-## Actual: 0.10.0 · Mosaico de canales
+## Actual: 0.11.0 · Editar transpondedores y softcam por TP
+
+Editar en Dashboard permite corregir parámetros sin borrar el TP ni sus canales.
+Elegir un perfil Newcamd predeterminado por transpondedor; cada canal puede heredarlo
+u optar por otro perfil. La selección se usa en el broker y se conserva al reiniciar.
+Antes de cambiar sintonía o perfil detener los canales del adaptador; reescanear
+si cambió la señal. Borrar sigue eliminando el TP y sus canales.
+Ver [canales y perfiles](docs/CHANNELS_AND_PROFILES.md).
+
+### Mosaico de canales (0.10.0)
 
 Canales y EPG incluye vista Mosaico/Tabla con grupos por transpondedor, tarjetas
 compactas, estados ECM/TS y bitrate calculado a partir de bytes recibidos. Los

@@ -198,3 +198,58 @@ class ChannelSettingsTests(unittest.TestCase):
         self.assertEqual(groups[0]['symbol_rate'],30000000)
         self.assertEqual(groups[0]['services'][0]['channel_id'],'a:672')
         self.assertEqual(groups[1]['services'][0]['channel_id'],'b:672')
+
+    def test_edit_transponder_preserves_scan_overrides_epg_and_identity(self):
+        import time
+        self.call('/api/channels/a:672/edit',{'name':'Conservar','group':'Mi grupo'})
+        self.panel._epg.put('a:672',{'event_id':1,'start':int(time.time())+100,'stop':int(time.time())+200,'title':'EPG'})
+        code,result=self.call('/api/transponders/a/edit',{'name':'Amazonas','freq_mhz':12230,'lnb_lo':10750,'symbol_rate':30000000,'type':'dvbs'})
+        self.assertEqual(code,200)
+        self.assertEqual(result['transponder']['id'],'a')
+        self.assertEqual(result['transponder']['scan']['services'][0]['sid'],672)
+        self.panel._load()
+        self.assertEqual(self.panel.STATE['transponders'][0]['freq_mhz'],12230)
+        self.assertEqual(self.panel.transponder_views()[0]['scan']['services'][0]['name'],'Conservar')
+        self.assertEqual(len(self.panel._epg.events_for('a:672')),1)
+        self.assertEqual(len(self.panel.STATE['transponders']),2)
+
+    def test_tp_profile_inherited_overridden_and_used_in_broker(self):
+        identity=self.profile()
+        self.assertEqual(self.call('/api/transponders/a/edit',{'newcamd_profile':identity})[0],200)
+        view=self.panel.transponder_views()[0]['scan']['services'][0]
+        self.assertTrue(view['profile_inherited'])
+        self.assertEqual(view['newcamd_profile'],identity)
+        tp=self.panel.STATE['transponders'][0]
+        with patch.object(self.panel,'find_tbsstream',return_value='/bin/true'),patch.object(self.panel._streams,'acquire') as acquire:
+            self.panel._session_start(tp,sid=672)
+            args=acquire.call_args.kwargs['broker_command']
+            self.assertEqual(args[args.index('--user')+1],'user')
+        self.assertEqual(self.call('/api/newcamd/profiles/'+identity+'/delete',{})[0],409)
+        self.call('/api/channels/a:672/edit',{'newcamd_profile':'default'})
+        view=self.panel.transponder_views()[0]['scan']['services'][0]
+        self.assertFalse(view['profile_inherited'])
+        self.assertEqual(view['newcamd_profile'],'default')
+        self.call('/api/channels/a:672/edit',{'newcamd_profile':''})
+        self.assertEqual(self.panel.channel_profile(tp,672),identity)
+        self.assertEqual(self.panel.transponder_views()[1]['scan']['services'][0]['newcamd_profile'],'default')
+
+    def test_tp_edit_rejects_active_scan_invalid_and_unknown_fields(self):
+        with patch.object(self.panel._streams,'status',return_value=[{'adapter':0,'channel_id':'a:672'}]):
+            self.assertEqual(self.call('/api/transponders/a/edit',{'freq_mhz':12230})[0],409)
+            self.assertEqual(self.call('/api/transponders/a/edit',{'name':'Solo nombre'})[0],200)
+        self.panel._streams.scanning.add(0)
+        self.assertEqual(self.call('/api/transponders/a/edit',{'name':'No'})[0],409)
+        self.panel._streams.scanning.clear()
+        for body in ({'id':'otro'},{'scan':None},{'adapter':-1},{'freq_mhz':float('nan')},{'timeout':0},{'newcamd_profile':'missing'}):
+            self.assertEqual(self.call('/api/transponders/a/edit',body)[0],400)
+        self.assertEqual(self.call('/api/transponders/missing/edit',{'name':'No'})[0],404)
+        self.assertEqual(self.panel.STATE['transponders'][0]['freq_mhz'],10970)
+
+    def test_new_tp_profile_is_persisted_and_referenced(self):
+        identity=self.profile()
+        code,result=self.call('/api/transponders',{'type':'dvbs','freq_mhz':12230,'lnb_lo':10750,'symbol_rate':30000000,'newcamd_profile':identity})
+        self.assertEqual(code,200)
+        self.panel._load()
+        tp=next(t for t in self.panel.STATE['transponders'] if t['id']==result['transponder']['id'])
+        self.assertEqual(tp['newcamd_profile'],identity)
+        self.assertEqual(self.call('/api/newcamd/profiles/'+identity+'/delete',{})[0],409)
